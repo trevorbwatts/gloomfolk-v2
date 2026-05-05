@@ -6,6 +6,8 @@
     "packages/*"
   ],
   "scripts": {
+    "dev:server": "npm --workspace @gloomfolk/server run dev",
+    "dev:client": "npm --workspace @gloomfolk/client run dev",
     "test": "npm test --workspaces --if-present",
     "typecheck": "tsc -b"
   },

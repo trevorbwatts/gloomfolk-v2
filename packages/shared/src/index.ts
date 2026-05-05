@@ -2,3 +2,7 @@ export * from './cards/index.js';
 export * from './characters/index.js';
 export * from './modifiers/index.js';
 export * from './monsters/index.js';
+export * from './hex.js';
+export * from './messages.js';
+export * from './scenarios/index.js';
+export * from './decks/index.js';

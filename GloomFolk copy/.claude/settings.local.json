@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun --version)",
+      "Bash(pnpm --version)",
+      "Bash(xargs ls *)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(npm run *)",
+      "Bash(npm test *)"
+    ]
+  }
+}

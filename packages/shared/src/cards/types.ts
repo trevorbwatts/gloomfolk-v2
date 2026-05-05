@@ -26,7 +26,11 @@ export type CardLevel = 1 | 'X' | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
  */
 export type AmountRef =
   | { readonly kind: 'hexes-moved-this-turn' }
-  | { readonly kind: 'damage-dealt-this-turn' };
+  | { readonly kind: 'damage-dealt-this-turn' }
+  /** The Shield value of the current attack's target. Resolves to 0 if the
+      target has no Shield. `offset` is added to the resolved value
+      (e.g. "X+2" → offset: 2). */
+  | { readonly kind: 'target-shield-value'; readonly offset?: number };
 
 /** Either a fixed number or a reference to a turn-state value. */
 export type Amount = number | AmountRef;
@@ -56,6 +60,7 @@ export type AttackTarget =
   | {
       readonly kind: 'ranged';
       readonly range: number;
+      readonly rangeNode?: NodeShape;
       /** Number of distinct enemies/figures the ability may target.
           Default 1 if omitted. */
       readonly targets?: number;
@@ -106,7 +111,15 @@ export interface AttackConditionRider {
 }
 
 /** A condition evaluated per-target during a multi-target attack. */
-export type TargetCondition = { readonly kind: 'target-undamaged' };
+export type TargetCondition =
+  | { readonly kind: 'target-undamaged' }
+  /** Target is adjacent to at least one of the acting player's allies. */
+  | { readonly kind: 'target-adjacent-to-your-ally' }
+  /** Target has no adjacent allies of its own (i.e. no other enemy figures
+      sharing its side adjacent to it). */
+  | { readonly kind: 'target-isolated-from-allies' }
+  /** Conjunction: all listed conditions must be satisfied for the same target. */
+  | { readonly kind: 'all-of'; readonly conditions: readonly TargetCondition[] };
 
 /** A bonus applied to the attack against any individual target that satisfies
     the condition. Evaluated per target; targets that do not match get no
@@ -115,6 +128,10 @@ export interface TargetConditionalBonus {
   readonly condition: TargetCondition;
   readonly attackBonus?: number;
   readonly pierce?: PierceModifier;
+  /** Roll the attack against this target with advantage (draw two attack
+      modifier cards, take the better). */
+  readonly advantage?: boolean;
+  readonly gainExp?: number;
 }
 
 export interface AttackModifiers {
@@ -156,7 +173,16 @@ export type ConditionalCause =
 export type PersistentTrigger =
   | { readonly kind: 'attack-targets-self' }
   | { readonly kind: 'damage-suffered' }
-  | { readonly kind: 'move-ability-performed' };
+  | { readonly kind: 'move-ability-performed' }
+  /** The acting player performs an attack whose target has no adjacent
+      allies of its own. */
+  | { readonly kind: 'attack-against-isolated-enemy' }
+  /** The acting player performs a melee attack against a target that has
+      Shield. */
+  | { readonly kind: 'melee-attack-against-shielded-enemy' }
+  /** The acting player performs an attack while they have the Invisible
+      condition. */
+  | { readonly kind: 'attack-while-invisible' };
 
 export type HealTarget = { readonly kind: 'self' };
 
@@ -186,6 +212,15 @@ export type AbilityStep =
       readonly type: 'move';
       readonly amount: Amount;
       readonly traits?: readonly MoveTrait[];
+      /** If true, the actor picks up loot from each hex entered during this
+          move ability. Loot is grabbed per hex as it is entered, so a hex
+          whose loot would be triggered/removed by passing through is still
+          collected by the moving figure. */
+      readonly lootEnteredHexes?: boolean;
+      /** If true, the actor may choose, per hex entered, not to spring traps
+          in hexes entered during this move ability. Untriggered traps remain
+          in place. */
+      readonly mayBypassTraps?: boolean;
       readonly node?: NodeShape;
       readonly mandatory?: boolean;
     }
@@ -232,8 +267,9 @@ export type AbilityStep =
       readonly type: 'apply-condition';
       readonly condition: Condition;
       /** Targeting for a stand-alone condition apply (e.g. "Stun all enemies
-          at range 1"). Omit when this step rides on the prior attack. */
-      readonly target?: AttackTarget;
+          at range 1", "Apply Invisible to self"). Omit when this step rides
+          on the prior attack. */
+      readonly target?: AttackTarget | { readonly kind: 'self' };
       readonly node?: NodeShape;
       readonly mandatory?: boolean;
     }
@@ -288,14 +324,61 @@ export type AbilityStep =
       readonly mandatory?: boolean;
     }
   | {
-      /** Add a flat attack bonus to a future attack ability. `appliesTo`
-          specifies the scope: 'next-attack-ability' adds the bonus to every
-          sub-attack of the actor's next attack ability and is consumed by
-          that ability (or expires at the round bound, whichever comes
-          first). */
+      /** Add a bonus to one or more future attack abilities. At least one of
+          `bonusAmount` or `pierceBonus` must be set.
+          `appliesTo`:
+            - 'next-attack-ability': bonus applies to every sub-attack of the
+              actor's next attack ability and is consumed by that ability
+              (or expires at the round bound, whichever comes first).
+            - 'all-attacks-this-round': bonus applies to every attack the
+              actor performs for the remainder of the round.
+            - 'while-persistent-active': the enclosing half is
+              persistent-tracked; the bonus is the active bonus and applies
+              to every qualifying attack while use slots remain. The
+              persistent-tracked half's `persistentTrigger` governs slot
+              advancement.
+          `attackKind`: optional filter — if set, the bonus only applies to
+          attacks of that kind (e.g. only ranged attacks).
+          `targetCondition`: optional per-target filter — if set, the bonus
+          only applies to attacks whose target satisfies the condition. */
       readonly type: 'modify-future-attack';
-      readonly bonusAmount: number;
-      readonly appliesTo: 'next-attack-ability';
+      readonly bonusAmount?: Amount;
+      readonly pierceBonus?: number;
+      /** If true, the attack value is doubled when this modifier resolves.
+          Resolved before flat `bonusAmount` is added. */
+      readonly doubleAttack?: boolean;
+      readonly appliesTo:
+        | 'next-attack-ability'
+        | 'all-attacks-this-round'
+        | 'while-persistent-active';
+      readonly attackKind?: 'ranged' | 'melee';
+      readonly targetCondition?: TargetCondition;
+      readonly mandatory?: boolean;
+    }
+  | {
+      /** Take temporary control of a target enemy and force it to perform a
+          basic move. The enemy moves under the actor's direction up to
+          `moveAmount` hexes using its own movement rules.
+          `endConstraint`:
+            - 'adjacent-to-actor': the controlled figure's path must end in
+              a hex adjacent to the actor. */
+      readonly type: 'control-enemy-move';
+      readonly target: AttackTarget;
+      readonly moveAmount: number;
+      readonly endConstraint?: 'adjacent-to-actor';
+      readonly node?: NodeShape;
+      readonly mandatory?: boolean;
+    }
+  | {
+      /** Destroy one trap in a qualifying hex. Optional — if no qualifying
+          trap is available (or the player chooses not to), the step is
+          skipped and `gainExp` is not awarded.
+          `target.kind`:
+            - 'hex-entered-this-move-ability': any hex the actor entered
+              during their most recent move ability this turn. */
+      readonly type: 'destroy-trap';
+      readonly target: { readonly kind: 'hex-entered-this-move-ability' };
+      readonly gainExp?: number;
       readonly mandatory?: boolean;
     }
   | {
@@ -324,14 +407,20 @@ export interface CardHalf {
   /** Only set for `persistent-tracked`: number of charge slots on the printed card. */
   readonly trackedUses?: number;
   /**
-   * For persistent-tracked halves: EXP awarded at each *transition* between
-   * use slots. Length = `trackedUses - 1`. Index `i` is the EXP gained when
-   * the token moves from slot `i+1` to slot `i+2`. `null` = no EXP awarded
-   * for that transition.
+   * For persistent-tracked halves: EXP awarded as the use-slot token
+   * advances. Length is either `trackedUses - 1` (transitions between slots
+   * only) or `trackedUses` (transitions plus a final entry for when the
+   * last token is consumed and the bonus expires).
    *
-   * (2E rule: "When the token passes an experience icon, the character gains
-   * that much experience." 2E places EXP icons on the arrows between slots,
-   * not on the slots themselves.)
+   * Index `i` (0-based, 1-indexed slots): EXP gained when the token leaves
+   * slot `i+1`. So index 0 is awarded when slot 1 is consumed (token moves
+   * to slot 2 if any, otherwise the half expires). `null` = no EXP for
+   * that advancement.
+   *
+   * (2E rule: "When the token passes an experience icon, the character
+   * gains that much experience." Most printed cards place icons only on
+   * the arrows between slots, but some also award EXP when the final
+   * token is consumed.)
    */
   readonly useSlotExp?: readonly (number | null)[];
   /** For persistent-tracked halves: what advances the use-slot token. */
