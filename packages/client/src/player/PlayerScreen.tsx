@@ -1,8 +1,22 @@
 import { useEffect, useState } from 'react';
+import {
+  bruiser,
+  silentKnife,
+  defaultPoolForClass,
+  type CharacterClass,
+  type CharacterPool,
+} from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
+import { ClassPick } from './ClassPick.js';
+import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
 import { TurnPlay } from './TurnPlay.js';
+
+const CLASS_BY_ID: Record<string, CharacterClass> = {
+  [bruiser.id]: bruiser,
+  [silentKnife.id]: silentKnife,
+};
 
 function readCampaignFromHash(): string | null {
   const h = location.hash.replace(/^#/, '').trim();
@@ -24,6 +38,24 @@ export function PlayerScreen() {
       try { return localStorage.getItem('gf:campaignId') ?? ''; } catch { return ''; }
     })();
   });
+
+  // Pre-lock-in: which class the player is currently building a hand for.
+  const [buildingClassId, setBuildingClassId] = useState<string | null>(null);
+  // After lock-in: when true, re-show the loadout builder for the current
+  // character so the player can revise their picks before scenario start.
+  const [editingLoadout, setEditingLoadout] = useState(false);
+  // Locally-remembered loadouts keyed by class id. Persists across edits and
+  // class-switches during this session. Server wiring of loadouts is a later
+  // stage; for now this is purely client-side state.
+  const [loadoutByClassId, setLoadoutByClassId] = useState<
+    Record<string, readonly string[]>
+  >({});
+  // Pool per class, level-1 default. Will be persisted server-side later when
+  // level-up picks land.
+  const [poolByClassId] = useState<Record<string, CharacterPool>>(() => ({
+    [bruiser.id]: defaultPoolForClass(bruiser),
+    [silentKnife.id]: defaultPoolForClass(silentKnife),
+  }));
 
   useEffect(() => {
     const onHash = () => {
@@ -91,25 +123,65 @@ export function PlayerScreen() {
         {me?.name} {me?.characterId ? `· ${me.characterId}` : ''} · phase: {phase}
         {phase === 'card_select' && ` · ${submittedCount}/${totalReady} ready`}
       </p>
-      {!me?.characterId && (
+      {!me?.characterId && !buildingClassId && (
+        <ClassPick onPick={(classId) => setBuildingClassId(classId)} />
+      )}
+      {!me?.characterId && buildingClassId && CLASS_BY_ID[buildingClassId] && (
+        <LoadoutBuilder
+          characterClass={CLASS_BY_ID[buildingClassId]!}
+          pool={poolByClassId[buildingClassId]!}
+          {...(loadoutByClassId[buildingClassId]
+            ? { initialChosenIds: loadoutByClassId[buildingClassId] }
+            : {})}
+          onBack={() => setBuildingClassId(null)}
+          onLockIn={(chosenCardIds) => {
+            setLoadoutByClassId((prev) => ({
+              ...prev,
+              [buildingClassId]: chosenCardIds,
+            }));
+            sock.send({
+              type: 'player_pick_character',
+              characterId: buildingClassId,
+            });
+            setBuildingClassId(null);
+          }}
+        />
+      )}
+      {me?.characterId && editingLoadout && CLASS_BY_ID[me.characterId] && (
+        <LoadoutBuilder
+          characterClass={CLASS_BY_ID[me.characterId]!}
+          pool={poolByClassId[me.characterId]!}
+          {...(loadoutByClassId[me.characterId]
+            ? { initialChosenIds: loadoutByClassId[me.characterId] }
+            : {})}
+          onBack={() => setEditingLoadout(false)}
+          onLockIn={(chosenCardIds) => {
+            setLoadoutByClassId((prev) => ({
+              ...prev,
+              [me.characterId!]: chosenCardIds,
+            }));
+            setEditingLoadout(false);
+          }}
+        />
+      )}
+      {me?.characterId && !editingLoadout && phase === 'lobby' && (
         <div>
-          <h2>Pick a character</h2>
+          <p style={{ opacity: 0.7 }}>Waiting for host to start the scenario…</p>
           <button
-            style={{ fontSize: 18, padding: '8px 16px', marginRight: 8 }}
-            onClick={() => sock.send({ type: 'player_pick_character', characterId: 'bruiser' })}
+            onClick={() => setEditingLoadout(true)}
+            style={{
+              fontSize: 14,
+              padding: '8px 14px',
+              background: 'transparent',
+              color: '#eee',
+              border: '1px solid #444',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
           >
-            Bruiser
-          </button>
-          <button
-            style={{ fontSize: 18, padding: '8px 16px' }}
-            onClick={() => sock.send({ type: 'player_pick_character', characterId: 'silent-knife' })}
-          >
-            Silent Knife
+            Edit hand
           </button>
         </div>
-      )}
-      {me?.characterId && phase === 'lobby' && (
-        <p style={{ opacity: 0.7 }}>Waiting for host to start the scenario…</p>
       )}
       {me?.characterId && phase === 'card_select' && you && (
         <Hand you={you} />

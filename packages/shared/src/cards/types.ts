@@ -290,11 +290,14 @@ export type AbilityStep =
   | {
       /** Forced-movement: pull the target up to `amount` hexes toward the
           acting figure. Each hex entered must place the target closer by
-          range. `range` is the targeting range; absent = adjacent. */
+          range. `range` is the targeting range; absent = adjacent. Use
+          `target` for multi-target pulls (e.g. "pull 2 figures at
+          range 3"). */
       readonly type: 'pull';
       readonly amount: number;
       readonly range?: number;
       readonly rangeNode?: NodeShape;
+      readonly target?: AttackTarget;
       readonly node?: NodeShape;
       readonly mandatory?: boolean;
     }

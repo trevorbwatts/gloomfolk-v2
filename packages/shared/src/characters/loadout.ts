@@ -1,41 +1,51 @@
 /**
- * Pre-scenario loadout: which ability cards a player takes into a scenario.
+ * Pool & scenario-loadout model.
  *
- * At the start of each scenario the player picks `class.handSize` cards from
- * the cards available to them. At character level 1 the available pool is
- * level-1 cards plus all level-X cards. (Higher character levels add the
- * specific cards the player chose at each level-up — modeled in a later
- * iteration; for now this module assumes a level-1 character.)
+ * - `CharacterPool`: the set of card IDs a specific character has access to.
+ *   At level 1 it equals all of the class's level-1 cards plus all of its
+ *   level-X cards. Each level-up appends one chosen card. Pool is per-character
+ *   state (separate from the class's master card list).
+ * - `ScenarioLoadout`: which `class.handSize` cards from the pool the
+ *   character is taking into the next scenario.
  */
 
 import type { Card } from '../cards/types.js';
 import type { CharacterClass } from './types.js';
 
-/**
- * Cards a level-1 character may pick from: every level-1 card plus every
- * level-X card the class has. (Higher character levels also include the
- * specific cards chosen at each level-up; that selection model is not yet
- * implemented — extend this function when it is.)
- */
-export function availableCardsAtLevelOne(
+/** A character's card pool: the IDs of every card they have unlocked. */
+export type CharacterPool = readonly string[];
+
+/** Default pool for a freshly-created level-1 character: all L1 + LX cards. */
+export function defaultPoolForClass(
   characterClass: CharacterClass,
+): CharacterPool {
+  return characterClass.cards
+    .filter((c) => c.level === 1 || c.level === 'X')
+    .map((c) => c.id);
+}
+
+/** Resolve a pool's card IDs to full Card objects, in printed order. */
+export function cardsInPool(
+  characterClass: CharacterClass,
+  pool: CharacterPool,
 ): readonly Card[] {
-  return characterClass.cards.filter(
-    (c) => c.level === 1 || c.level === 'X',
-  );
+  const ids = new Set(pool);
+  return characterClass.cards.filter((c) => ids.has(c.id));
 }
 
 /**
- * Default scenario loadout: every level-1 card pre-selected. At level 1 this
- * matches `handSize` for both currently-modeled classes (Bruiser 10/10,
- * Silent Knife 9/9). If a class ever has more level-1 cards than its hand
- * size, the first `handSize` level-1 cards in printed order are returned.
+ * Default scenario loadout for a class+pool: every level-1 card from the
+ * pool, in printed order, capped at `class.handSize`.
  */
 export function defaultLoadout(
   characterClass: CharacterClass,
+  pool: CharacterPool,
 ): readonly string[] {
-  const levelOne = characterClass.cards.filter((c) => c.level === 1);
-  return levelOne.slice(0, characterClass.handSize).map((c) => c.id);
+  const ids = new Set(pool);
+  return characterClass.cards
+    .filter((c) => ids.has(c.id) && c.level === 1)
+    .slice(0, characterClass.handSize)
+    .map((c) => c.id);
 }
 
 /** A scenario loadout: the cards a specific character is taking in. */
@@ -51,12 +61,13 @@ export type LoadoutValidation =
 export type LoadoutInvalidReason =
   | { readonly kind: 'wrong-count'; readonly expected: number; readonly actual: number }
   | { readonly kind: 'duplicate-card'; readonly cardId: string }
-  | { readonly kind: 'unknown-card'; readonly cardId: string }
-  | { readonly kind: 'card-not-available'; readonly cardId: string };
+  | { readonly kind: 'card-not-in-pool'; readonly cardId: string };
 
-/** Validate a level-1 loadout: count, duplicates, and pool membership. */
-export function validateLevelOneLoadout(
+/** Validate a loadout: count matches hand size, no duplicates, every chosen
+    card belongs to the player's pool. */
+export function validateLoadout(
   characterClass: CharacterClass,
+  pool: CharacterPool,
   loadout: ScenarioLoadout,
 ): LoadoutValidation {
   const { chosenCardIds } = loadout;
@@ -80,16 +91,10 @@ export function validateLevelOneLoadout(
     seen.add(id);
   }
 
-  const allowedById = new Map(
-    availableCardsAtLevelOne(characterClass).map((c) => [c.id, c]),
-  );
-  const knownById = new Map(characterClass.cards.map((c) => [c.id, c]));
+  const poolSet = new Set(pool);
   for (const id of chosenCardIds) {
-    if (!knownById.has(id)) {
-      return { ok: false, reason: { kind: 'unknown-card', cardId: id } };
-    }
-    if (!allowedById.has(id)) {
-      return { ok: false, reason: { kind: 'card-not-available', cardId: id } };
+    if (!poolSet.has(id)) {
+      return { ok: false, reason: { kind: 'card-not-in-pool', cardId: id } };
     }
   }
 
