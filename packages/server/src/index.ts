@@ -86,7 +86,13 @@ async function handle(
       return;
 
     case 'host_create_campaign': {
-      const id = newCampaignId();
+      let id: string;
+      try {
+        id = await newCampaignId();
+      } catch {
+        send(ws, { type: 'error', message: 'campaign_slots_full' });
+        return;
+      }
       const data: CampaignSave = {
         id,
         name: msg.name.trim() || 'Untitled Campaign',
@@ -173,6 +179,51 @@ async function handle(
       const actor = conn.role === 'host' ? 'host' : conn.playerId;
       if (!actor) return;
       const result = r.endTurn(actor);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_perform_action': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.performAction(conn.playerId, msg.slot, msg.actionId, msg.target);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_skip_action': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.skipAction(conn.playerId, msg.slot, msg.actionId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_engage_half': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.engageHalf(conn.playerId, msg.slot, msg.cardId, msg.useBasic);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_finish_half': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.finishHalf(conn.playerId, msg.slot);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_skip_half': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.skipHalf(conn.playerId, msg.slot, msg.cardId);
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }

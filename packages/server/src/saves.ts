@@ -68,6 +68,14 @@ export async function saveCampaign(data: CampaignSave): Promise<void> {
   await fs.rename(tmp, filePath(data.id));
 }
 
-export function newCampaignId(): string {
-  return 'c_' + Math.random().toString(36).slice(2, 10);
+/** Returns the lowest unused single-digit slot ('1'..'9'). Throws if all 9 are taken. */
+export async function newCampaignId(): Promise<string> {
+  await ensureDir();
+  const files = await fs.readdir(SAVE_DIR);
+  const taken = new Set(files.filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)));
+  for (let i = 1; i <= 9; i++) {
+    const id = String(i);
+    if (!taken.has(id)) return id;
+  }
+  throw new Error('all 9 campaign slots taken');
 }

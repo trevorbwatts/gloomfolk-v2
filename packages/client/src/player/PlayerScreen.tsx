@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { Hand } from './Hand.js';
+import { TurnPlay } from './TurnPlay.js';
 
 function readCampaignFromHash(): string | null {
   const h = location.hash.replace(/^#/, '').trim();
@@ -13,6 +14,7 @@ export function PlayerScreen() {
   const role = useStore((s) => s.role);
   const playerId = useStore((s) => s.playerId);
   const gameState = useStore((s) => s.gameState);
+  const you = useStore((s) => s.you);
 
   const [name, setName] = useState(() => {
     try { return localStorage.getItem('gf:name') ?? ''; } catch { return ''; }
@@ -78,7 +80,6 @@ export function PlayerScreen() {
   }
 
   const me = gameState?.players.find((p) => p.playerId === playerId);
-  const you = useStore((s) => s.you);
   const phase = gameState?.phase;
   const submittedCount = gameState?.players.filter((p) => p.submitted).length ?? 0;
   const totalReady = gameState?.players.filter((p) => p.characterId).length ?? 0;
@@ -114,51 +115,10 @@ export function PlayerScreen() {
         <Hand you={you} />
       )}
       {me?.characterId && phase === 'turn_resolution' && gameState && (
-        <TurnView gameState={gameState} myPlayerId={playerId!} />
+        <TurnPlay gameState={gameState} myPlayerId={playerId!} you={you} />
       )}
       {me?.characterId && phase === 'round_end' && (
         <p style={{ opacity: 0.7 }}>Round complete. Waiting for host to start the next round…</p>
-      )}
-    </div>
-  );
-}
-
-function TurnView({
-  gameState,
-  myPlayerId,
-}: {
-  gameState: NonNullable<ReturnType<typeof useStore.getState>['gameState']>;
-  myPlayerId: string;
-}) {
-  const sock = useSocket();
-  const cur = gameState.turnOrder[gameState.activeTurnIndex];
-  const myEntry = gameState.turnOrder.find((e) => e.kind === 'player' && e.playerId === myPlayerId);
-  const isMyTurn = cur?.kind === 'player' && cur.playerId === myPlayerId;
-  return (
-    <div>
-      <h2 style={{ marginBottom: 4 }}>Round {gameState.round}</h2>
-      <p style={{ marginTop: 0, opacity: 0.7 }}>
-        {isMyTurn
-          ? "It's your turn."
-          : cur
-            ? cur.kind === 'player'
-              ? `Waiting on ${gameState.players.find((p) => p.playerId === cur.playerId)?.name ?? 'player'}…`
-              : `${cur.abilityCardName} — monster turn`
-            : '—'}
-      </p>
-      {myEntry?.kind === 'player' && (
-        <p style={{ fontSize: 13, opacity: 0.8 }}>
-          Your initiative: <strong>{myEntry.initiative}</strong>
-          {myEntry.done ? ' · turn complete' : ''}
-        </p>
-      )}
-      {isMyTurn && (
-        <button
-          onClick={() => sock.send({ type: 'end_turn' })}
-          style={{ fontSize: 16, padding: '10px 16px', marginTop: 8 }}
-        >
-          End my turn
-        </button>
       )}
     </div>
   );

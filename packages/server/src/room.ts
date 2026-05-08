@@ -1,8 +1,18 @@
 import type { WebSocket } from 'ws';
 import type {
+  ActiveEffect,
   Card,
+  CardHalf,
   CardSelection,
   ClientToServer,
+  ConditionInstance,
+  CurrentTurn,
+  GameEvent,
+  HalfSlot,
+  Hex,
+  MonsterStatCard,
+  NegativeCondition,
+  PendingAction,
   PublicGameState,
   ServerToClient,
   TurnOrderEntry,
@@ -12,8 +22,16 @@ import {
   archerDeck,
   banditArcher,
   banditScout,
+  bfsForcedMove,
+  bfsReachable,
   bruiser,
   getScenario,
+  hasLineOfSight,
+  hexDistance,
+  hexEqual,
+  hexKey,
+  rotateHexN,
+  rotatePattern,
   scoutDeck,
   startingHandFor,
 } from '@gloomfolk/shared';
@@ -23,16 +41,301 @@ const MONSTER_DECKS = {
   scout: scoutDeck,
 } as const;
 import { type CampaignSave, saveCampaign } from './saves.js';
+import { determineFocus, readAbility, walkPath } from './ai.js';
 
 const MONSTER_DEFS = {
   'bandit-archer': banditArcher,
   'bandit-scout': banditScout,
 } as const;
 
+const MONSTER_DEF_BY_SETID: Record<string, MonsterStatCard | undefined> = {
+  archer: banditArcher,
+  scout: banditScout,
+};
+
+function monsterDefMatchesSet(defId: string, setId: string): boolean {
+  const def = MONSTER_DEFS[defId as keyof typeof MONSTER_DEFS];
+  return def?.setId === setId;
+}
+
 const CHARACTER_NAMES: Record<string, string> = {
   bruiser: 'Bruiser',
   'silent-knife': 'Silent Knife',
 };
+
+// Negative conditions the engine actually enforces today. Others are recognized
+// (in the action queue) but their gameplay effect may be a no-op for now.
+const SUPPORTED_CONDITIONS = new Set<string>(['stun', 'immobilize', 'disarm', 'muddle']);
+
+function unlockedSlot(): HalfSlot {
+  return { status: 'unlocked', cardId: null, useBasic: false, actions: [], performedCount: 0 };
+}
+
+/**
+ * Apply attack damage to `target` accounting for Shield and Pierce.
+ * Effective shield = max(0, target.shield - pierce); damage subtracted by it
+ * (down to 0 minimum). Returns damage actually dealt.
+ */
+function applyDamage(target: Unit, attackAmount: number, pierce: number): number {
+  const effShield = Math.max(0, target.shield - pierce);
+  const dmg = Math.max(0, attackAmount - effShield);
+  target.hp -= dmg;
+  return dmg;
+}
+
+function hasCondition(unit: Unit, kind: NegativeCondition): boolean {
+  return unit.conditions.some((c) => c.kind === kind);
+}
+
+/** Sum of all active move-bonus effects. */
+function activeMoveBonus(p: PlayerEntry): number {
+  let total = 0;
+  for (const e of p.activeEffects) if (e.kind === 'move-bonus') total += e.amount;
+  return total;
+}
+
+/**
+ * Compute attack bonus + pierce from active effects, filtered by attackKind.
+ * Consumes any 'next-attack' effects in the process.
+ */
+function consumeAttackBonus(
+  p: PlayerEntry,
+  attackKind: 'melee' | 'ranged',
+): { amount: number; pierce: number } {
+  let amount = 0;
+  let pierce = 0;
+  const keep: ActiveEffect[] = [];
+  for (const e of p.activeEffects) {
+    if (e.kind !== 'attack-bonus') {
+      keep.push(e);
+      continue;
+    }
+    if (e.attackKind && e.attackKind !== attackKind) {
+      keep.push(e);
+      continue;
+    }
+    amount += e.amount;
+    pierce += e.pierceBonus;
+    if (e.expires !== 'next-attack') keep.push(e);
+  }
+  p.activeEffects = keep;
+  return { amount, pierce };
+}
+
+/** Find an active retaliate effect on `unit` that can hit at distance `dist`. */
+function retaliateAgainst(p: PlayerEntry, dist: number): { amount: number } | null {
+  for (const e of p.activeEffects) {
+    if (e.kind === 'retaliate' && dist <= e.range) return { amount: e.amount };
+  }
+  return null;
+}
+
+/**
+ * Apply a condition to `unit`. If already present, refresh `appliedThisTurn`
+ * (which effectively resets duration per the rulebook). `isOwnTurn` should be
+ * true if the unit is currently taking its own turn (so the condition survives
+ * the upcoming end-of-turn tick and is cleaned at the end of the next turn).
+ */
+function applyConditionToUnit(unit: Unit, kind: NegativeCondition, isOwnTurn: boolean): void {
+  const existing = unit.conditions.find((c) => c.kind === kind);
+  if (existing) {
+    existing.appliedThisTurn = isOwnTurn;
+  } else {
+    unit.conditions.push({ kind, appliedThisTurn: isOwnTurn });
+  }
+}
+
+/**
+ * End-of-turn condition tick. Conditions that were applied during this figure's
+ * own turn survive (reset to appliedThisTurn=false); all others are removed.
+ */
+function tickConditionsEndOfTurn(unit: Unit): NegativeCondition[] {
+  const removed: NegativeCondition[] = [];
+  unit.conditions = unit.conditions.filter((c) => {
+    if (c.appliedThisTurn) {
+      c.appliedThisTurn = false;
+      return true;
+    }
+    removed.push(c.kind);
+    return false;
+  });
+  return removed;
+}
+
+function activeSlotRef(ct: CurrentTurn): HalfSlot | null {
+  if (ct.activeSlot === 'top' && ct.topSlot.status === 'engaged') return ct.topSlot;
+  if (ct.activeSlot === 'bottom' && ct.bottomSlot.status === 'engaged') return ct.bottomSlot;
+  return null;
+}
+
+/** Build the basic-action queue substituted for a half. */
+function basicActions(slot: 'top' | 'bottom'): PendingAction[] {
+  if (slot === 'top') {
+    return [
+      { id: 'a1', type: 'attack', amount: 2, range: 1, pierce: 0, targets: 1, targetsRemaining: 1, done: false },
+    ];
+  }
+  return [{ id: 'a1', type: 'move', amount: 2, done: false }];
+}
+
+/**
+ * Build the action queue for a printed half. Walks abilities/steps in printed
+ * order and emits a PendingAction for each supported step. Unsupported step
+ * types become `unsupported` actions so the player can see what's on the card
+ * even if the engine can't resolve them yet.
+ */
+function buildActionQueue(half: CardHalf): PendingAction[] {
+  const out: PendingAction[] = [];
+  let n = 0;
+  const nextId = () => `a${++n}`;
+  for (const ability of half.abilities) {
+    for (const step of ability.steps) {
+      if (step.type === 'move' && typeof step.amount === 'number') {
+        out.push({ id: nextId(), type: 'move', amount: step.amount, done: false });
+      } else if (step.type === 'attack' && typeof step.amount === 'number') {
+        const tgt = step.target;
+        const pierce = step.modifiers?.pierce?.amount ?? 0;
+        if (tgt && tgt.kind === 'aoe') {
+          out.push({
+            id: nextId(),
+            type: 'attack-aoe',
+            amount: step.amount,
+            pierce,
+            pattern: tgt.pattern.map((h) => ({ q: h.q, r: h.r })),
+            done: false,
+          });
+        } else {
+          const range =
+            tgt && tgt.kind === 'ranged' && typeof tgt.range === 'number' ? tgt.range : 1;
+          const targets =
+            tgt && tgt.kind === 'ranged' && typeof tgt.targets === 'number' ? tgt.targets : 1;
+          out.push({
+            id: nextId(),
+            type: 'attack',
+            amount: step.amount,
+            range,
+            pierce,
+            targets,
+            targetsRemaining: targets,
+            done: false,
+          });
+        }
+      } else if (step.type === 'heal') {
+        out.push({
+          id: nextId(),
+          type: 'heal',
+          amount: step.amount,
+          range: 0,
+          selfOnly: step.target.kind === 'self',
+          done: false,
+        });
+      } else if (step.type === 'shield') {
+        out.push({ id: nextId(), type: 'shield', amount: step.amount, done: false });
+      } else if (step.type === 'push') {
+        out.push({
+          id: nextId(),
+          type: 'push',
+          amount: step.amount,
+          range: step.range ?? 1,
+          done: false,
+        });
+      } else if (step.type === 'pull') {
+        out.push({
+          id: nextId(),
+          type: 'pull',
+          amount: step.amount,
+          range: step.range ?? 1,
+          done: false,
+        });
+      } else if (step.type === 'modify-future-move') {
+        // Persistent move bonus. Lifetime tied to the host half's disposition;
+        // we conservatively use 'end-round' (the most common case) since
+        // persistent-tracked also clears at round end in our v1.
+        out.push({
+          id: nextId(),
+          type: 'modify-future-move',
+          amount: step.bonusAmount,
+          expires: half.disposition === 'persistent-scenario' ? 'end-scenario' : 'end-round',
+          done: false,
+        });
+      } else if (step.type === 'modify-future-attack') {
+        const expires =
+          step.appliesTo === 'next-attack-ability'
+            ? 'next-attack'
+            : step.appliesTo === 'all-attacks-this-round'
+              ? 'end-round'
+              : 'end-round'; // 'while-persistent-active' approximated as end-round
+        const amount = typeof step.bonusAmount === 'number' ? step.bonusAmount : 0;
+        out.push({
+          id: nextId(),
+          type: 'modify-future-attack',
+          amount,
+          pierceBonus: step.pierceBonus ?? 0,
+          expires,
+          ...(step.attackKind ? { attackKind: step.attackKind } : {}),
+          done: false,
+        });
+      } else if (step.type === 'retaliate') {
+        out.push({
+          id: nextId(),
+          type: 'grant-retaliate',
+          amount: step.amount,
+          range: 1,
+          expires: half.disposition === 'persistent-scenario' ? 'end-scenario' : 'end-round',
+          done: false,
+        });
+      } else if (step.type === 'apply-condition' && SUPPORTED_CONDITIONS.has(step.condition)) {
+        const tgt = step.target;
+        const range =
+          tgt && tgt.kind === 'ranged' && typeof tgt.range === 'number' ? tgt.range : 1;
+        out.push({
+          id: nextId(),
+          type: 'apply-condition',
+          condition: step.condition as NegativeCondition,
+          range,
+          done: false,
+        });
+      } else {
+        out.push({
+          id: nextId(),
+          type: 'unsupported',
+          description: describeStep(step),
+          done: false,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function describeStep(step: { type: string }): string {
+  // Best-effort label for unsupported step types so the player sees them.
+  const s = step as Record<string, unknown>;
+  switch (step.type) {
+    case 'apply-condition':
+      return `Apply ${(s.condition as string) ?? '?'}`;
+    case 'push':
+      return `Push ${(s.amount as number) ?? '?'}`;
+    case 'pull':
+      return `Pull ${(s.amount as number) ?? '?'}`;
+    case 'gain-exp':
+      return `+${(s.amount as number) ?? '?'} EXP`;
+    case 'loot':
+      return `Loot ${(s.range as number) ?? '?'}`;
+    case 'create-element':
+      return `Create ${(s.element as string) ?? '?'}`;
+    case 'retaliate':
+      return `Retaliate ${(s.amount as number) ?? '?'}`;
+    case 'when':
+      return 'Conditional effect';
+    case 'modify-future-attack':
+      return 'Modify future attack';
+    case 'modify-future-move':
+      return 'Modify future move';
+    default:
+      return step.type;
+  }
+}
 
 function characterHp(characterId: string): number {
   if (characterId === 'bruiser') return bruiser.hp[1] ?? 10;
@@ -48,6 +351,8 @@ interface PlayerEntry {
   hand: Card[];
   discard: Card[];
   lost: Card[];
+  active: Card[];
+  activeEffects: ActiveEffect[];
   selection: CardSelection | null;
 }
 
@@ -60,6 +365,9 @@ export class Room {
   round = 0;
   turnOrder: TurnOrderEntry[] = [];
   activeTurnIndex = 0;
+  currentTurn: CurrentTurn | null = null;
+  events: GameEvent[] = [];
+  private nextEventId = 1;
 
   constructor(campaign: CampaignSave) {
     this.campaign = campaign;
@@ -72,6 +380,8 @@ export class Room {
         hand: [],
         discard: [],
         lost: [],
+        active: [],
+        activeEffects: [],
         selection: null,
       });
     }
@@ -101,6 +411,8 @@ export class Room {
         hand: [],
         discard: [],
         lost: [],
+        active: [],
+        activeEffects: [],
         selection: null,
       };
       this.players.set(playerId, entry);
@@ -151,6 +463,8 @@ export class Room {
         name: p.name,
         hp,
         hpMax: hp,
+        shield: 0,
+        conditions: [],
         hex: slot.hex,
         ownerPlayerId: p.playerId,
       });
@@ -174,6 +488,8 @@ export class Room {
         name: def.name,
         hp,
         hpMax: hp,
+        shield: 0,
+        conditions: [],
         hex: slot.hex,
       });
     });
@@ -232,9 +548,21 @@ export class Room {
         return { ok: false, reason: 'not_your_turn' };
       }
     }
+    // Player turn ending: dispose selected cards + tick conditions on the unit.
+    if (cur.kind === 'player') {
+      const p = this.players.get(cur.playerId);
+      if (p) this.disposePlayerCards(p);
+      const unit = this.units.find((u) => u.id === cur.unitId);
+      if (unit) {
+        const removed = tickConditionsEndOfTurn(unit);
+        for (const k of removed) this.pushEvent(`${unit.name} is no longer ${k}ed.`);
+      }
+    }
     cur.done = true;
+    this.currentTurn = null;
     if (this.activeTurnIndex + 1 < this.turnOrder.length) {
       this.activeTurnIndex += 1;
+      this.openTurn();
     } else {
       // All turns done — round end
       this.phase = 'round_end';
@@ -243,12 +571,570 @@ export class Room {
     return { ok: true };
   }
 
+  engageHalf(
+    playerId: string,
+    slot: 'top' | 'bottom',
+    cardId: string,
+    useBasic: boolean,
+  ): { ok: true } | { ok: false; reason: string } {
+    const guard = this.requireMyTurn(playerId);
+    if (!guard.ok) return guard;
+    const ct = guard.ct;
+    const p = guard.p;
+
+    const target = slot === 'top' ? ct.topSlot : ct.bottomSlot;
+    const other = slot === 'top' ? ct.bottomSlot : ct.topSlot;
+    if (target.status !== 'unlocked') return { ok: false, reason: 'slot_not_unlocked' };
+
+    const sel = p.selection;
+    if (!sel || sel.kind !== 'cards') return { ok: false, reason: 'no_selection' };
+    if (cardId !== sel.leadingId && cardId !== sel.secondId) return { ok: false, reason: 'not_a_selected_card' };
+    if (other.cardId === cardId) return { ok: false, reason: 'card_already_used' };
+
+    const card = p.hand.find((c) => c.id === cardId);
+    if (!card) return { ok: false, reason: 'card_not_in_hand' };
+
+    const actions: PendingAction[] = useBasic
+      ? basicActions(slot)
+      : buildActionQueue(slot === 'top' ? card.top : card.bottom);
+
+    target.status = 'engaged';
+    target.cardId = cardId;
+    target.useBasic = useBasic;
+    target.actions = actions;
+    ct.activeSlot = slot;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  finishHalf(
+    playerId: string,
+    slot: 'top' | 'bottom',
+  ): { ok: true } | { ok: false; reason: string } {
+    const guard = this.requireMyTurn(playerId);
+    if (!guard.ok) return guard;
+    const ct = guard.ct;
+    const target = slot === 'top' ? ct.topSlot : ct.bottomSlot;
+    if (target.status !== 'engaged') return { ok: false, reason: 'slot_not_engaged' };
+    target.status = 'done';
+    if (ct.activeSlot === slot) ct.activeSlot = null;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Skip the half without performing — equivalent to engage + immediate finish with no actions. */
+  skipHalf(
+    playerId: string,
+    slot: 'top' | 'bottom',
+    cardId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const r = this.engageHalf(playerId, slot, cardId, false);
+    if (!r.ok) return r;
+    return this.finishHalf(playerId, slot);
+  }
+
+  performAction(
+    playerId: string,
+    slotKind: 'top' | 'bottom',
+    actionId: string,
+    target: { hex?: Hex | undefined; unitId?: string | undefined } | undefined,
+  ): { ok: true } | { ok: false; reason: string } {
+    const guard = this.requireMyTurn(playerId);
+    if (!guard.ok) return guard;
+    const ct = guard.ct;
+    const slot = slotKind === 'top' ? ct.topSlot : ct.bottomSlot;
+    if (slot.status !== 'engaged') return { ok: false, reason: 'slot_not_engaged' };
+    const action = slot.actions.find((a) => a.id === actionId);
+    if (!action) return { ok: false, reason: 'no_action' };
+    if (action.done) return { ok: false, reason: 'action_already_done' };
+
+    const unit = this.units.find((u) => u.id === ct.unitId);
+    if (!unit) return { ok: false, reason: 'no_unit' };
+
+    switch (action.type) {
+      case 'move': {
+        if (hasCondition(unit, 'immobilize')) return { ok: false, reason: 'immobilized' };
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        if (!target?.hex) return { ok: false, reason: 'need_hex' };
+        if (hexEqual(unit.hex, target.hex)) return { ok: false, reason: 'already_there' };
+        const moveBonus = activeMoveBonus(guard.p);
+        const reachable = this.reachableFrom(unit.hex, action.amount + moveBonus, unit.id);
+        const dist = reachable.get(hexKey(target.hex));
+        if (dist === undefined) return { ok: false, reason: 'unreachable' };
+        unit.hex = target.hex;
+        action.done = true;
+        break;
+      }
+      case 'attack': {
+        if (hasCondition(unit, 'disarm')) return { ok: false, reason: 'disarmed' };
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        if (action.targetsRemaining <= 0) return { ok: false, reason: 'no_targets_left' };
+        if (!target?.unitId) return { ok: false, reason: 'need_target_unit' };
+        const tgt = this.units.find((u) => u.id === target.unitId);
+        if (!tgt) return { ok: false, reason: 'no_target' };
+        if (tgt.kind === 'player') return { ok: false, reason: 'cannot_attack_ally' };
+        const dist = hexDistance(unit.hex, tgt.hex);
+        if (dist > action.range) return { ok: false, reason: 'out_of_range' };
+        if (action.range > 1 && !this.hasLOS(unit.hex, tgt.hex)) {
+          return { ok: false, reason: 'no_line_of_sight' };
+        }
+        const attackKind: 'melee' | 'ranged' = action.range > 1 ? 'ranged' : 'melee';
+        const { amount: bonusAmt, pierce: bonusPierce } = consumeAttackBonus(guard.p, attackKind);
+        const dmg = applyDamage(tgt, action.amount + bonusAmt, action.pierce + bonusPierce);
+        this.pushEvent(`${unit.name} attacks ${tgt.name} for ${dmg}.`);
+        if (tgt.hp <= 0) {
+          this.units = this.units.filter((u) => u.id !== tgt.id);
+          this.pushEvent(`${tgt.name} is exhausted!`);
+        }
+        action.targetsRemaining -= 1;
+        if (action.targetsRemaining <= 0) action.done = true;
+        break;
+      }
+      case 'attack-aoe': {
+        if (hasCondition(unit, 'disarm')) return { ok: false, reason: 'disarmed' };
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        if (!target?.hex) return { ok: false, reason: 'need_anchor_hex' };
+        const anchorOffset: Hex = {
+          q: target.hex.q - unit.hex.q,
+          r: target.hex.r - unit.hex.r,
+        };
+        // Find a rotation r such that rotated(pattern[0]) === anchorOffset.
+        const p0 = action.pattern[0];
+        if (!p0) return { ok: false, reason: 'empty_pattern' };
+        let chosenRot = -1;
+        for (let r = 0; r < 6; r++) {
+          const rot = rotateHexN(p0, r);
+          if (rot.q === anchorOffset.q && rot.r === anchorOffset.r) {
+            chosenRot = r;
+            break;
+          }
+        }
+        if (chosenRot < 0) return { ok: false, reason: 'invalid_anchor' };
+        const rotated = rotatePattern(action.pattern, chosenRot);
+        const aoeHexes = rotated.map((o) => ({ q: unit.hex.q + o.q, r: unit.hex.r + o.r }));
+        // Most AOE patterns target hexes adjacent to the actor (melee). LOS check
+        // is per-hex; for v1 we only enforce LOS to the anchor (target.hex).
+        // (Adjacent hexes effectively pass.)
+        const { amount: bonusAmt, pierce: bonusPierce } = consumeAttackBonus(guard.p, 'melee');
+        let hitCount = 0;
+        for (const hex of aoeHexes) {
+          const tgt = this.units.find((u) => u.kind === 'monster' && hexEqual(u.hex, hex));
+          if (!tgt) continue;
+          const dmg = applyDamage(tgt, action.amount + bonusAmt, action.pierce + bonusPierce);
+          this.pushEvent(`${unit.name} hits ${tgt.name} for ${dmg}.`);
+          if (tgt.hp <= 0) {
+            this.units = this.units.filter((u) => u.id !== tgt.id);
+            this.pushEvent(`${tgt.name} is exhausted!`);
+          }
+          hitCount += 1;
+        }
+        if (hitCount === 0) this.pushEvent(`${unit.name}'s AOE hits no enemies.`);
+        action.done = true;
+        break;
+      }
+      case 'heal': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        // Self-only for now (matches our schema). Range ignored.
+        const before = unit.hp;
+        unit.hp = Math.min(unit.hpMax, unit.hp + action.amount);
+        this.pushEvent(`${unit.name} heals ${unit.hp - before}.`);
+        action.done = true;
+        break;
+      }
+      case 'shield': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        unit.shield += action.amount;
+        this.pushEvent(`${unit.name} gains Shield ${action.amount}.`);
+        action.done = true;
+        break;
+      }
+      case 'push':
+      case 'pull': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        if (!target?.unitId) return { ok: false, reason: 'need_target_unit' };
+        if (!target.hex) return { ok: false, reason: 'need_dest_hex' };
+        const tgt = this.units.find((u) => u.id === target.unitId);
+        if (!tgt) return { ok: false, reason: 'no_target' };
+        if (tgt.kind === 'player') return { ok: false, reason: 'cannot_force_move_ally' };
+        if (hexDistance(unit.hex, tgt.hex) > action.range) return { ok: false, reason: 'out_of_range' };
+        const reachable = this.forcedMoveReachable(tgt.hex, action.amount, unit.hex, action.type, tgt.id);
+        const distSteps = reachable.get(hexKey(target.hex));
+        if (distSteps === undefined || distSteps === 0) return { ok: false, reason: 'invalid_dest' };
+        tgt.hex = target.hex;
+        this.pushEvent(`${unit.name} ${action.type === 'push' ? 'pushes' : 'pulls'} ${tgt.name} to (${target.hex.q},${target.hex.r}).`);
+        action.done = true;
+        break;
+      }
+      case 'apply-condition': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        if (!target?.unitId) return { ok: false, reason: 'need_target_unit' };
+        const tgt = this.units.find((u) => u.id === target.unitId);
+        if (!tgt) return { ok: false, reason: 'no_target' };
+        if (tgt.kind === 'player') return { ok: false, reason: 'cannot_target_ally' };
+        if (hexDistance(unit.hex, tgt.hex) > action.range) return { ok: false, reason: 'out_of_range' };
+        applyConditionToUnit(tgt, action.condition, /*isOwnTurn*/ false);
+        this.pushEvent(`${tgt.name} is ${action.condition}ed.`);
+        action.done = true;
+        break;
+      }
+      case 'modify-future-move': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        guard.p.activeEffects.push({
+          id: `e${guard.p.activeEffects.length + 1}`,
+          sourceCardId: slot.cardId ?? '',
+          kind: 'move-bonus',
+          amount: action.amount,
+          expires: action.expires,
+        });
+        this.pushEvent(`${unit.name} gains +${action.amount} move${action.expires === 'end-scenario' ? ' (scenario)' : ''}.`);
+        action.done = true;
+        break;
+      }
+      case 'modify-future-attack': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        guard.p.activeEffects.push({
+          id: `e${guard.p.activeEffects.length + 1}`,
+          sourceCardId: slot.cardId ?? '',
+          kind: 'attack-bonus',
+          amount: action.amount,
+          pierceBonus: action.pierceBonus,
+          expires: action.expires,
+          ...(action.attackKind ? { attackKind: action.attackKind } : {}),
+        });
+        this.pushEvent(`${unit.name} gains +${action.amount} attack${action.expires === 'next-attack' ? ' (next)' : ''}.`);
+        action.done = true;
+        break;
+      }
+      case 'grant-retaliate': {
+        if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
+        guard.p.activeEffects.push({
+          id: `e${guard.p.activeEffects.length + 1}`,
+          sourceCardId: slot.cardId ?? '',
+          kind: 'retaliate',
+          amount: action.amount,
+          range: action.range,
+          expires: action.expires,
+        });
+        this.pushEvent(`${unit.name} gains Retaliate ${action.amount}.`);
+        action.done = true;
+        break;
+      }
+      case 'unsupported': {
+        // Treat as skipped — not implemented yet.
+        action.done = true;
+        break;
+      }
+    }
+    if (action.type !== 'unsupported') slot.performedCount += 1;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  skipAction(
+    playerId: string,
+    slotKind: 'top' | 'bottom',
+    actionId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const guard = this.requireMyTurn(playerId);
+    if (!guard.ok) return guard;
+    const ct = guard.ct;
+    const slot = slotKind === 'top' ? ct.topSlot : ct.bottomSlot;
+    if (slot.status !== 'engaged') return { ok: false, reason: 'slot_not_engaged' };
+    const action = slot.actions.find((a) => a.id === actionId);
+    if (!action) return { ok: false, reason: 'no_action' };
+    action.done = true;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Centerline-based line-of-sight check: walls block, units do not. */
+  hasLOS(a: Hex, b: Hex): boolean {
+    const walls = new Set<string>();
+    for (const t of this.scenarioTiles()) {
+      if (t.kind === 'wall') walls.add(`${t.q},${t.r}`);
+    }
+    return hasLineOfSight(a, b, (h) => walls.has(`${h.q},${h.r}`));
+  }
+
+  /** Valid destinations for a Push or Pull on `start`, anchored at `actorHex`. */
+  forcedMoveReachable(
+    start: Hex,
+    budget: number,
+    actorHex: Hex,
+    direction: 'push' | 'pull',
+    movedUnitId: string,
+  ): Map<string, number> {
+    const tilePassable = new Set<string>();
+    for (const t of this.scenarioTiles()) if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
+    const occupied = new Set<string>();
+    for (const u of this.units) {
+      if (u.id === movedUnitId) continue;
+      occupied.add(`${u.hex.q},${u.hex.r}`);
+    }
+    return bfsForcedMove(start, budget, actorHex, direction, (h) => {
+      const k = `${h.q},${h.r}`;
+      return tilePassable.has(k) && !occupied.has(k);
+    });
+  }
+
+  private reachableFrom(start: Hex, budget: number, ignoreUnitId: string): Map<string, number> {
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const tilePassable = new Set<string>();
+    if (scenario) {
+      for (const t of scenario.tiles) {
+        if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
+      }
+    }
+    const occupied = new Set<string>();
+    for (const u of this.units) {
+      if (u.id === ignoreUnitId) continue;
+      occupied.add(`${u.hex.q},${u.hex.r}`);
+    }
+    return bfsReachable(start, budget, (h) => {
+      const k = `${h.q},${h.r}`;
+      return tilePassable.has(k) && !occupied.has(k);
+    });
+  }
+
+  /**
+   * Dispose the two selected cards based on what happened in their slots.
+   * - Basic action used → discard (printed half is not "performed").
+   * - Printed half performed → use that half's disposition (lost / discard;
+   *   persistent treated as discard for now).
+   * - Card never engaged in either slot → discard with no effect.
+   */
+  private disposePlayerCards(p: PlayerEntry): void {
+    if (!p.selection || p.selection.kind !== 'cards') return;
+    const ct = this.currentTurn;
+    const ids = [p.selection.leadingId, p.selection.secondId];
+    for (const id of ids) {
+      const idx = p.hand.findIndex((c) => c.id === id);
+      if (idx === -1) continue;
+      const [card] = p.hand.splice(idx, 1);
+      if (!card) continue;
+      let dest: 'discard' | 'lost' | 'active' = 'discard';
+      if (ct) {
+        const slot =
+          ct.topSlot.cardId === id
+            ? { which: 'top' as const, slot: ct.topSlot }
+            : ct.bottomSlot.cardId === id
+              ? { which: 'bottom' as const, slot: ct.bottomSlot }
+              : null;
+        if (slot && !slot.slot.useBasic) {
+          const half = slot.which === 'top' ? card.top : card.bottom;
+          const performedAny = slot.slot.performedCount > 0;
+          if (half.disposition === 'lost' && performedAny) dest = 'lost';
+          else if (
+            performedAny &&
+            (half.disposition === 'persistent-round' ||
+              half.disposition === 'persistent-tracked' ||
+              half.disposition === 'persistent-scenario')
+          ) {
+            dest = 'active';
+          }
+        }
+      }
+      if (dest === 'lost') p.lost.push(card);
+      else if (dest === 'active') p.active.push(card);
+      else p.discard.push(card);
+    }
+  }
+
+  /** Set up `currentTurn` for the actor at activeTurnIndex (player turns only). */
+  private openTurn(): void {
+    const cur = this.turnOrder[this.activeTurnIndex];
+    if (!cur) {
+      this.currentTurn = null;
+      return;
+    }
+    if (cur.kind === 'player') {
+      const unit = this.units.find((u) => u.id === cur.unitId);
+      // Stunned players cannot perform any abilities — auto-skip their turn.
+      if (unit && hasCondition(unit, 'stun')) {
+        this.pushEvent(`${unit.name} is stunned and skips their turn.`);
+        const p = this.players.get(cur.playerId);
+        if (p) this.disposePlayerCards(p);
+        const removed = tickConditionsEndOfTurn(unit);
+        for (const k of removed) this.pushEvent(`${unit.name} is no longer ${k}ed.`);
+        cur.done = true;
+        this.currentTurn = null;
+        if (this.activeTurnIndex + 1 < this.turnOrder.length) {
+          this.activeTurnIndex += 1;
+          this.openTurn();
+        } else {
+          this.phase = 'round_end';
+        }
+        return;
+      }
+      this.currentTurn = {
+        unitId: cur.unitId,
+        topSlot: unlockedSlot(),
+        bottomSlot: unlockedSlot(),
+        activeSlot: null,
+      };
+    } else {
+      this.currentTurn = null;
+      // Auto-resolve the monster group's actions and advance.
+      this.resolveActiveMonsterGroup();
+      cur.done = true;
+      if (this.activeTurnIndex + 1 < this.turnOrder.length) {
+        this.activeTurnIndex += 1;
+        this.openTurn();
+      } else {
+        this.phase = 'round_end';
+      }
+    }
+  }
+
+  private resolveActiveMonsterGroup(): void {
+    const cur = this.turnOrder[this.activeTurnIndex];
+    if (!cur || cur.kind !== 'monster-group') return;
+    const def = MONSTER_DEF_BY_SETID[cur.setId];
+    const card = MONSTER_DECKS[cur.setId as keyof typeof MONSTER_DECKS]?.cards.find(
+      (c) => c.id === cur.abilityCardId,
+    );
+    if (!def || !card) return;
+    const stat = def.levels[1]?.normal;
+    if (!stat) return;
+
+    const enemyInit = new Map<string, number>();
+    for (const e of this.turnOrder) {
+      if (e.kind === 'player') enemyInit.set(e.unitId, e.initiative);
+    }
+
+    const monsters = this.units.filter(
+      (u) => u.kind === 'monster' && monsterDefMatchesSet(u.defId, cur.setId),
+    );
+
+    const { move, attack } = readAbility(card, stat);
+    const range = attack?.range ?? 1;
+
+    for (const m of monsters) {
+      // Stun: skip the turn entirely, but still tick conditions.
+      if (hasCondition(m, 'stun')) {
+        this.pushEvent(`${m.name} is stunned and skips its turn.`);
+        const removed = tickConditionsEndOfTurn(m);
+        for (const k of removed) this.pushEvent(`${m.name} is no longer ${k}ed.`);
+        continue;
+      }
+      const canMove = move && !hasCondition(m, 'immobilize');
+      const canAttack = attack && !hasCondition(m, 'disarm');
+      if (hasCondition(m, 'immobilize')) this.pushEvent(`${m.name} is immobilized.`);
+      if (hasCondition(m, 'disarm')) this.pushEvent(`${m.name} is disarmed.`);
+
+      // Re-find focus each iteration since previous monsters may have moved/killed.
+      const focus = determineFocus(m, range, { tiles: this.scenarioTiles(), units: this.units }, enemyInit);
+      if (!focus) {
+        this.pushEvent(`${m.name} sees no target.`);
+        const removed = tickConditionsEndOfTurn(m);
+        for (const k of removed) this.pushEvent(`${m.name} is no longer ${k}ed.`);
+        continue;
+      }
+
+      // Movement
+      if (canMove && move) {
+        const dest = walkPath(m.hex, focus.path, move.budget, range, focus.enemy.hex);
+        if (!hexEqual(dest, m.hex)) {
+          this.pushEvent(
+            `${m.name} moves to (${dest.q},${dest.r}) toward ${focus.enemy.name}.`,
+          );
+          m.hex = dest;
+        }
+      }
+
+      // Attack — re-check range from final position; focus may be dead from a prior monster.
+      const focusUnit = this.units.find((u) => u.id === focus.enemy.id);
+      const losOk = focusUnit
+        ? range <= 1 || this.hasLOS(m.hex, focusUnit.hex)
+        : false;
+      if (canAttack && attack && focusUnit && hexDistance(m.hex, focusUnit.hex) <= range && losOk) {
+        const dmg = applyDamage(focusUnit, attack.damage, 0);
+        this.pushEvent(`${m.name} attacks ${focusUnit.name} for ${dmg}.`);
+        if (focusUnit.hp <= 0) {
+          this.units = this.units.filter((u) => u.id !== focusUnit.id);
+          this.pushEvent(`${focusUnit.name} is exhausted!`);
+        } else {
+          // Retaliate: if the player target has retaliate active and the monster
+          // is within retaliate range, deal back damage to the monster.
+          const targetPlayer = focusUnit.ownerPlayerId ? this.players.get(focusUnit.ownerPlayerId) : null;
+          if (targetPlayer) {
+            const ret = retaliateAgainst(targetPlayer, hexDistance(m.hex, focusUnit.hex));
+            if (ret) {
+              const back = applyDamage(m, ret.amount, 0);
+              this.pushEvent(`${focusUnit.name} retaliates ${m.name} for ${back}.`);
+              if (m.hp <= 0) {
+                this.units = this.units.filter((u) => u.id !== m.id);
+                this.pushEvent(`${m.name} is exhausted!`);
+              }
+            }
+          }
+        }
+      } else if (canAttack && attack && focusUnit) {
+        if (!losOk) {
+          this.pushEvent(`${m.name} has no line-of-sight to ${focusUnit.name}.`);
+        } else {
+          this.pushEvent(`${m.name} cannot reach ${focusUnit.name}.`);
+        }
+      }
+
+      // End of monster's individual turn — tick its conditions.
+      const removed = tickConditionsEndOfTurn(m);
+      for (const k of removed) this.pushEvent(`${m.name} is no longer ${k}ed.`);
+    }
+  }
+
+  private scenarioTiles() {
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    return scenario?.tiles ?? [];
+  }
+
+  private pushEvent(text: string): void {
+    this.events.push({ id: this.nextEventId++, text });
+    if (this.events.length > 20) this.events.splice(0, this.events.length - 20);
+  }
+
+  /** Guard for player-action handlers: phase, active turn, ownership, and turn state present. */
+  private requireMyTurn(
+    playerId: string,
+  ):
+    | { ok: false; reason: string }
+    | { ok: true; ct: CurrentTurn; p: PlayerEntry } {
+    if (this.phase !== 'turn_resolution') return { ok: false, reason: 'wrong_phase' };
+    const cur = this.turnOrder[this.activeTurnIndex];
+    if (!cur || cur.kind !== 'player' || cur.playerId !== playerId) {
+      return { ok: false, reason: 'not_your_turn' };
+    }
+    const ct = this.currentTurn;
+    if (!ct) return { ok: false, reason: 'no_turn_state' };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    return { ok: true, ct, p };
+  }
+
   nextRound(): void {
     if (this.phase !== 'round_end') return;
     this.round += 1;
     this.turnOrder = [];
     this.activeTurnIndex = 0;
     for (const p of this.players.values()) p.selection = null;
+    // Round-bounded effects expire: clear all unit shields.
+    for (const u of this.units) u.shield = 0;
+    // Persistent-round cards leave the active area (to discard); 'end-round'
+    // active effects expire. Persistent-scenario cards & 'end-scenario' effects stay.
+    for (const p of this.players.values()) {
+      const stayActive: Card[] = [];
+      for (const card of p.active) {
+        // We don't track which half kept the card alive; conservative rule for v1:
+        // if EITHER half has persistent-scenario disposition, keep it; otherwise discard.
+        const isScenario =
+          card.top.disposition === 'persistent-scenario' ||
+          card.bottom.disposition === 'persistent-scenario';
+        if (isScenario) stayActive.push(card);
+        else p.discard.push(card);
+      }
+      p.active = stayActive;
+      p.activeEffects = p.activeEffects.filter((e) => e.expires === 'end-scenario');
+    }
     this.phase = 'card_select';
     this.broadcastState();
   }
@@ -315,6 +1201,7 @@ export class Room {
     this.turnOrder = order;
     this.activeTurnIndex = 0;
     this.phase = 'turn_resolution';
+    this.openTurn();
   }
 
   pickCharacter(playerId: string, characterId: string): void {
@@ -353,6 +1240,8 @@ export class Room {
       units: this.units,
       turnOrder: this.turnOrder,
       activeTurnIndex: this.activeTurnIndex,
+      currentTurn: this.currentTurn,
+      events: this.events,
       players: [...this.players.values()].map((p) => ({
         playerId: p.playerId,
         name: p.name,
@@ -377,6 +1266,8 @@ export class Room {
           hand: p.hand,
           discard: p.discard,
           lost: p.lost,
+          active: p.active,
+          activeEffects: p.activeEffects,
           selection: p.selection,
         },
       });

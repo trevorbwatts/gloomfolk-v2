@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
-import { HexBoard } from './HexBoard.js';
+import { HexBoard } from '../board/HexBoard.js';
 import { TurnOrder } from './TurnOrder.js';
 
 export function HostScreen() {
@@ -146,7 +146,16 @@ export function HostScreen() {
         </div>
         <div style={{ flex: 1, minWidth: 360 }}>
           {gameState && gameState.tiles.length > 0 ? (
-            <HexBoard tiles={gameState.tiles} units={gameState.units} activeUnitIds={activeUnitIds} />
+            <>
+              <HexBoard tiles={gameState.tiles} units={gameState.units} activeUnitIds={activeUnitIds} />
+              {gameState.events.length > 0 && (
+                <div style={{ marginTop: 12, padding: 10, background: '#1c1c20', borderRadius: 6, fontSize: 13, maxHeight: 180, overflowY: 'auto' }}>
+                  {gameState.events.slice(-8).map((ev) => (
+                    <div key={ev.id} style={{ opacity: 0.85 }}>{ev.text}</div>
+                  ))}
+                </div>
+              )}
+            </>
           ) : (
             <p style={{ opacity: 0.6 }}>No board yet — start a scenario.</p>
           )}
