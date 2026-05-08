@@ -1,3 +1,4 @@
+import { bruiserCards } from '../cards/bruiser/index.js';
 import { bruiserMasteries } from './bruiser-masteries.js';
 import { bruiserPerks } from './bruiser-perks.js';
 import type { CharacterClass } from './types.js';
@@ -7,6 +8,8 @@ export const bruiser: CharacterClass = {
   name: 'Bruiser',
   perks: bruiserPerks,
   masteries: bruiserMasteries,
+  cards: bruiserCards,
+  handSize: 10,
   hp: {
     1: 10,
     2: 12,

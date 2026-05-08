@@ -44,6 +44,18 @@ export type AcrossWindowCriterion =
       readonly count: number;
     };
 
+/** A predicate evaluated against a single attack's target. */
+export type AttackTargetPredicate =
+  /** Disjunction: at least one of `predicates` must hold for the target. */
+  | {
+      readonly kind: 'any-of';
+      readonly predicates: readonly AttackTargetPredicate[];
+    }
+  /** Target's hex is adjacent to an ally of the acting character. */
+  | { readonly kind: 'target-adjacent-to-acting-ally' }
+  /** Target has no allies of its own in adjacent hexes. */
+  | { readonly kind: 'target-has-no-adjacent-allies' };
+
 /** What success looks like inside one scenario. */
 export type PerScenarioCriterion =
   /** At least one occurrence anywhere in the scenario of `event`. */
@@ -61,6 +73,20 @@ export type PerScenarioCriterion =
       readonly roundCount: number;
       readonly perRound: readonly PerRoundCriterion[];
       readonly acrossWindow?: readonly AcrossWindowCriterion[];
+    }
+  /**
+   * Every attack performed in the scenario must satisfy `predicate`, AND
+   * the total number of attacks performed must reach `attackCount`.
+   */
+  | {
+      readonly kind: 'every-attack-targets-allowed-and-count-at-least';
+      readonly predicate: AttackTargetPredicate;
+      readonly attackCount: number;
+    }
+  /** At end-of-scenario, the character holds at least `amount` money tokens. */
+  | {
+      readonly kind: 'end-of-scenario-money-tokens-at-least';
+      readonly amount: number;
     };
 
 /** Top-level criterion: scenario scoping. */

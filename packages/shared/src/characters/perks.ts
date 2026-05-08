@@ -16,6 +16,7 @@
  * and may need a reminder card in the character's active area.
  */
 
+import type { PositiveCondition, NegativeCondition } from '../cards/types.js';
 import type { ModifierCard } from '../modifiers/types.js';
 
 export type PerkSlots =
@@ -43,6 +44,14 @@ export interface AddModifierEffect {
   readonly card: ModifierCard;
 }
 
+/** Remove `count` copies of `card` from the modifier deck. */
+export interface RemoveModifierEffect {
+  readonly kind: 'remove-modifier';
+  readonly card: ModifierCard;
+  /** Defaults to 1. */
+  readonly count?: number;
+}
+
 /**
  * Persistent rule: −1 modifier cards that items would add to the deck
  * (the ones marked in the lower-left corner of some item cards) are
@@ -64,14 +73,40 @@ export type PerkAbilityStep =
       readonly cause: { readonly kind: 'money-token-looted-this-action' };
       readonly effects: readonly PerkAbilityStep[];
     }
-  | { readonly kind: 'refresh-item' };
+  | { readonly kind: 'refresh-item' }
+  /** Apply a condition to a target. */
+  | {
+      readonly kind: 'apply-condition';
+      readonly condition: PositiveCondition | NegativeCondition;
+      readonly target: 'self' | 'tagged-enemy';
+    }
+  /** Place one of the player's money tokens in a target hex. */
+  | {
+      readonly kind: 'place-money-token';
+      readonly target: { readonly kind: 'enemy-hex'; readonly range: number };
+    }
+  /** Perform an attack as part of the granted ability. */
+  | {
+      readonly kind: 'attack';
+      readonly amount: number;
+      readonly range: number;
+      /** 'tagged-enemy': the enemy whose hex received a placed money token. */
+      readonly target: 'tagged-enemy';
+    };
+
+/** When during the scenario a perk-granted ability may be triggered. */
+export type PerkAbilityTiming =
+  /** Performed on the player's own turn as an action. */
+  | 'own-turn'
+  /** Performed at the end of each of the player's rests (short or long). */
+  | 'end-of-rest';
 
 export interface PerkActiveAbility {
   readonly id: string;
-  /** When during the scenario the ability may be performed. */
-  readonly timing: 'own-turn';
-  /** Hard cap on uses per scenario. */
-  readonly usesPerScenario: number;
+  readonly timing: PerkAbilityTiming;
+  /** Hard cap on uses per scenario. Omit when the timing itself bounds uses
+      (e.g. `end-of-rest` is naturally limited by rest count). */
+  readonly usesPerScenario?: number;
   readonly steps: readonly PerkAbilityStep[];
 }
 
@@ -92,7 +127,9 @@ export type PassiveTrigger =
       readonly kind: 'first-attack-of-scenario';
       /** Whose first attack the trigger applies to. */
       readonly scope: 'self' | 'each-character';
-    };
+    }
+  /** Out-of-scenario trigger: the player completes a city event. */
+  | { readonly kind: 'city-event-completed' };
 
 /** The effect a passive rule applies when its trigger fires. */
 export type PassiveRuleEffect =
@@ -101,7 +138,14 @@ export type PassiveRuleEffect =
       readonly amount: number;
     }
   /** Draw two modifier cards and apply the better one. */
-  | { readonly kind: 'advantage' };
+  | { readonly kind: 'advantage' }
+  /** Draw an attack modifier as if performing a virtual Attack of
+      `attackBase`, then award gold equal to the damage that virtual attack
+      would have dealt. */
+  | {
+      readonly kind: 'gold-equal-to-virtual-attack-damage';
+      readonly attackBase: number;
+    };
 
 /**
  * Persistent passive rule: every time `trigger` fires, `effect` applies.
@@ -116,6 +160,7 @@ export interface PassiveRuleEffectEntry {
 export type PerkEffect =
   | ReplaceModifierEffect
   | AddModifierEffect
+  | RemoveModifierEffect
   | IgnoreItemMinusOnesEffect
   | GrantActiveAbilityEffect
   | PassiveRuleEffectEntry;

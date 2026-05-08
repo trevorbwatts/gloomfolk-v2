@@ -19,7 +19,13 @@ export type AttackRiderEffect =
   | { readonly kind: 'shield'; readonly amount: number }
   | { readonly kind: 'heal-self'; readonly amount: number }
   | { readonly kind: 'push'; readonly amount: number }
-  | { readonly kind: 'apply-condition'; readonly condition: Condition };
+  | { readonly kind: 'apply-condition'; readonly condition: Condition }
+  | {
+      readonly kind: 'gain-money-token';
+      readonly amount: number;
+      /** Conditional gate; if absent, gain unconditionally. */
+      readonly when?: { readonly kind: 'attack-targeted-adjacent-enemy' };
+    };
 
 /** What causes a parked reactive card to fire. */
 export type ReactiveTrigger =

@@ -5,6 +5,7 @@
  * - HpByLevel: max HP at each character level, indexed 1..9.
  */
 
+import type { Card } from '../cards/types.js';
 import type { Mastery } from './masteries.js';
 import type { Perk } from './perks.js';
 
@@ -19,6 +20,12 @@ export interface CharacterClass {
   readonly id: string;
   readonly name: string;
   readonly hp: HpByLevel;
+  /** Maximum number of ability cards the character may take into a scenario. */
+  readonly handSize: number;
+  /** Every ability card belonging to this class, across all levels. The
+      pool a player can pick from at a given character level is derived
+      from this list (see `loadout.ts`). */
+  readonly cards: readonly Card[];
   /** Perk list as printed on the character sheet, in order. Position is
       load-bearing: perks are referenced by index when marking checkboxes. */
   readonly perks: readonly Perk[];
