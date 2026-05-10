@@ -6,7 +6,7 @@ import {
   type CharacterClass,
   type CharacterPool,
 } from '@gloomfolk/shared';
-import { useSocket } from '../net/useSocket.js';
+import { getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { ClassPick } from './ClassPick.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
@@ -17,6 +17,19 @@ const CLASS_BY_ID: Record<string, CharacterClass> = {
   [bruiser.id]: bruiser,
   [silentKnife.id]: silentKnife,
 };
+
+function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTurn: boolean): string {
+  if (!hasCharacter) return 'Pick your character';
+  switch (phase) {
+    case 'lobby': return 'Waiting to begin…';
+    case 'card_select': return 'Choose your cards';
+    case 'turn_resolution': return isMyTurn ? 'Take your turn' : 'Turn in progress';
+    case 'round_end': return 'Round complete';
+    case 'victory': return 'Victory';
+    case 'defeat': return 'Defeated';
+    default: return '';
+  }
+}
 
 function readCampaignFromHash(): string | null {
   const h = location.hash.replace(/^#/, '').trim();
@@ -67,6 +80,14 @@ export function PlayerScreen() {
   }, []);
 
   if (role !== 'player') {
+    const savedSession = getSavedSession();
+    if (savedSession) {
+      return (
+        <div style={{ padding: 24, fontFamily: 'system-ui', maxWidth: 480 }}>
+          <p style={{ opacity: 0.6 }}>Reconnecting…</p>
+        </div>
+      );
+    }
     return (
       <div style={{ padding: 24, fontFamily: 'system-ui', maxWidth: 480 }}>
         <h1>Join Gloomfolk</h1>
@@ -93,15 +114,12 @@ export function PlayerScreen() {
           onClick={() => {
             try {
               localStorage.setItem('gf:name', name.trim());
+              sessionStorage.setItem('gf:name', name.trim());
             } catch { /* noop */ }
-            const storedId = (() => {
-              try { return localStorage.getItem('gf:playerId') ?? undefined; } catch { return undefined; }
-            })();
             sock.send({
               type: 'player_join',
               campaignId: campaignId.trim(),
               name: name.trim(),
-              ...(storedId ? { playerId: storedId } : {}),
             });
           }}
         >
@@ -115,14 +133,23 @@ export function PlayerScreen() {
   const phase = gameState?.phase;
   const submittedCount = gameState?.players.filter((p) => p.submitted).length ?? 0;
   const totalReady = gameState?.players.filter((p) => p.characterId).length ?? 0;
+  const cur = gameState?.turnOrder[gameState?.activeTurnIndex ?? -1];
+  const isMyTurn = cur?.kind === 'player' && cur.playerId === playerId;
 
   return (
-    <div style={{ padding: 16, fontFamily: 'system-ui', maxWidth: 540, color: '#eee', background: '#18181b', minHeight: '100vh' }}>
-      <h1 style={{ marginTop: 0 }}>{gameState?.campaignName}</h1>
-      <p style={{ opacity: 0.7, fontSize: 13, marginTop: -8 }}>
-        {me?.name} {me?.characterId ? `· ${me.characterId}` : ''} · phase: {phase}
-        {phase === 'card_select' && ` · ${submittedCount}/${totalReady} ready`}
+    <div style={{ padding: 16, fontFamily: 'system-ui', maxWidth: 540, color: '#eee', background: '#18181b', minHeight: '100vh', boxSizing: 'border-box', overflow: 'hidden' }}>
+      <p style={{ opacity: 0.55, fontSize: 12, margin: 0, letterSpacing: 0.3 }}>
+        {gameState?.campaignName}
+        {me?.name && ` · ${me.name}${me?.characterId && CLASS_BY_ID[me.characterId] ? `, ${CLASS_BY_ID[me.characterId]!.name}` : ''}`}
       </p>
+      <h1 style={{ marginTop: 4, marginBottom: 12, fontWeight: 500, fontSize: 24 }}>
+        {phaseHeadline(phase, !!me?.characterId, isMyTurn)}
+      </h1>
+      {phase === 'card_select' && me?.characterId && submittedCount > 0 && submittedCount < totalReady && (
+        <p style={{ opacity: 0.6, fontSize: 13, marginTop: -8, marginBottom: 12 }}>
+          Waiting on {totalReady - submittedCount} other {totalReady - submittedCount === 1 ? 'player' : 'players'}.
+        </p>
+      )}
       {!me?.characterId && !buildingClassId && (
         <ClassPick onPick={(classId) => setBuildingClassId(classId)} />
       )}

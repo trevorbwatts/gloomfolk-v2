@@ -2,6 +2,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientToServer, ServerToClient } from '@gloomfolk/shared';
 import {
   type CampaignSave,
+  deleteCampaign,
   listCampaigns,
   loadCampaign,
   newCampaignId,
@@ -108,6 +109,24 @@ async function handle(
       conn.campaignId = id;
       room.attachHost(ws);
       send(ws, { type: 'joined', role: 'host', playerId: 'host', campaignId: id });
+      return;
+    }
+
+    case 'host_delete_campaign': {
+      if (conn.role !== 'host') {
+        send(ws, { type: 'error', message: 'not_host' });
+        return;
+      }
+      const room = rooms.get(msg.campaignId);
+      if (room) room.kickAll();
+      rooms.delete(msg.campaignId);
+      const ok = await deleteCampaign(msg.campaignId);
+      if (!ok) {
+        send(ws, { type: 'error', message: 'campaign_not_found' });
+        return;
+      }
+      if (conn.campaignId === msg.campaignId) conn.campaignId = null;
+      send(ws, { type: 'campaign_list', campaigns: await listCampaigns() });
       return;
     }
 

@@ -10,6 +10,8 @@ import type {
   GameEvent,
   HalfSlot,
   Hex,
+  ModifierCardInstance,
+  ModifierDrawResult,
   MonsterStatCard,
   NegativeCondition,
   PendingAction,
@@ -19,21 +21,26 @@ import type {
   Unit,
 } from '@gloomfolk/shared';
 import {
+  applyModifierToAttack,
   archerDeck,
   banditArcher,
   banditScout,
   bfsForcedMove,
   bfsReachable,
   bruiser,
+  createStartingModifierDeck,
   getScenario,
   hasLineOfSight,
   hexDistance,
   hexEqual,
   hexKey,
+  modifierLabel,
+  reshuffleModifierDeck,
   rotateHexN,
   rotatePattern,
   scoutDeck,
   startingHandFor,
+  triggersReshuffle,
 } from '@gloomfolk/shared';
 
 const MONSTER_DECKS = {
@@ -81,6 +88,30 @@ function applyDamage(target: Unit, attackAmount: number, pierce: number): number
   const dmg = Math.max(0, attackAmount - effShield);
   target.hp -= dmg;
   return dmg;
+}
+
+/**
+ * Draw the top card of `p`'s attack-modifier deck. If the deck is empty (only
+ * possible if every card has already been discarded this turn), reshuffle the
+ * discard back into the deck first. Sets `modifierNeedsReshuffle` if the drawn
+ * card is a Null or ×2 (handled at end-of-turn, not instantly, per the rules).
+ */
+function drawModifier(p: PlayerEntry): ModifierCardInstance {
+  if (p.modifierDeck.length === 0) {
+    p.modifierDeck = reshuffleModifierDeck([], p.modifierDiscard);
+    p.modifierDiscard = [];
+    p.modifierNeedsReshuffle = false;
+  }
+  const drawn = p.modifierDeck.shift()!;
+  p.modifierDiscard.push(drawn);
+  if (triggersReshuffle(drawn.card)) p.modifierNeedsReshuffle = true;
+  return drawn;
+}
+
+let modifierDrawSeq = 0;
+function nextDrawId(): string {
+  modifierDrawSeq += 1;
+  return `d${modifierDrawSeq}`;
 }
 
 function hasCondition(unit: Unit, kind: NegativeCondition): boolean {
@@ -354,6 +385,9 @@ interface PlayerEntry {
   active: Card[];
   activeEffects: ActiveEffect[];
   selection: CardSelection | null;
+  modifierDeck: ModifierCardInstance[];
+  modifierDiscard: ModifierCardInstance[];
+  modifierNeedsReshuffle: boolean;
 }
 
 export class Room {
@@ -383,6 +417,9 @@ export class Room {
         active: [],
         activeEffects: [],
         selection: null,
+        modifierDeck: [],
+        modifierDiscard: [],
+        modifierNeedsReshuffle: false,
       });
     }
   }
@@ -394,6 +431,22 @@ export class Room {
 
   detachHost(ws: WebSocket): void {
     this.hostSockets.delete(ws);
+  }
+
+  kickAll(): void {
+    const msg: ServerToClient = { type: 'error', message: 'campaign_deleted' };
+    for (const ws of this.hostSockets) {
+      this.send(ws, msg);
+      try { ws.close(); } catch { /* noop */ }
+    }
+    this.hostSockets.clear();
+    for (const p of this.players.values()) {
+      if (p.socket) {
+        this.send(p.socket, msg);
+        try { p.socket.close(); } catch { /* noop */ }
+      }
+      p.socket = null;
+    }
   }
 
   attachPlayer(ws: WebSocket, name: string, requestedId?: string): string {
@@ -414,6 +467,9 @@ export class Room {
         active: [],
         activeEffects: [],
         selection: null,
+        modifierDeck: [],
+        modifierDiscard: [],
+        modifierNeedsReshuffle: false,
       };
       this.players.set(playerId, entry);
       this.campaign.players.push({ playerId, name, characterId: null });
@@ -473,6 +529,10 @@ export class Room {
       p.discard = [];
       p.lost = [];
       p.selection = null;
+      // Fresh, shuffled attack-modifier deck.
+      p.modifierDeck = createStartingModifierDeck();
+      p.modifierDiscard = [];
+      p.modifierNeedsReshuffle = false;
     });
 
     enemySlots.forEach((slot) => {
@@ -551,7 +611,10 @@ export class Room {
     // Player turn ending: dispose selected cards + tick conditions on the unit.
     if (cur.kind === 'player') {
       const p = this.players.get(cur.playerId);
-      if (p) this.disposePlayerCards(p);
+      if (p) {
+        this.disposePlayerCards(p);
+        this.maybeReshuffleModifierDeck(p);
+      }
       const unit = this.units.find((u) => u.id === cur.unitId);
       if (unit) {
         const removed = tickConditionsEndOfTurn(unit);
@@ -680,8 +743,25 @@ export class Room {
         }
         const attackKind: 'melee' | 'ranged' = action.range > 1 ? 'ranged' : 'melee';
         const { amount: bonusAmt, pierce: bonusPierce } = consumeAttackBonus(guard.p, attackKind);
-        const dmg = applyDamage(tgt, action.amount + bonusAmt, action.pierce + bonusPierce);
-        this.pushEvent(`${unit.name} attacks ${tgt.name} for ${dmg}.`);
+        // Reset draw reveal at the start of a fresh attack action (i.e. when
+        // this is the first target for this multi-target action).
+        if (action.targetsRemaining === action.targets) ct.lastModifierDraws = [];
+        const baseAmount = action.amount + bonusAmt;
+        const drawn = drawModifier(guard.p);
+        const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
+        const dmg = applyDamage(tgt, finalAmount, action.pierce + bonusPierce);
+        ct.lastModifierDraws.push({
+          id: nextDrawId(),
+          card: drawn.card,
+          targetUnitId: tgt.id,
+          targetName: tgt.name,
+          baseAmount,
+          finalAmount,
+          damageDealt: dmg,
+        });
+        this.pushEvent(
+          `${unit.name} attacks ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
+        );
         if (tgt.hp <= 0) {
           this.units = this.units.filter((u) => u.id !== tgt.id);
           this.pushEvent(`${tgt.name} is exhausted!`);
@@ -716,12 +796,27 @@ export class Room {
         // is per-hex; for v1 we only enforce LOS to the anchor (target.hex).
         // (Adjacent hexes effectively pass.)
         const { amount: bonusAmt, pierce: bonusPierce } = consumeAttackBonus(guard.p, 'melee');
+        const baseAmount = action.amount + bonusAmt;
+        ct.lastModifierDraws = [];
         let hitCount = 0;
         for (const hex of aoeHexes) {
           const tgt = this.units.find((u) => u.kind === 'monster' && hexEqual(u.hex, hex));
           if (!tgt) continue;
-          const dmg = applyDamage(tgt, action.amount + bonusAmt, action.pierce + bonusPierce);
-          this.pushEvent(`${unit.name} hits ${tgt.name} for ${dmg}.`);
+          const drawn = drawModifier(guard.p);
+          const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
+          const dmg = applyDamage(tgt, finalAmount, action.pierce + bonusPierce);
+          ct.lastModifierDraws.push({
+            id: nextDrawId(),
+            card: drawn.card,
+            targetUnitId: tgt.id,
+            targetName: tgt.name,
+            baseAmount,
+            finalAmount,
+            damageDealt: dmg,
+          });
+          this.pushEvent(
+            `${unit.name} hits ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
+          );
           if (tgt.hp <= 0) {
             this.units = this.units.filter((u) => u.id !== tgt.id);
             this.pushEvent(`${tgt.name} is exhausted!`);
@@ -903,6 +998,15 @@ export class Room {
    *   persistent treated as discard for now).
    * - Card never engaged in either slot → discard with no effect.
    */
+  /** Reshuffle the modifier deck if a Null or ×2 was drawn this turn. */
+  private maybeReshuffleModifierDeck(p: PlayerEntry): void {
+    if (!p.modifierNeedsReshuffle) return;
+    p.modifierDeck = reshuffleModifierDeck(p.modifierDeck, p.modifierDiscard);
+    p.modifierDiscard = [];
+    p.modifierNeedsReshuffle = false;
+    this.pushEvent(`${p.name}'s modifier deck reshuffles.`);
+  }
+
   private disposePlayerCards(p: PlayerEntry): void {
     if (!p.selection || p.selection.kind !== 'cards') return;
     const ct = this.currentTurn;
@@ -953,7 +1057,10 @@ export class Room {
       if (unit && hasCondition(unit, 'stun')) {
         this.pushEvent(`${unit.name} is stunned and skips their turn.`);
         const p = this.players.get(cur.playerId);
-        if (p) this.disposePlayerCards(p);
+        if (p) {
+          this.disposePlayerCards(p);
+          this.maybeReshuffleModifierDeck(p);
+        }
         const removed = tickConditionsEndOfTurn(unit);
         for (const k of removed) this.pushEvent(`${unit.name} is no longer ${k}ed.`);
         cur.done = true;
@@ -971,6 +1078,7 @@ export class Room {
         topSlot: unlockedSlot(),
         bottomSlot: unlockedSlot(),
         activeSlot: null,
+        lastModifierDraws: [],
       };
     } else {
       this.currentTurn = null;
@@ -1269,6 +1377,9 @@ export class Room {
           active: p.active,
           activeEffects: p.activeEffects,
           selection: p.selection,
+          modifierDeck: p.modifierDeck,
+          modifierDiscard: p.modifierDiscard,
+          modifierNeedsReshuffle: p.modifierNeedsReshuffle,
         },
       });
     }

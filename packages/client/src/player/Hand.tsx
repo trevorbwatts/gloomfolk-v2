@@ -58,7 +58,7 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
         </button>
       </div>
       {hand.length === 0 && <p style={{ opacity: 0.6 }}>No cards in hand.</p>}
-      {hand.map((c) => {
+      {[...hand].sort((a, b) => a.initiative - b.initiative).map((c) => {
         const marker = leading === c.id ? 'L' : second === c.id ? '2nd' : null;
         return (
           <CardView

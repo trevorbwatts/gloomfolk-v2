@@ -53,7 +53,7 @@ export function LoadoutBuilder({
     }
     return LEVEL_GROUP_ORDER.map((level) => ({
       level,
-      cards: byLevel.get(level) ?? [],
+      cards: (byLevel.get(level) ?? []).slice().sort((a, b) => a.initiative - b.initiative),
     })).filter((g) => g.cards.length > 0);
   }, [cards]);
 
@@ -198,7 +198,7 @@ export function LoadoutBuilder({
             cursor: lockable ? 'pointer' : 'not-allowed',
           }}
         >
-          Lock in
+          Lock in ({selectedCount}/{handSize})
         </button>
       </div>
     </div>

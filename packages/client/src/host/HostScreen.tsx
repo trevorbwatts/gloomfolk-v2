@@ -33,6 +33,16 @@ export function HostScreen() {
                   {c.playerNames.join(', ') || 'no players'} · updated{' '}
                   {new Date(c.updatedAt).toLocaleString()}
                 </span>
+                <button
+                  onClick={() => {
+                    if (confirm(`Delete campaign "${c.name}"? This cannot be undone.`)) {
+                      sock.send({ type: 'host_delete_campaign', campaignId: c.id });
+                    }
+                  }}
+                  style={{ marginLeft: 8, fontSize: 12 }}
+                >
+                  Delete
+                </button>
               </li>
             ))}
           </ul>

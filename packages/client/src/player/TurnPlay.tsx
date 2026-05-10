@@ -18,6 +18,8 @@ import {
 } from '@gloomfolk/shared';
 import { HexBoard } from '../board/HexBoard.js';
 import { useSocket } from '../net/useSocket.js';
+import { CardView, HalfView } from './CardView.js';
+import { ModifierDeckView } from './ModifierDeckView.js';
 
 export function TurnPlay({
   gameState,
@@ -37,6 +39,13 @@ export function TurnPlay({
   );
 
   if (!isMyTurn || !ct) {
+    const sel = you?.selection;
+    const selectedCards = sel?.kind === 'cards' && you
+      ? [sel.leadingId, sel.secondId]
+          .map((id) => you.hand.find((c) => c.id === id))
+          .filter((c): c is Card => !!c)
+      : [];
+
     return (
       <div>
         <p style={{ opacity: 0.7 }}>
@@ -53,6 +62,14 @@ export function TurnPlay({
           maxWidthPx={400}
           activeUnitIds={cur?.kind === 'player' ? [cur.unitId] : []}
         />
+        {selectedCards.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <h3 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.6 }}>Your cards this round</h3>
+            {selectedCards.map((c) => (
+              <CardView key={c.id} card={c} />
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -146,6 +163,10 @@ function ActionDriver({
         />
       ) : (
         <SlotPicker ct={ct} you={you} />
+      )}
+
+      {you && (
+        <ModifierDeckView you={you} lastDraws={ct.lastModifierDraws} />
       )}
 
       {you && <ActiveArea you={you} />}
@@ -335,6 +356,41 @@ function SlotPicker({
   );
 }
 
+function HalfActions({
+  label,
+  basicLabel,
+  onEngage,
+  onSkip,
+}: {
+  label: string;
+  basicLabel: string;
+  onEngage: (useBasic: boolean) => void;
+  onSkip: () => void;
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 6, paddingTop: 8 }}>
+      <button
+        style={{ flex: 1, padding: '8px 10px', fontSize: 13 }}
+        onClick={() => onEngage(false)}
+      >
+        Use {label.toLowerCase()}
+      </button>
+      <button
+        style={{ padding: '8px 10px', fontSize: 11 }}
+        onClick={() => onEngage(true)}
+      >
+        {basicLabel}
+      </button>
+      <button
+        style={{ padding: '8px 10px', fontSize: 11 }}
+        onClick={onSkip}
+      >
+        Skip
+      </button>
+    </div>
+  );
+}
+
 function CardHalfChoices({
   card,
   allowedSlots,
@@ -349,76 +405,55 @@ function CardHalfChoices({
   return (
     <div
       style={{
-        marginBottom: 10,
-        padding: 10,
-        border: '1px solid #444',
-        borderRadius: 6,
+        textAlign: 'left',
         background: '#1c1c20',
+        color: '#eee',
+        border: '2px solid #444',
+        borderRadius: 6,
+        padding: '16px 18px',
+        margin: '8px 0',
+        width: '100%',
+        boxSizing: 'border-box',
+        overflow: 'hidden',
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-        <strong>{card.name}</strong>
-        <span style={{ fontSize: 11, opacity: 0.7, fontFamily: 'monospace' }}>
-          init {String(card.initiative).padStart(2, '0')} · L{String(card.level)}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+        <span style={{ fontSize: 11, opacity: 0.55, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+          {card.level} · {card.name}
+        </span>
+        <span style={{ fontSize: 11, opacity: 0.55, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+          {String(card.initiative).padStart(2, '0')}
         </span>
       </div>
-      {allowedSlots.includes('top') && (
-        <HalfRow
-          label="Top"
-          summary={halfSummary(card.top.abilities)}
-          basicLabel="Basic Attack 2"
-          onEngage={(useBasic) => onEngage('top', useBasic)}
-          onSkip={() => onSkip('top')}
+      <div style={{ fontSize: 18, lineHeight: 1.35 }}>
+        <div>
+          <HalfView half={card.top} />
+          {allowedSlots.includes('top') && (
+            <HalfActions
+              label="Top"
+              basicLabel="Basic Attack 2"
+              onEngage={(useBasic) => onEngage('top', useBasic)}
+              onSkip={() => onSkip('top')}
+            />
+          )}
+        </div>
+        <div
+          style={{
+            borderTop: '2px solid #4a4a52',
+            margin: '16px -18px 4px',
+          }}
         />
-      )}
-      {allowedSlots.includes('bottom') && (
-        <HalfRow
-          label="Bottom"
-          summary={halfSummary(card.bottom.abilities)}
-          basicLabel="Basic Move 2"
-          onEngage={(useBasic) => onEngage('bottom', useBasic)}
-          onSkip={() => onSkip('bottom')}
-        />
-      )}
-    </div>
-  );
-}
-
-function HalfRow({
-  label,
-  summary,
-  basicLabel,
-  onEngage,
-  onSkip,
-}: {
-  label: string;
-  summary: string;
-  basicLabel: string;
-  onEngage: (useBasic: boolean) => void;
-  onSkip: () => void;
-}) {
-  return (
-    <div style={{ marginBottom: 6 }}>
-      <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 3 }}>{label}: {summary || '(no abilities)'}</div>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <button
-          style={{ flex: 1, padding: '8px 10px', fontSize: 13 }}
-          onClick={() => onEngage(false)}
-        >
-          Use {label.toLowerCase()}
-        </button>
-        <button
-          style={{ padding: '8px 10px', fontSize: 11 }}
-          onClick={() => onEngage(true)}
-        >
-          {basicLabel}
-        </button>
-        <button
-          style={{ padding: '8px 10px', fontSize: 11 }}
-          onClick={onSkip}
-        >
-          Skip
-        </button>
+        <div>
+          <HalfView half={card.bottom} />
+          {allowedSlots.includes('bottom') && (
+            <HalfActions
+              label="Bottom"
+              basicLabel="Basic Move 2"
+              onEngage={(useBasic) => onEngage('bottom', useBasic)}
+              onSkip={() => onSkip('bottom')}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -442,6 +477,7 @@ function ActiveHalfPanel({
   const sock = useSocket();
   const card = slot.cardId && you ? you.hand.find((c) => c.id === slot.cardId) ?? null : null;
   const allDone = slot.actions.every((a) => a.done);
+  const firstPendingId = slot.actions.find((a) => !a.done)?.id ?? null;
   const cardLabel = slot.useBasic
     ? `Basic ${slotKind === 'top' ? 'Attack 2' : 'Move 2'}`
     : card?.name ?? '?';
@@ -456,6 +492,7 @@ function ActiveHalfPanel({
           <ActionRow
             key={a.id}
             action={a}
+            isNext={a.id === firstPendingId}
             selected={selectedActionId === a.id}
             onSelect={() => onSelect(a.id)}
             onSkip={() => onSkip(a.id)}
@@ -484,11 +521,13 @@ function ActiveHalfPanel({
 
 function ActionRow({
   action,
+  isNext,
   selected,
   onSelect,
   onSkip,
 }: {
   action: PendingAction;
+  isNext: boolean;
   selected: boolean;
   onSelect: () => void;
   onSkip: () => void;
@@ -496,6 +535,7 @@ function ActionRow({
   const label = actionLabel(action);
   const needsTarget = action.type === 'move' || action.type === 'attack';
   const supported = action.type !== 'unsupported';
+  const showButtons = isNext && !action.done;
   const bgDone = action.done ? '#1a2a1a' : selected ? '#2a3a55' : '#1c1c20';
   return (
     <div
@@ -507,18 +547,18 @@ function ActionRow({
         background: bgDone,
         borderRadius: 4,
         border: `1px solid ${selected ? '#5fa8e6' : '#444'}`,
-        opacity: action.done ? 0.5 : 1,
+        opacity: action.done ? 0.5 : isNext ? 1 : 0.45,
       }}
     >
       <span style={{ flex: 1, fontSize: 13 }}>
         {label} {action.done ? '✓' : ''}
       </span>
-      {!action.done && supported && (
+      {showButtons && supported && (
         <button onClick={onSelect} style={{ padding: '4px 10px', fontSize: 12 }}>
           {needsTarget ? (selected ? 'Cancel' : 'Perform') : 'Apply'}
         </button>
       )}
-      {!action.done && (
+      {showButtons && (
         <button onClick={onSkip} style={{ padding: '4px 10px', fontSize: 12 }}>
           Skip
         </button>
@@ -759,17 +799,3 @@ function BoardForTurn({
   );
 }
 
-function halfSummary(abilities: Card['top']['abilities']): string {
-  const parts: string[] = [];
-  for (const ability of abilities) {
-    for (const step of ability.steps) {
-      if (step.type === 'move' && typeof step.amount === 'number') parts.push(`Move ${step.amount}`);
-      else if (step.type === 'attack' && typeof step.amount === 'number') parts.push(`Attack ${step.amount}`);
-      else if (step.type === 'heal') parts.push(`Heal ${step.amount}`);
-      else if (step.type === 'shield') parts.push(`Shield ${step.amount}`);
-      else if (step.type === 'apply-condition') parts.push(step.condition);
-      else parts.push(step.type);
-    }
-  }
-  return parts.join(', ');
-}

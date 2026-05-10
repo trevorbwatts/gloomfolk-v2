@@ -68,6 +68,16 @@ export async function saveCampaign(data: CampaignSave): Promise<void> {
   await fs.rename(tmp, filePath(data.id));
 }
 
+export async function deleteCampaign(id: string): Promise<boolean> {
+  await ensureDir();
+  try {
+    await fs.unlink(filePath(id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Returns the lowest unused single-digit slot ('1'..'9'). Throws if all 9 are taken. */
 export async function newCampaignId(): Promise<string> {
   await ensureDir();

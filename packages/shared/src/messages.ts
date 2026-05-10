@@ -1,5 +1,6 @@
 import type { Card, NegativeCondition } from './cards/types.js';
 import type { Hex } from './hex.js';
+import type { ModifierCard, ModifierCardInstance } from './modifiers/index.js';
 import type { Tile } from './scenarios/types.js';
 
 export type Role = 'host' | 'player';
@@ -207,12 +208,37 @@ export interface HalfSlot {
   performedCount: number;
 }
 
+/**
+ * One revealed attack-modifier card from a player's deck. Emitted per attack
+ * (per target on multi-target / AOE attacks). Cleared at the start of the
+ * next attack action and at end-of-turn.
+ */
+export interface ModifierDrawResult {
+  /** Stable id for this draw event (animation key). */
+  id: string;
+  card: ModifierCard;
+  targetUnitId: string;
+  targetName: string;
+  /** Attack value before the modifier was applied (incl. active-effect bonuses). */
+  baseAmount: number;
+  /** Final attack value after the modifier (before shield/pierce). */
+  finalAmount: number;
+  /** Damage actually dealt after shield/pierce. */
+  damageDealt: number;
+}
+
 export interface CurrentTurn {
   unitId: string;
   topSlot: HalfSlot;
   bottomSlot: HalfSlot;
   /** Slot the player is currently performing, if any. */
   activeSlot: 'top' | 'bottom' | null;
+  /**
+   * Modifier draws revealed by the most recent attack action. Replaced on the
+   * next attack and cleared between turns. Used by the client to animate the
+   * card flip(s).
+   */
+  lastModifierDraws: ModifierDrawResult[];
 }
 
 export interface PrivatePlayerState {
@@ -225,6 +251,13 @@ export interface PrivatePlayerState {
   /** Live persistent effects granted by performed actions. */
   activeEffects: ActiveEffect[];
   selection: CardSelection | null;
+  /** Cards still face-down in the attack-modifier deck. Order is the draw order
+   *  (index 0 = next to be drawn). */
+  modifierDeck: ModifierCardInstance[];
+  /** Cards already drawn this round (or since last reshuffle). */
+  modifierDiscard: ModifierCardInstance[];
+  /** True if a Null or ×2 has been drawn this turn — deck reshuffles at end of turn. */
+  modifierNeedsReshuffle: boolean;
 }
 
 export type ClientToServer =
@@ -232,6 +265,7 @@ export type ClientToServer =
   | { type: 'host_list_campaigns' }
   | { type: 'host_create_campaign'; name: string }
   | { type: 'host_load_campaign'; campaignId: string }
+  | { type: 'host_delete_campaign'; campaignId: string }
   | { type: 'player_join'; campaignId: string; name: string; playerId?: string }
   | { type: 'player_pick_character'; characterId: string }
   | { type: 'host_start_scenario'; scenarioId: string }
