@@ -4,6 +4,8 @@ import type {
   Card,
   CardHalf,
   CardSelection,
+  CharacterClass,
+  CharacterInstance,
   ClientToServer,
   ConditionInstance,
   CurrentTurn,
@@ -28,6 +30,7 @@ import {
   bfsForcedMove,
   bfsReachable,
   bruiser,
+  silentKnife,
   createStartingModifierDeck,
   getScenario,
   hasLineOfSight,
@@ -39,6 +42,7 @@ import {
   rotateHexN,
   rotatePattern,
   scoutDeck,
+  defaultPoolForClass,
   startingHandFor,
   triggersReshuffle,
 } from '@gloomfolk/shared';
@@ -68,6 +72,11 @@ function monsterDefMatchesSet(defId: string, setId: string): boolean {
 const CHARACTER_NAMES: Record<string, string> = {
   bruiser: 'Bruiser',
   'silent-knife': 'Silent Knife',
+};
+
+const CHARACTER_CLASSES: Record<string, CharacterClass> = {
+  [bruiser.id]: bruiser,
+  [silentKnife.id]: silentKnife,
 };
 
 // Negative conditions the engine actually enforces today. Others are recognized
@@ -377,7 +386,7 @@ function characterHp(characterId: string): number {
 interface PlayerEntry {
   playerId: string;
   name: string;
-  characterId: string | null;
+  activeCharacterId: string | null;
   socket: WebSocket | null;
   hand: Card[];
   discard: Card[];
@@ -409,7 +418,7 @@ export class Room {
       this.players.set(p.playerId, {
         playerId: p.playerId,
         name: p.name,
-        characterId: p.characterId,
+        activeCharacterId: p.activeCharacterId,
         socket: null,
         hand: [],
         discard: [],
@@ -459,7 +468,7 @@ export class Room {
       entry = {
         playerId,
         name,
-        characterId: null,
+        activeCharacterId: null,
         socket: ws,
         hand: [],
         discard: [],
@@ -472,7 +481,7 @@ export class Room {
         modifierNeedsReshuffle: false,
       };
       this.players.set(playerId, entry);
-      this.campaign.players.push({ playerId, name, characterId: null });
+      this.campaign.players.push({ playerId, name, activeCharacterId: null });
       void this.persist();
     }
     this.send(ws, {
@@ -499,7 +508,7 @@ export class Room {
 
     const playerSlots = scenario.spawns.filter((s) => s.side === 'player');
     const enemySlots = scenario.spawns.filter((s) => s.side === 'enemy');
-    const readyPlayers = [...this.players.values()].filter((p) => p.characterId);
+    const readyPlayers = [...this.players.values()].filter((p) => p.activeCharacterId);
 
     if (readyPlayers.length === 0) {
       return { ok: false, reason: 'no_players_with_characters' };
@@ -510,13 +519,16 @@ export class Room {
 
     readyPlayers.forEach((p, i) => {
       const slot = playerSlots[i];
-      if (!slot || !p.characterId) return;
-      const hp = characterHp(p.characterId);
+      const charInst = p.activeCharacterId
+        ? this.campaign.characters.find((c) => c.id === p.activeCharacterId)
+        : null;
+      if (!slot || !charInst) return;
+      const hp = characterHp(charInst.classId);
       this.units.push({
         id: `u${unitN++}`,
         kind: 'player',
-        defId: p.characterId,
-        name: p.name,
+        defId: charInst.classId,
+        name: charInst.name,
         hp,
         hpMax: hp,
         shield: 0,
@@ -525,7 +537,7 @@ export class Room {
         ownerPlayerId: p.playerId,
       });
       // Deal starting hand
-      p.hand = [...startingHandFor(p.characterId)];
+      p.hand = [...startingHandFor(charInst.classId)];
       p.discard = [];
       p.lost = [];
       p.selection = null;
@@ -1249,7 +1261,7 @@ export class Room {
 
   private maybeBeginTurnResolution(): void {
     const ready = [...this.players.values()].filter(
-      (p) => p.characterId && p.socket !== null,
+      (p) => p.activeCharacterId && p.socket !== null,
     );
     if (ready.length === 0) return;
     if (!ready.every((p) => p.selection !== null)) return;
@@ -1312,12 +1324,69 @@ export class Room {
     this.openTurn();
   }
 
+  createCharacter(
+    playerId: string,
+    classId: string,
+    characterName: string,
+  ): { ok: true; characterInstanceId: string } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+
+    const classDef = CHARACTER_CLASSES[classId];
+    if (!classDef) return { ok: false, reason: 'unknown_class' };
+
+    const trimmed = characterName.trim();
+    if (!trimmed) return { ok: false, reason: 'name_required' };
+
+    const id = 'ch_' + Math.random().toString(36).slice(2, 8);
+    const instance: CharacterInstance = {
+      id,
+      classId,
+      name: trimmed,
+      level: 1,
+      xp: 0,
+      perksUnlocked: [],
+      pool: [...defaultPoolForClass(classDef)],
+      claimedByPlayerId: playerId,
+    };
+
+    this.campaign.characters.push(instance);
+    entry.activeCharacterId = id;
+    const saved = this.campaign.players.find((p) => p.playerId === playerId);
+    if (saved) saved.activeCharacterId = id;
+    void this.persist();
+    this.broadcastState();
+    return { ok: true, characterInstanceId: id };
+  }
+
+  claimCharacter(
+    playerId: string,
+    characterInstanceId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+
+    const instance = this.campaign.characters.find((c) => c.id === characterInstanceId);
+    if (!instance) return { ok: false, reason: 'character_not_found' };
+    if (instance.claimedByPlayerId && instance.claimedByPlayerId !== playerId) {
+      return { ok: false, reason: 'already_claimed' };
+    }
+
+    instance.claimedByPlayerId = playerId;
+    entry.activeCharacterId = characterInstanceId;
+    const saved = this.campaign.players.find((p) => p.playerId === playerId);
+    if (saved) saved.activeCharacterId = characterInstanceId;
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
   pickCharacter(playerId: string, characterId: string): void {
     const entry = this.players.get(playerId);
     if (!entry) return;
-    entry.characterId = characterId;
+    entry.activeCharacterId = characterId;
     const saved = this.campaign.players.find((p) => p.playerId === playerId);
-    if (saved) saved.characterId = characterId;
+    if (saved) saved.activeCharacterId = characterId;
     void this.persist();
     this.broadcastState();
   }
@@ -1342,6 +1411,7 @@ export class Room {
       campaignName: this.campaign.name,
       phase: this.phase,
       round: this.round,
+      characters: this.campaign.characters,
       scenarioId: this.campaign.scenarioId,
       scenarioName: scenario?.name ?? null,
       tiles: scenario?.tiles ?? [],
@@ -1353,7 +1423,7 @@ export class Room {
       players: [...this.players.values()].map((p) => ({
         playerId: p.playerId,
         name: p.name,
-        characterId: p.characterId,
+        characterId: p.activeCharacterId,
         connected: p.socket !== null,
         submitted: p.selection !== null,
       })),

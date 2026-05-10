@@ -100,6 +100,7 @@ async function handle(
         createdAt: Date.now(),
         updatedAt: Date.now(),
         scenarioId: null,
+        characters: [],
         players: [],
       };
       await saveCampaign(data);
@@ -158,6 +159,30 @@ async function handle(
       conn.role = 'player';
       conn.campaignId = room.campaign.id;
       conn.playerId = playerId;
+      return;
+    }
+
+    case 'player_create_character': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) {
+        send(ws, { type: 'error', message: 'not_a_player' });
+        return;
+      }
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.createCharacter(conn.playerId, msg.classId, msg.name);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_claim_character': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) {
+        send(ws, { type: 'error', message: 'not_a_player' });
+        return;
+      }
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.claimCharacter(conn.playerId, msg.characterInstanceId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }
 

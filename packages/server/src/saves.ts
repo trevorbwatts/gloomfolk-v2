@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { CampaignSummary } from '@gloomfolk/shared';
+import type { CharacterInstance, CampaignSummary } from '@gloomfolk/shared';
 
 const SAVE_DIR = path.resolve(process.cwd(), 'saves');
 
@@ -10,10 +10,11 @@ export interface CampaignSave {
   createdAt: number;
   updatedAt: number;
   scenarioId: string | null;
+  characters: CharacterInstance[];
   players: Array<{
     playerId: string;
     name: string;
-    characterId: string | null;
+    activeCharacterId: string | null;
   }>;
 }
 

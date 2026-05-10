@@ -103,18 +103,23 @@ export function HostScreen() {
             <p style={{ opacity: 0.7 }}>Waiting for players…</p>
           )}
           <ul style={{ paddingLeft: 18 }}>
-            {gameState?.players.map((p) => (
+            {gameState?.players.map((p) => {
+              const charInst = p.characterId
+                ? gameState?.characters.find((c) => c.id === p.characterId)
+                : null;
+              return (
               <li key={p.playerId}>
                 <strong>{p.name}</strong>{' '}
                 <span style={{ opacity: 0.6 }}>
                   {p.connected ? '●' : '○'}{' '}
-                  {p.characterId ?? 'no character'}
+                  {charInst ? charInst.name : 'no character'}
                 </span>
                 {p.submitted && (
                   <span style={{ marginLeft: 6, color: '#7ee08a' }}>✓ ready</span>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
           {inLobby && (
             <button

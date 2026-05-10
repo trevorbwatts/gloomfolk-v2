@@ -8,7 +8,7 @@ import {
 } from '@gloomfolk/shared';
 import { getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
-import { ClassPick } from './ClassPick.js';
+import { CharacterSelect } from './CharacterSelect.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
 import { TurnPlay } from './TurnPlay.js';
@@ -52,19 +52,10 @@ export function PlayerScreen() {
     })();
   });
 
-  // Pre-lock-in: which class the player is currently building a hand for.
-  const [buildingClassId, setBuildingClassId] = useState<string | null>(null);
-  // After lock-in: when true, re-show the loadout builder for the current
-  // character so the player can revise their picks before scenario start.
   const [editingLoadout, setEditingLoadout] = useState(false);
-  // Locally-remembered loadouts keyed by class id. Persists across edits and
-  // class-switches during this session. Server wiring of loadouts is a later
-  // stage; for now this is purely client-side state.
   const [loadoutByClassId, setLoadoutByClassId] = useState<
     Record<string, readonly string[]>
   >({});
-  // Pool per class, level-1 default. Will be persisted server-side later when
-  // level-up picks land.
   const [poolByClassId] = useState<Record<string, CharacterPool>>(() => ({
     [bruiser.id]: defaultPoolForClass(bruiser),
     [silentKnife.id]: defaultPoolForClass(silentKnife),
@@ -136,11 +127,17 @@ export function PlayerScreen() {
   const cur = gameState?.turnOrder[gameState?.activeTurnIndex ?? -1];
   const isMyTurn = cur?.kind === 'player' && cur.playerId === playerId;
 
+  const myCharInstance = me?.characterId
+    ? gameState?.characters.find((c) => c.id === me.characterId)
+    : null;
+  const myClassId = myCharInstance?.classId ?? null;
+  const myClass = myClassId ? CLASS_BY_ID[myClassId] : null;
+
   return (
     <div style={{ padding: 16, fontFamily: 'system-ui', maxWidth: 540, color: '#eee', background: '#18181b', minHeight: '100vh', boxSizing: 'border-box', overflow: 'hidden' }}>
       <p style={{ opacity: 0.55, fontSize: 12, margin: 0, letterSpacing: 0.3 }}>
         {gameState?.campaignName}
-        {me?.name && ` · ${me.name}${me?.characterId && CLASS_BY_ID[me.characterId] ? `, ${CLASS_BY_ID[me.characterId]!.name}` : ''}`}
+        {me?.name && ` · ${me.name}${myCharInstance ? `, ${myCharInstance.name}` : ''}`}
       </p>
       <h1 style={{ marginTop: 4, marginBottom: 12, fontWeight: 500, fontSize: 24 }}>
         {phaseHeadline(phase, !!me?.characterId, isMyTurn)}
@@ -150,42 +147,24 @@ export function PlayerScreen() {
           Waiting on {totalReady - submittedCount} other {totalReady - submittedCount === 1 ? 'player' : 'players'}.
         </p>
       )}
-      {!me?.characterId && !buildingClassId && (
-        <ClassPick onPick={(classId) => setBuildingClassId(classId)} />
-      )}
-      {!me?.characterId && buildingClassId && CLASS_BY_ID[buildingClassId] && (
-        <LoadoutBuilder
-          characterClass={CLASS_BY_ID[buildingClassId]!}
-          pool={poolByClassId[buildingClassId]!}
-          {...(loadoutByClassId[buildingClassId]
-            ? { initialChosenIds: loadoutByClassId[buildingClassId] }
-            : {})}
-          onBack={() => setBuildingClassId(null)}
-          onLockIn={(chosenCardIds) => {
-            setLoadoutByClassId((prev) => ({
-              ...prev,
-              [buildingClassId]: chosenCardIds,
-            }));
-            sock.send({
-              type: 'player_pick_character',
-              characterId: buildingClassId,
-            });
-            setBuildingClassId(null);
-          }}
+      {!me?.characterId && playerId && gameState && (
+        <CharacterSelect
+          characters={gameState.characters}
+          myPlayerId={playerId}
         />
       )}
-      {me?.characterId && editingLoadout && CLASS_BY_ID[me.characterId] && (
+      {myClassId && myClass && editingLoadout && (
         <LoadoutBuilder
-          characterClass={CLASS_BY_ID[me.characterId]!}
-          pool={poolByClassId[me.characterId]!}
-          {...(loadoutByClassId[me.characterId]
-            ? { initialChosenIds: loadoutByClassId[me.characterId] }
+          characterClass={myClass}
+          pool={poolByClassId[myClassId]!}
+          {...(loadoutByClassId[myClassId]
+            ? { initialChosenIds: loadoutByClassId[myClassId] }
             : {})}
           onBack={() => setEditingLoadout(false)}
           onLockIn={(chosenCardIds) => {
             setLoadoutByClassId((prev) => ({
               ...prev,
-              [me.characterId!]: chosenCardIds,
+              [myClassId]: chosenCardIds,
             }));
             setEditingLoadout(false);
           }}

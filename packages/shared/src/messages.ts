@@ -31,6 +31,17 @@ export interface Unit {
   ownerPlayerId?: string;
 }
 
+export interface CharacterInstance {
+  id: string;
+  classId: string;
+  name: string;
+  level: number;
+  xp: number;
+  perksUnlocked: number[];
+  pool: string[];
+  claimedByPlayerId: string | null;
+}
+
 export interface CampaignSummary {
   id: string;
   name: string;
@@ -79,6 +90,7 @@ export interface PublicGameState {
   campaignName: string;
   phase: 'lobby' | 'card_select' | 'turn_resolution' | 'round_end' | 'victory' | 'defeat';
   round: number;
+  characters: CharacterInstance[];
   players: LobbyPlayer[];
   scenarioId: string | null;
   scenarioName: string | null;
@@ -267,6 +279,8 @@ export type ClientToServer =
   | { type: 'host_load_campaign'; campaignId: string }
   | { type: 'host_delete_campaign'; campaignId: string }
   | { type: 'player_join'; campaignId: string; name: string; playerId?: string }
+  | { type: 'player_create_character'; classId: string; name: string }
+  | { type: 'player_claim_character'; characterInstanceId: string }
   | { type: 'player_pick_character'; characterId: string }
   | { type: 'host_start_scenario'; scenarioId: string }
   | { type: 'player_select_cards'; leadingId: string; secondId: string }
