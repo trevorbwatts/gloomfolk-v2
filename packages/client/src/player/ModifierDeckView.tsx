@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ModifierDrawResult, PrivatePlayerState } from '@gloomfolk/shared';
 import { modifierLabel } from '@gloomfolk/shared';
+import { theme } from '../theme.js';
 
 /**
  * Shows the player's attack-modifier deck as a face-down stack with the count,
@@ -26,15 +27,16 @@ export function ModifierDeckView({
         alignItems: 'center',
         padding: 8,
         marginBottom: 10,
-        border: '1px solid #3a3a45',
-        background: '#15151a',
+        border: `1px solid ${theme.border}`,
+        background: theme.panel,
         borderRadius: 6,
         fontSize: 12,
+        fontFamily: theme.font,
       }}
     >
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
         <CardBack count={deckCount} />
-        <span style={{ opacity: 0.7 }}>Deck · {deckCount}</span>
+        <span style={{ color: theme.muted }}>Deck · {deckCount}</span>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
         {topDiscard ? (
@@ -42,7 +44,7 @@ export function ModifierDeckView({
         ) : (
           <CardEmpty />
         )}
-        <span style={{ opacity: 0.7 }}>Discard · {discardCount}</span>
+        <span style={{ color: theme.muted }}>Discard · {discardCount}</span>
       </div>
 
       <RevealStrip draws={lastDraws} />
@@ -52,10 +54,12 @@ export function ModifierDeckView({
           style={{
             marginLeft: 'auto',
             padding: '4px 8px',
-            background: '#4a2a15',
-            border: '1px solid #a05a2a',
+            background: 'rgba(217, 164, 65, 0.12)',
+            border: `1px solid ${theme.accent}`,
+            color: theme.accent,
             borderRadius: 4,
             fontSize: 11,
+            letterSpacing: 0.5,
           }}
         >
           Reshuffle at end of turn
@@ -68,7 +72,7 @@ export function ModifierDeckView({
 function RevealStrip({ draws }: { draws: ModifierDrawResult[] }) {
   if (draws.length === 0) {
     return (
-      <div style={{ opacity: 0.5, fontSize: 11, marginLeft: 8 }}>
+      <div style={{ color: theme.muted, fontSize: 11, marginLeft: 8, opacity: 0.7 }}>
         No draws yet this turn.
       </div>
     );
@@ -84,7 +88,6 @@ function RevealStrip({ draws }: { draws: ModifierDrawResult[] }) {
 }
 
 function RevealCard({ draw }: { draw: ModifierDrawResult }) {
-  // Flip animation: render face-down, then flip to face-up after a tick.
   const [flipped, setFlipped] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setFlipped(true), 50);
@@ -94,7 +97,7 @@ function RevealCard({ draw }: { draw: ModifierDrawResult }) {
   const label = modifierLabel(draw.card);
   const isCrit = draw.card.kind === 'crit';
   const isNull = draw.card.kind === 'null';
-  const accent = isCrit ? '#d4a64a' : isNull ? '#a04a4a' : '#3a3a45';
+  const accent = isCrit ? theme.accent : isNull ? theme.bad : theme.border;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -121,8 +124,8 @@ function RevealCard({ draw }: { draw: ModifierDrawResult }) {
               position: 'absolute',
               inset: 0,
               backfaceVisibility: 'hidden',
-              background: '#1a2a3a',
-              border: '1px solid #2e4a6b',
+              background: theme.panelRaised,
+              border: `1px solid ${theme.border}`,
               borderRadius: 6,
             }}
           />
@@ -133,7 +136,7 @@ function RevealCard({ draw }: { draw: ModifierDrawResult }) {
               inset: 0,
               backfaceVisibility: 'hidden',
               transform: 'rotateY(180deg)',
-              background: '#23232a',
+              background: theme.panelRaised,
               border: `2px solid ${accent}`,
               borderRadius: 6,
               display: 'flex',
@@ -141,18 +144,19 @@ function RevealCard({ draw }: { draw: ModifierDrawResult }) {
               justifyContent: 'center',
               fontWeight: 700,
               fontSize: label.length > 2 ? 13 : 18,
-              color: isCrit ? '#f0c870' : isNull ? '#e8a0a0' : '#e8e8ea',
+              fontFamily: theme.headingFont,
+              color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
             }}
           >
             {label}
           </div>
         </div>
       </div>
-      <span style={{ fontSize: 10, opacity: 0.85 }}>
+      <span style={{ fontSize: 10, color: theme.muted }}>
         {draw.targetName}
       </span>
-      <span style={{ fontSize: 10, opacity: 0.7 }}>
-        {draw.baseAmount} → <strong>{draw.finalAmount}</strong>
+      <span style={{ fontSize: 10, color: theme.muted }}>
+        {draw.baseAmount} → <strong style={{ color: theme.text }}>{draw.finalAmount}</strong>
         {draw.damageDealt !== draw.finalAmount && ` (${draw.damageDealt})`}
       </span>
     </div>
@@ -165,14 +169,15 @@ function CardBack({ count }: { count: number }) {
       style={{
         width: 40,
         height: 56,
-        background: count > 0 ? '#1a2a3a' : '#101015',
-        border: `1px solid ${count > 0 ? '#2e4a6b' : '#2a2a30'}`,
+        background: count > 0 ? theme.panelRaised : theme.bgSolid,
+        border: `1px solid ${theme.border}`,
         borderRadius: 5,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         fontSize: 11,
-        opacity: count > 0 ? 1 : 0.4,
+        color: theme.muted,
+        opacity: count > 0 ? 1 : 0.5,
       }}
     >
       {count > 0 ? '🂠' : '—'}
@@ -186,14 +191,16 @@ function CardFace({ label, muted }: { label: string; muted?: boolean }) {
       style={{
         width: 40,
         height: 56,
-        background: '#23232a',
-        border: '1px solid #444',
+        background: theme.panelRaised,
+        border: `1px solid ${theme.border}`,
         borderRadius: 5,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         fontWeight: 700,
         fontSize: label.length > 2 ? 11 : 16,
+        fontFamily: theme.headingFont,
+        color: theme.text,
         opacity: muted ? 0.85 : 1,
       }}
     >
@@ -208,10 +215,10 @@ function CardEmpty() {
       style={{
         width: 40,
         height: 56,
-        background: '#101015',
-        border: '1px dashed #2a2a30',
+        background: theme.bgSolid,
+        border: `1px dashed ${theme.border}`,
         borderRadius: 5,
-        opacity: 0.4,
+        opacity: 0.5,
       }}
     />
   );

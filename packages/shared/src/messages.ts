@@ -29,6 +29,14 @@ export interface Unit {
   conditions: ConditionInstance[];
   /** For player units: links to the controlling player. */
   ownerPlayerId?: string;
+  /** For player units: money tokens looted during this scenario.
+   *  Converted to gold at end-of-scenario. */
+  moneyTokensHeld?: number;
+}
+
+export interface MoneyToken {
+  id: string;
+  hex: Hex;
 }
 
 export interface CharacterInstance {
@@ -40,6 +48,10 @@ export interface CharacterInstance {
   perksUnlocked: number[];
   pool: string[];
   claimedByPlayerId: string | null;
+  /** Persistent gold held by the character across scenarios. Earned by
+   *  looting money tokens in-scenario and converting them at end-of-scenario
+   *  using the scenario-level gold-conversion rate. */
+  gold: number;
 }
 
 export interface CampaignSummary {
@@ -96,6 +108,14 @@ export interface PublicGameState {
   scenarioName: string | null;
   tiles: Tile[];
   units: Unit[];
+  /** Money tokens dropped on the map by monster deaths, awaiting pickup. */
+  moneyTokens: MoneyToken[];
+  /** Lifetime money-token placement count for the scenario. Caps at 25 —
+   *  see rulebook: once 25 have been placed, no more are dropped. */
+  moneyTokensPlaced: number;
+  /** Scenario level, 0–7. Drives monster stats, trap/hazard damage,
+   *  gold conversion rate, and bonus XP. Defaults to 0 for now. */
+  scenarioLevel: number;
   turnOrder: TurnOrderEntry[];
   activeTurnIndex: number;
   /** Live state for the current actor's turn. Null between turns / outside turn_resolution. */
@@ -270,6 +290,10 @@ export interface PrivatePlayerState {
   modifierDiscard: ModifierCardInstance[];
   /** True if a Null or ×2 has been drawn this turn — deck reshuffles at end of turn. */
   modifierNeedsReshuffle: boolean;
+  /** After a short rest, the lost-card pick can optionally be rerolled once for
+   *  the cost of 1 damage. `rerollableCardIds` lists the cards that were just
+   *  returned from discard to hand and are eligible to be lost instead. */
+  shortRestPending?: { lostCardId: string; rerollableCardIds: readonly string[] } | null;
 }
 
 export type ClientToServer =
@@ -285,6 +309,9 @@ export type ClientToServer =
   | { type: 'host_start_scenario'; scenarioId: string }
   | { type: 'player_select_cards'; leadingId: string; secondId: string }
   | { type: 'player_long_rest' }
+  | { type: 'player_short_rest' }
+  | { type: 'player_short_rest_reroll' }
+  | { type: 'player_short_rest_accept' }
   | { type: 'player_unsubmit' }
   | { type: 'end_turn' }
   | { type: 'host_next_round' }

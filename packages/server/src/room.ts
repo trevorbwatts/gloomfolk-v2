@@ -14,6 +14,7 @@ import type {
   Hex,
   ModifierCardInstance,
   ModifierDrawResult,
+  MoneyToken,
   MonsterStatCard,
   NegativeCondition,
   PendingAction,
@@ -33,11 +34,13 @@ import {
   silentKnife,
   createStartingModifierDeck,
   getScenario,
+  goldConversionFor,
   hasLineOfSight,
   hexDistance,
   hexEqual,
   hexKey,
   modifierLabel,
+  MONEY_TOKEN_CAP,
   reshuffleModifierDeck,
   rotateHexN,
   rotatePattern,
@@ -397,6 +400,7 @@ interface PlayerEntry {
   modifierDeck: ModifierCardInstance[];
   modifierDiscard: ModifierCardInstance[];
   modifierNeedsReshuffle: boolean;
+  shortRestPending: { lostCardId: string; rerollableCardIds: string[] } | null;
 }
 
 export class Room {
@@ -410,7 +414,11 @@ export class Room {
   activeTurnIndex = 0;
   currentTurn: CurrentTurn | null = null;
   events: GameEvent[] = [];
+  moneyTokens: MoneyToken[] = [];
+  moneyTokensPlaced = 0;
+  scenarioLevel = 0;
   private nextEventId = 1;
+  private nextMoneyTokenN = 1;
 
   constructor(campaign: CampaignSave) {
     this.campaign = campaign;
@@ -429,6 +437,7 @@ export class Room {
         modifierDeck: [],
         modifierDiscard: [],
         modifierNeedsReshuffle: false,
+        shortRestPending: null,
       });
     }
   }
@@ -479,6 +488,7 @@ export class Room {
         modifierDeck: [],
         modifierDiscard: [],
         modifierNeedsReshuffle: false,
+        shortRestPending: null,
       };
       this.players.set(playerId, entry);
       this.campaign.players.push({ playerId, name, activeCharacterId: null });
@@ -515,6 +525,14 @@ export class Room {
     }
 
     this.units = [];
+    this.moneyTokens = [];
+    this.moneyTokensPlaced = 0;
+    this.nextMoneyTokenN = 1;
+    // Backfill `gold` on any pre-existing character instances loaded from
+    // an older save that predates this field.
+    for (const ch of this.campaign.characters) {
+      if (typeof ch.gold !== 'number') ch.gold = 0;
+    }
     let unitN = 1;
 
     readyPlayers.forEach((p, i) => {
@@ -535,6 +553,7 @@ export class Room {
         conditions: [],
         hex: slot.hex,
         ownerPlayerId: p.playerId,
+        moneyTokensHeld: 0,
       });
       // Deal starting hand
       p.hand = [...startingHandFor(charInst.classId)];
@@ -602,6 +621,66 @@ export class Room {
     return { ok: true };
   }
 
+  shortRest(playerId: string): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'card_select') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    if (p.shortRestPending) return { ok: false, reason: 'already_resting' };
+    if (p.discard.length < 2) return { ok: false, reason: 'need_two_in_discard' };
+    const idx = Math.floor(Math.random() * p.discard.length);
+    const [lost] = p.discard.splice(idx, 1);
+    if (!lost) return { ok: false, reason: 'no_player' };
+    p.lost.push(lost);
+    const returned = p.discard.slice();
+    p.hand.push(...returned);
+    p.discard = [];
+    p.shortRestPending = {
+      lostCardId: lost.id,
+      rerollableCardIds: returned.map((c) => c.id),
+    };
+    this.pushEvent(`${p.name} took a short rest. Lost: ${lost.name}.`);
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  shortRestReroll(playerId: string): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'card_select') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    const pending = p.shortRestPending;
+    if (!pending) return { ok: false, reason: 'no_pending_short_rest' };
+    if (pending.rerollableCardIds.length === 0) return { ok: false, reason: 'no_other_cards' };
+
+    const lostIdx = p.lost.findIndex((c) => c.id === pending.lostCardId);
+    if (lostIdx < 0) return { ok: false, reason: 'lost_card_missing' };
+    const restoredCard = p.lost.splice(lostIdx, 1)[0]!;
+    p.hand.push(restoredCard);
+
+    const pickIdx = Math.floor(Math.random() * pending.rerollableCardIds.length);
+    const newLostId = pending.rerollableCardIds[pickIdx]!;
+    const handIdx = p.hand.findIndex((c) => c.id === newLostId);
+    if (handIdx < 0) return { ok: false, reason: 'reroll_card_missing' };
+    const newLost = p.hand.splice(handIdx, 1)[0]!;
+    p.lost.push(newLost);
+
+    const unit = this.units.find((u) => u.ownerPlayerId === p.playerId);
+    if (unit) unit.hp = Math.max(0, unit.hp - 1);
+
+    p.shortRestPending = null;
+    this.pushEvent(`${p.name} suffered 1 damage to reroll their short rest. Lost: ${newLost.name}.`);
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  shortRestAccept(playerId: string): { ok: true } | { ok: false; reason: string } {
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    if (!p.shortRestPending) return { ok: true };
+    p.shortRestPending = null;
+    this.broadcastState();
+    return { ok: true };
+  }
+
   unsubmit(playerId: string): void {
     if (this.phase !== 'card_select') return;
     const p = this.players.get(playerId);
@@ -629,12 +708,21 @@ export class Room {
       }
       const unit = this.units.find((u) => u.id === cur.unitId);
       if (unit) {
+        // Mandatory end-of-turn loot: pick up any money token in this hex.
+        this.autoLootForUnit(unit);
         const removed = tickConditionsEndOfTurn(unit);
         for (const k of removed) this.pushEvent(`${unit.name} is no longer ${k}ed.`);
       }
     }
     cur.done = true;
     this.currentTurn = null;
+    // Did this turn (e.g. via retaliate) clear the last monster? Wrap up.
+    this.checkScenarioEnd();
+    const phaseAfter = this.phase as PublicGameState['phase'];
+    if (phaseAfter === 'victory' || phaseAfter === 'defeat') {
+      this.broadcastState();
+      return { ok: true };
+    }
     if (this.activeTurnIndex + 1 < this.turnOrder.length) {
       this.activeTurnIndex += 1;
       this.openTurn();
@@ -775,6 +863,7 @@ export class Room {
           `${unit.name} attacks ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
         );
         if (tgt.hp <= 0) {
+          this.dropMoneyTokenOnDeath(tgt);
           this.units = this.units.filter((u) => u.id !== tgt.id);
           this.pushEvent(`${tgt.name} is exhausted!`);
         }
@@ -1097,6 +1186,10 @@ export class Room {
       // Auto-resolve the monster group's actions and advance.
       this.resolveActiveMonsterGroup();
       cur.done = true;
+      // Retaliate during the monster group's turn may have cleared the last
+      // monster — wrap up before advancing.
+      this.checkScenarioEnd();
+      if (this.phase === 'victory' || this.phase === 'defeat') return;
       if (this.activeTurnIndex + 1 < this.turnOrder.length) {
         this.activeTurnIndex += 1;
         this.openTurn();
@@ -1183,6 +1276,7 @@ export class Room {
               const back = applyDamage(m, ret.amount, 0);
               this.pushEvent(`${focusUnit.name} retaliates ${m.name} for ${back}.`);
               if (m.hp <= 0) {
+                this.dropMoneyTokenOnDeath(m);
                 this.units = this.units.filter((u) => u.id !== m.id);
                 this.pushEvent(`${m.name} is exhausted!`);
               }
@@ -1321,6 +1415,8 @@ export class Room {
     this.turnOrder = order;
     this.activeTurnIndex = 0;
     this.phase = 'turn_resolution';
+    // Card selection has finalized — any pending short-rest reroll choice expires.
+    for (const p of this.players.values()) p.shortRestPending = null;
     this.openTurn();
   }
 
@@ -1348,6 +1444,7 @@ export class Room {
       perksUnlocked: [],
       pool: [...defaultPoolForClass(classDef)],
       claimedByPlayerId: playerId,
+      gold: 0,
     };
 
     this.campaign.characters.push(instance);
@@ -1416,6 +1513,9 @@ export class Room {
       scenarioName: scenario?.name ?? null,
       tiles: scenario?.tiles ?? [],
       units: this.units,
+      moneyTokens: this.moneyTokens,
+      moneyTokensPlaced: this.moneyTokensPlaced,
+      scenarioLevel: this.scenarioLevel,
       turnOrder: this.turnOrder,
       activeTurnIndex: this.activeTurnIndex,
       currentTurn: this.currentTurn,
@@ -1428,6 +1528,84 @@ export class Room {
         submitted: p.selection !== null,
       })),
     };
+  }
+
+  /**
+   * Drop a money token in the hex where a monster died, unless the 25-token
+   * scenario cap has been reached or the dying unit was a summon/spawn/ally.
+   * We currently only have plain monsters (no summons/allies modeled), so the
+   * exception is a no-op for now — but we still guard against `kind !== 'monster'`.
+   * Rule: monster-damage-and-death.md.
+   */
+  private dropMoneyTokenOnDeath(dead: Unit): void {
+    if (dead.kind !== 'monster') return;
+    if (this.moneyTokensPlaced >= MONEY_TOKEN_CAP) return;
+    this.moneyTokens.push({
+      id: `m${this.nextMoneyTokenN++}`,
+      hex: { q: dead.hex.q, r: dead.hex.r },
+    });
+    this.moneyTokensPlaced += 1;
+  }
+
+  /**
+   * End-of-turn auto-loot: characters MUST loot money tokens in their hex
+   * at the end of their turn (mandatory-experience-end-of-turn-looting.md).
+   * Removes the token(s) from the map and adds them to the unit's held count.
+   */
+  private autoLootForUnit(unit: Unit): void {
+    if (unit.kind !== 'player') return;
+    const here: MoneyToken[] = [];
+    const rest: MoneyToken[] = [];
+    for (const t of this.moneyTokens) {
+      (hexEqual(t.hex, unit.hex) ? here : rest).push(t);
+    }
+    if (here.length === 0) return;
+    this.moneyTokens = rest;
+    unit.moneyTokensHeld = (unit.moneyTokensHeld ?? 0) + here.length;
+    this.pushEvent(
+      `${unit.name} loots ${here.length} money token${here.length === 1 ? '' : 's'} (holding ${unit.moneyTokensHeld}).`,
+    );
+  }
+
+  /**
+   * Check whether all enemies have been defeated. If so, transition to
+   * 'victory' and convert each player unit's held money tokens to gold on
+   * their CharacterInstance using the scenario-level conversion rate.
+   */
+  private checkScenarioEnd(): void {
+    if (this.phase === 'victory' || this.phase === 'defeat') return;
+    if (this.phase === 'lobby') return;
+    const monstersAlive = this.units.some((u) => u.kind === 'monster');
+    if (monstersAlive) return;
+    if (this.units.length === 0) return; // not yet set up
+    this.endScenario('victory');
+  }
+
+  private endScenario(outcome: 'victory' | 'defeat'): void {
+    const rate = goldConversionFor(this.scenarioLevel);
+    for (const unit of this.units) {
+      if (unit.kind !== 'player' || !unit.ownerPlayerId) continue;
+      const tokens = unit.moneyTokensHeld ?? 0;
+      if (tokens <= 0) continue;
+      const p = this.players.get(unit.ownerPlayerId);
+      const charId = p?.activeCharacterId;
+      const charInst = charId
+        ? this.campaign.characters.find((c) => c.id === charId)
+        : null;
+      if (!charInst) continue;
+      if (typeof charInst.gold !== 'number') charInst.gold = 0;
+      const earned = tokens * rate;
+      charInst.gold += earned;
+      unit.moneyTokensHeld = 0;
+      this.pushEvent(
+        `${charInst.name} converts ${tokens} money token${tokens === 1 ? '' : 's'} into ${earned} gold (now ${charInst.gold}).`,
+      );
+    }
+    this.moneyTokens = [];
+    this.phase = outcome;
+    this.currentTurn = null;
+    this.pushEvent(outcome === 'victory' ? 'Scenario complete — victory!' : 'Scenario lost.');
+    void this.persist();
   }
 
   broadcastState(): void {
@@ -1450,6 +1628,7 @@ export class Room {
           modifierDeck: p.modifierDeck,
           modifierDiscard: p.modifierDiscard,
           modifierNeedsReshuffle: p.modifierNeedsReshuffle,
+          shortRestPending: p.shortRestPending,
         },
       });
     }

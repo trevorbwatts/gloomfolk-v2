@@ -1,4 +1,5 @@
 import type { Ability, AbilityStep, Card, CardHalf, Disposition } from '@gloomfolk/shared';
+import { theme } from '../theme.js';
 
 function dispositionLabel(half: CardHalf): string {
   const d = half.disposition;
@@ -163,8 +164,8 @@ function AoePattern({ pattern }: { pattern: readonly HexPt[] }) {
         <polygon
           key={i}
           points={corners(c.cx, c.cy)}
-          fill={c.actor ? 'transparent' : '#7a3a3a'}
-          stroke={c.actor ? '#c8c8d0' : '#b85555'}
+          fill={c.actor ? 'transparent' : '#6b2d2d'}
+          stroke={c.actor ? theme.muted : '#a04545'}
           strokeWidth={1.25}
           strokeDasharray={c.actor ? '2 2' : undefined}
         />
@@ -322,7 +323,7 @@ function UseTrack({ half }: { half: CardHalf }) {
         width: 26,
         height: 26,
         borderRadius: '50%',
-        border: '1.5px solid #c8c8d0',
+        border: `1.5px solid ${theme.muted}`,
         flex: '0 0 auto',
         display: 'inline-flex',
         alignItems: 'center',
@@ -397,7 +398,7 @@ export function HalfView({ half }: { half: CardHalf }) {
               key={i}
               style={{
                 padding: '8px 0',
-                ...(i > 0 ? { borderTop: '1px solid #2e2e34' } : {}),
+                ...(i > 0 ? { borderTop: `1px solid ${theme.border}` } : {}),
               }}
             >
               <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', justifyContent: 'space-between' }}>
@@ -416,7 +417,7 @@ export function HalfView({ half }: { half: CardHalf }) {
                     opacity: 0.85,
                     paddingLeft: 14,
                     paddingTop: 6,
-                    borderLeft: '2px solid #3a3a42',
+                    borderLeft: `2px solid ${theme.border}`,
                     marginLeft: 2,
                     marginTop: 6,
                   }}
@@ -456,14 +457,14 @@ export function CardView({
   onClick?: () => void;
   selected?: boolean;
 }) {
-  const border = selected ? '#3a7bd5' : '#444';
+  const border = selected ? theme.accent : theme.border;
   return (
     <button
       onClick={onClick}
       style={{
         textAlign: 'left',
-        background: '#1c1c20',
-        color: '#eee',
+        background: theme.panel,
+        color: theme.text,
         border: `2px solid ${border}`,
         borderRadius: 6,
         padding: '16px 18px',
@@ -472,6 +473,7 @@ export function CardView({
         boxSizing: 'border-box',
         cursor: onClick ? 'pointer' : 'default',
         position: 'relative',
+        fontFamily: theme.font,
       }}
     >
       {marker && (
@@ -481,10 +483,12 @@ export function CardView({
             top: 6,
             right: 8,
             fontSize: 11,
-            background: '#3a7bd5',
-            color: '#fff',
+            background: theme.accent,
+            color: '#0e1612',
             padding: '2px 6px',
             borderRadius: 3,
+            fontWeight: 600,
+            letterSpacing: 0.5,
           }}
         >
           {marker === 'L' ? 'LEADING' : 'SECOND'}
@@ -502,7 +506,7 @@ export function CardView({
         <div><HalfView half={card.top} /></div>
         <div
           style={{
-            borderTop: '2px solid #4a4a52',
+            borderTop: `2px solid ${theme.border}`,
             margin: '16px -18px 4px',
           }}
         />

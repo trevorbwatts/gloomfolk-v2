@@ -8,6 +8,8 @@ import {
   type CharacterPool,
 } from '@gloomfolk/shared';
 import { CardView } from './CardView.js';
+import { classAvatarUrl, onAvatarError } from '../avatars.js';
+import { btn, theme } from '../theme.js';
 
 /**
  * The order of level groups shown in the picker. Level 1 first (the default
@@ -60,7 +62,7 @@ export function LoadoutBuilder({
   const selectedCount = chosen.size;
   const overBudget = selectedCount > handSize;
   const lockable = selectedCount === handSize;
-  const counterColor = overBudget ? '#ff5d5d' : selectedCount === handSize ? '#7bd57b' : '#eee';
+  const counterColor = overBudget ? theme.bad : selectedCount === handSize ? theme.good : theme.text;
 
   const [warning, setWarning] = useState<string | null>(null);
 
@@ -103,19 +105,25 @@ export function LoadoutBuilder({
       >
         <button
           onClick={onBack}
-          style={{
-            background: 'transparent',
-            color: '#eee',
-            border: '1px solid #444',
-            borderRadius: 4,
-            padding: '6px 10px',
-            cursor: 'pointer',
-            fontSize: 13,
-          }}
+          style={{ ...btn.ghost(), padding: '6px 10px' }}
         >
           ← Back
         </button>
-        <h2 style={{ margin: 0, fontSize: 18 }}>{characterClass.name} — Build your hand</h2>
+        <h2 style={{ margin: 0, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
+          <img
+            src={classAvatarUrl(characterClass.id)}
+            onError={onAvatarError}
+            alt=""
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              objectFit: 'cover',
+              background: theme.bgSolid,
+            }}
+          />
+          {characterClass.name} — Build your hand
+        </h2>
         <div
           aria-live="polite"
           style={{
@@ -131,7 +139,7 @@ export function LoadoutBuilder({
         </div>
       </div>
 
-      <p style={{ opacity: 0.7, fontSize: 13, marginTop: 0 }}>
+      <p style={{ color: theme.muted, fontSize: 13, marginTop: 0 }}>
         Tap any card to add or remove it from your hand. You can take {handSize}{' '}
         cards into the scenario.
       </p>
@@ -140,10 +148,11 @@ export function LoadoutBuilder({
         <section key={String(level)} style={{ marginTop: 16 }}>
           <h3
             style={{
-              fontSize: 13,
+              fontSize: 12,
               textTransform: 'uppercase',
-              letterSpacing: 1,
-              opacity: 0.6,
+              letterSpacing: 1.5,
+              color: theme.muted,
+              fontFamily: theme.headingFont,
               margin: '0 0 4px',
             }}
           >
@@ -164,18 +173,18 @@ export function LoadoutBuilder({
         style={{
           position: 'sticky',
           bottom: 0,
-          background: '#18181b',
+          background: theme.bgSolid,
           paddingTop: 12,
           paddingBottom: 12,
           marginTop: 16,
-          borderTop: '1px solid #2a2a2e',
+          borderTop: `1px solid ${theme.border}`,
         }}
       >
         {warning && (
           <p
             role="alert"
             style={{
-              color: '#ff5d5d',
+              color: theme.bad,
               fontSize: 13,
               margin: '0 0 8px',
             }}
@@ -187,15 +196,10 @@ export function LoadoutBuilder({
           onClick={tryLockIn}
           disabled={!lockable}
           style={{
+            ...btn.primary(!lockable),
             width: '100%',
             fontSize: 16,
-            fontWeight: 600,
-            padding: '12px 16px',
-            border: 'none',
-            borderRadius: 6,
-            background: lockable ? '#3a7bd5' : '#2a2a2e',
-            color: lockable ? '#fff' : '#777',
-            cursor: lockable ? 'pointer' : 'not-allowed',
+            padding: '14px 16px',
           }}
         >
           Lock in ({selectedCount}/{handSize})

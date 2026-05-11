@@ -1,5 +1,7 @@
 import { bruiser, silentKnife } from '@gloomfolk/shared';
 import type { CharacterClass } from '@gloomfolk/shared';
+import { classAvatarUrl, onAvatarError } from '../avatars.js';
+import { theme } from '../theme.js';
 
 const CLASSES: readonly { class: CharacterClass; tagline: string }[] = [
   {
@@ -19,8 +21,10 @@ export function ClassPick({
 }) {
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>Pick a character</h2>
-      <p style={{ opacity: 0.7, fontSize: 13, marginTop: -8 }}>
+      <h2 style={{ marginTop: 0, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
+        Pick a character
+      </h2>
+      <p style={{ color: theme.muted, fontSize: 13, marginTop: -8 }}>
         Tap a class to start building your hand. You can come back and pick a
         different class until you lock in.
       </p>
@@ -38,23 +42,36 @@ export function ClassPick({
             onClick={() => onPick(cls.id)}
             style={{
               textAlign: 'left',
-              background: '#1c1c20',
-              color: '#eee',
-              border: '2px solid #444',
-              borderRadius: 8,
+              background: theme.panel,
+              color: theme.text,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 6,
               padding: 16,
               cursor: 'pointer',
               display: 'flex',
               flexDirection: 'column',
               gap: 8,
+              fontFamily: theme.font,
             }}
           >
-            <div style={{ fontSize: 20, fontWeight: 600 }}>{cls.name}</div>
-            <div style={{ display: 'flex', gap: 12, fontSize: 13, opacity: 0.85 }}>
+            <img
+              src={classAvatarUrl(cls.id)}
+              onError={onAvatarError}
+              alt=""
+              style={{
+                width: '100%',
+                aspectRatio: '1 / 1',
+                objectFit: 'cover',
+                borderRadius: 6,
+                background: theme.bgSolid,
+              }}
+            />
+            <div style={{ fontSize: 20, fontWeight: 600, fontFamily: theme.headingFont, color: theme.accent }}>{cls.name}</div>
+            <div style={{ display: 'flex', gap: 12, fontSize: 13, color: theme.muted }}>
               <span>HP {cls.hp[1]}</span>
               <span>Hand {cls.handSize}</span>
             </div>
-            <div style={{ fontSize: 13, opacity: 0.75, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 13, color: theme.muted, lineHeight: 1.4 }}>
               {tagline}
             </div>
           </button>

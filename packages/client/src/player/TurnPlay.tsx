@@ -17,7 +17,12 @@ import {
   rotateHexN,
 } from '@gloomfolk/shared';
 import { HexBoard } from '../board/HexBoard.js';
+import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
+
+const unitAvatarUrl = (u: Unit) =>
+  u.kind === 'monster' ? monsterAvatarUrl(u.defId) : classAvatarUrl(u.defId);
 import { useSocket } from '../net/useSocket.js';
+import { btn, theme } from '../theme.js';
 import { CardView, HalfView } from './CardView.js';
 import { ModifierDeckView } from './ModifierDeckView.js';
 
@@ -48,7 +53,7 @@ export function TurnPlay({
 
     return (
       <div>
-        <p style={{ opacity: 0.7 }}>
+        <p style={{ color: theme.muted }}>
           {cur?.kind === 'player'
             ? `Waiting on ${gameState.players.find((p) => p.playerId === cur.playerId)?.name ?? 'player'}…`
             : cur?.kind === 'monster-group'
@@ -58,13 +63,15 @@ export function TurnPlay({
         <HexBoard
           tiles={gameState.tiles}
           units={gameState.units}
+          moneyTokens={gameState.moneyTokens}
           size={20}
           maxWidthPx={400}
           activeUnitIds={cur?.kind === 'player' ? [cur.unitId] : []}
+          unitAvatarUrl={unitAvatarUrl}
         />
         {selectedCards.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <h3 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.6 }}>Your cards this round</h3>
+            <h3 style={{ margin: '0 0 6px', fontSize: 12, color: theme.muted, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: theme.headingFont }}>Your cards this round</h3>
             {selectedCards.map((c) => (
               <CardView key={c.id} card={c} />
             ))}
@@ -122,8 +129,8 @@ function ActionDriver({
 
   return (
     <div>
-      <h2 style={{ marginBottom: 4 }}>Your turn</h2>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 10, fontSize: 12, opacity: 0.85 }}>
+      <h2 style={{ marginBottom: 4, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>Your turn</h2>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10, fontSize: 12, color: theme.text }}>
         <SlotChip label="Top" slot={ct.topSlot} you={you} />
         <SlotChip label="Bottom" slot={ct.bottomSlot} you={you} />
       </div>
@@ -172,24 +179,24 @@ function ActionDriver({
       {you && <ActiveArea you={you} />}
 
       {selectedAction && (selectedAction.type === 'push' || selectedAction.type === 'pull') && (
-        <p style={{ fontSize: 12, opacity: 0.75, margin: '4px 0' }}>
+        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
           {forcedMoveTargetId
             ? `Tap a destination hex to ${selectedAction.type} the target.`
             : `Tap an enemy in range ${selectedAction.range} to ${selectedAction.type}.`}
         </p>
       )}
       {selectedAction?.type === 'apply-condition' && (
-        <p style={{ fontSize: 12, opacity: 0.75, margin: '4px 0' }}>
+        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
           Tap an enemy to apply <strong>{selectedAction.condition}</strong>.
         </p>
       )}
       {selectedAction?.type === 'attack-aoe' && (
-        <p style={{ fontSize: 12, opacity: 0.75, margin: '4px 0' }}>
+        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
           Tap one of the highlighted hexes to anchor the AOE pattern.
         </p>
       )}
       {selectedAction?.type === 'attack' && selectedAction.targets > 1 && (
-        <p style={{ fontSize: 12, opacity: 0.75, margin: '4px 0' }}>
+        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
           Multi-target: <strong>{selectedAction.targetsRemaining}</strong> of {selectedAction.targets} shots remaining.
         </p>
       )}
@@ -221,16 +228,19 @@ function SlotChip({
 }) {
   const card = slot.cardId && you ? you.hand.find((c) => c.id === slot.cardId) : null;
   let txt = `${label}: —`;
-  let bg = '#1c1c20';
+  let bg = theme.panel;
+  let borderColor = theme.border;
   if (slot.status === 'engaged') {
     txt = `${label}: ${slot.useBasic ? 'Basic' : (card?.name ?? '?')}`;
-    bg = '#2a2615';
+    bg = 'rgba(217, 164, 65, 0.12)';
+    borderColor = theme.accent;
   } else if (slot.status === 'done') {
     txt = `${label}: ${slot.useBasic ? 'Basic' : (card?.name ?? '?')} ✓`;
-    bg = '#1a2a1a';
+    bg = 'rgba(123, 185, 107, 0.12)';
+    borderColor = theme.good;
   }
   return (
-    <span style={{ padding: '4px 8px', borderRadius: 4, background: bg, border: '1px solid #444' }}>
+    <span style={{ padding: '4px 8px', borderRadius: 4, background: bg, border: `1px solid ${borderColor}`, color: theme.text }}>
       {txt}
     </span>
   );
@@ -243,22 +253,22 @@ function ActiveArea({ you }: { you: PrivatePlayerState }) {
       style={{
         marginBottom: 10,
         padding: 8,
-        border: '1px solid #2e4a6b',
-        background: '#15202b',
+        border: `1px solid ${theme.border}`,
+        background: theme.panel,
         borderRadius: 6,
         fontSize: 12,
       }}
     >
-      <div style={{ opacity: 0.65, marginBottom: 4, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      <div style={{ color: theme.muted, marginBottom: 4, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: theme.headingFont }}>
         Active area
       </div>
       {you.active.map((c) => (
-        <div key={c.id} style={{ marginBottom: 2 }}>
+        <div key={c.id} style={{ marginBottom: 2, color: theme.text }}>
           <strong>{c.name}</strong>
         </div>
       ))}
       {you.activeEffects.length > 0 && (
-        <div style={{ marginTop: 4, opacity: 0.85 }}>
+        <div style={{ marginTop: 4 }}>
           {you.activeEffects.map((e) => (
             <span
               key={e.id}
@@ -266,7 +276,9 @@ function ActiveArea({ you }: { you: PrivatePlayerState }) {
                 display: 'inline-block',
                 marginRight: 6,
                 padding: '2px 6px',
-                background: '#2a3a55',
+                background: theme.panelRaised,
+                border: `1px solid ${theme.border}`,
+                color: theme.text,
                 borderRadius: 3,
               }}
             >
@@ -315,7 +327,7 @@ function SlotPicker({
     return (
       <button
         onClick={() => sock.send({ type: 'end_turn' })}
-        style={{ padding: '12px 16px', fontSize: 16, marginBottom: 12 }}
+        style={{ ...btn.primary(false), padding: '12px 16px', fontSize: 16, marginBottom: 12 }}
       >
         End my turn
       </button>
@@ -334,7 +346,7 @@ function SlotPicker({
 
   return (
     <div style={{ marginBottom: 12 }}>
-      <h3 style={{ margin: '0 0 6px' }}>
+      <h3 style={{ margin: '0 0 6px', fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500, fontSize: 16 }}>
         {allowedSlots.length === 2 ? 'Choose any half to perform' : `Choose your ${allowedSlots[0]} action`}
       </h3>
       {availableCardIds.map((cid) => {
@@ -370,19 +382,19 @@ function HalfActions({
   return (
     <div style={{ display: 'flex', gap: 6, paddingTop: 8 }}>
       <button
-        style={{ flex: 1, padding: '8px 10px', fontSize: 13 }}
+        style={{ ...btn.primary(false), flex: 1, padding: '8px 10px', fontSize: 13 }}
         onClick={() => onEngage(false)}
       >
         Use {label.toLowerCase()}
       </button>
       <button
-        style={{ padding: '8px 10px', fontSize: 11 }}
+        style={{ ...btn.ghost(), padding: '8px 10px', fontSize: 11 }}
         onClick={() => onEngage(true)}
       >
         {basicLabel}
       </button>
       <button
-        style={{ padding: '8px 10px', fontSize: 11 }}
+        style={{ ...btn.ghost(), padding: '8px 10px', fontSize: 11 }}
         onClick={onSkip}
       >
         Skip
@@ -406,22 +418,23 @@ function CardHalfChoices({
     <div
       style={{
         textAlign: 'left',
-        background: '#1c1c20',
-        color: '#eee',
-        border: '2px solid #444',
+        background: theme.panel,
+        color: theme.text,
+        border: `1px solid ${theme.border}`,
         borderRadius: 6,
         padding: '16px 18px',
         margin: '8px 0',
         width: '100%',
         boxSizing: 'border-box',
         overflow: 'hidden',
+        fontFamily: theme.font,
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
-        <span style={{ fontSize: 11, opacity: 0.55, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+        <span style={{ fontSize: 11, color: theme.muted, letterSpacing: 1, textTransform: 'uppercase' }}>
           {card.level} · {card.name}
         </span>
-        <span style={{ fontSize: 11, opacity: 0.55, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+        <span style={{ fontSize: 11, color: theme.muted, letterSpacing: 1, textTransform: 'uppercase' }}>
           {String(card.initiative).padStart(2, '0')}
         </span>
       </div>
@@ -439,7 +452,7 @@ function CardHalfChoices({
         </div>
         <div
           style={{
-            borderTop: '2px solid #4a4a52',
+            borderTop: `2px solid ${theme.border}`,
             margin: '16px -18px 4px',
           }}
         />
@@ -484,7 +497,7 @@ function ActiveHalfPanel({
 
   return (
     <div style={{ marginBottom: 10 }}>
-      <p style={{ margin: '0 0 6px', fontSize: 13, opacity: 0.85 }}>
+      <p style={{ margin: '0 0 6px', fontSize: 13, color: theme.text }}>
         Performing <strong>{slotKind}</strong>: {cardLabel}
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
@@ -502,14 +515,14 @@ function ActiveHalfPanel({
       {allDone ? (
         <button
           onClick={() => sock.send({ type: 'player_finish_half', slot: slotKind })}
-          style={{ padding: '10px 16px', fontSize: 14 }}
+          style={btn.primary(false)}
         >
           Done with this {slotKind}
         </button>
       ) : (
         <button
           onClick={() => sock.send({ type: 'player_finish_half', slot: slotKind })}
-          style={{ padding: '8px 14px', fontSize: 12, opacity: 0.7 }}
+          style={{ ...btn.ghost(), fontSize: 12 }}
           title="Skip remaining actions"
         >
           Stop here (skip remaining)
@@ -536,7 +549,12 @@ function ActionRow({
   const needsTarget = action.type === 'move' || action.type === 'attack';
   const supported = action.type !== 'unsupported';
   const showButtons = isNext && !action.done;
-  const bgDone = action.done ? '#1a2a1a' : selected ? '#2a3a55' : '#1c1c20';
+  const bgDone = action.done
+    ? 'rgba(123, 185, 107, 0.10)'
+    : selected
+      ? 'rgba(217, 164, 65, 0.14)'
+      : theme.panel;
+  const borderCol = selected ? theme.accent : action.done ? theme.good : theme.border;
   return (
     <div
       style={{
@@ -546,20 +564,21 @@ function ActionRow({
         padding: '6px 8px',
         background: bgDone,
         borderRadius: 4,
-        border: `1px solid ${selected ? '#5fa8e6' : '#444'}`,
-        opacity: action.done ? 0.5 : isNext ? 1 : 0.45,
+        border: `1px solid ${borderCol}`,
+        color: theme.text,
+        opacity: action.done ? 0.65 : isNext ? 1 : 0.5,
       }}
     >
       <span style={{ flex: 1, fontSize: 13 }}>
         {label} {action.done ? '✓' : ''}
       </span>
       {showButtons && supported && (
-        <button onClick={onSelect} style={{ padding: '4px 10px', fontSize: 12 }}>
+        <button onClick={onSelect} style={{ ...btn.primary(false), padding: '4px 12px', fontSize: 11 }}>
           {needsTarget ? (selected ? 'Cancel' : 'Perform') : 'Apply'}
         </button>
       )}
       {showButtons && (
-        <button onClick={onSkip} style={{ padding: '4px 10px', fontSize: 12 }}>
+        <button onClick={onSkip} style={{ ...btn.ghost(), padding: '4px 10px', fontSize: 11 }}>
           Skip
         </button>
       )}
@@ -788,6 +807,7 @@ function BoardForTurn({
     <HexBoard
       tiles={gameState.tiles}
       units={gameState.units}
+      moneyTokens={gameState.moneyTokens}
       size={22}
       maxWidthPx={500}
       activeUnitIds={myUnit ? [myUnit.id] : []}
@@ -795,6 +815,7 @@ function BoardForTurn({
       targetableUnitIds={targetableUnitIds}
       onTapHex={canTapHex ? handleTapHex : undefined}
       onTapUnit={canTapUnit ? handleTapUnit : undefined}
+      unitAvatarUrl={unitAvatarUrl}
     />
   );
 }

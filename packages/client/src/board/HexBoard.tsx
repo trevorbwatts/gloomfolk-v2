@@ -1,4 +1,4 @@
-import type { Hex, Tile, Unit } from '@gloomfolk/shared';
+import type { Hex, MoneyToken, Tile, Unit } from '@gloomfolk/shared';
 
 const SQRT3 = Math.sqrt(3);
 
@@ -33,6 +33,8 @@ const TILE_FILL: Record<Tile['kind'], string> = {
 export interface HexBoardProps {
   tiles: Tile[];
   units: Unit[];
+  /** Money tokens dropped on the map, awaiting pickup. */
+  moneyTokens?: MoneyToken[];
   size?: number;
   maxWidthPx?: number;
   activeUnitIds?: string[];
@@ -42,11 +44,15 @@ export interface HexBoardProps {
   targetableUnitIds?: string[];
   onTapHex?: ((h: Hex) => void) | undefined;
   onTapUnit?: ((u: Unit) => void) | undefined;
+  /** Optional avatar URL per unit. If returned, rendered clipped to a circle
+      over the unit's colored disc; the disc still shows if the image fails. */
+  unitAvatarUrl?: ((u: Unit) => string | undefined) | undefined;
 }
 
 export function HexBoard({
   tiles,
   units,
+  moneyTokens = [],
   size = 40,
   maxWidthPx = 900,
   activeUnitIds = [],
@@ -54,6 +60,7 @@ export function HexBoard({
   targetableUnitIds = [],
   onTapHex,
   onTapUnit,
+  unitAvatarUrl,
 }: HexBoardProps) {
   if (tiles.length === 0) {
     return <p style={{ opacity: 0.6 }}>No scenario loaded.</p>;
@@ -96,6 +103,49 @@ export function HexBoard({
         })}
       </g>
       <g>
+        {(() => {
+          // Group tokens by hex so stacked drops render as a single coin
+          // with a count badge rather than overlapping discs.
+          const groups = new Map<string, { hex: Hex; count: number }>();
+          for (const t of moneyTokens) {
+            const k = `${t.hex.q},${t.hex.r}`;
+            const g = groups.get(k);
+            if (g) g.count += 1;
+            else groups.set(k, { hex: t.hex, count: 1 });
+          }
+          return [...groups.values()].map(({ hex, count }) => {
+            const { x, y } = axialToPx(hex.q, hex.r, size);
+            const k = `${hex.q},${hex.r}`;
+            return (
+              <g key={`money-${k}`} style={{ pointerEvents: 'none' }}>
+                <circle cx={x} cy={y} r={size * 0.28} fill="#d9a441" stroke="#7a5a1a" strokeWidth={1.5} />
+                <text
+                  x={x}
+                  y={y + 1}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={size * 0.28}
+                  fontWeight={800}
+                  fill="#3a2a0a"
+                >
+                  {count > 1 ? `×${count}` : '$'}
+                </text>
+              </g>
+            );
+          });
+        })()}
+      </g>
+      <defs>
+        {units.map((u) => {
+          const { x, y } = axialToPx(u.hex.q, u.hex.r, size);
+          return (
+            <clipPath key={u.id} id={`avatar-clip-${u.id}`}>
+              <circle cx={x} cy={y} r={size * 0.6} />
+            </clipPath>
+          );
+        })}
+      </defs>
+      <g>
         {units.map((u) => {
           const { x, y } = axialToPx(u.hex.q, u.hex.r, size);
           const isPlayer = u.kind === 'player';
@@ -104,6 +154,8 @@ export function HexBoard({
           const isActive = activeUnitIds.includes(u.id);
           const isTargetable = targetableUnitIds.includes(u.id);
           const handler = onTapUnit ? () => onTapUnit(u) : undefined;
+          const avatar = unitAvatarUrl?.(u);
+          const r = size * 0.6;
           return (
             <g
               key={u.id}
@@ -117,10 +169,22 @@ export function HexBoard({
                 <circle cx={x} cy={y} r={size * 0.78} fill="none" stroke="#ff6b6b" strokeWidth={3} strokeDasharray="4 3" />
               )}
               <circle cx={x} cy={y} r={size * 0.62} fill={fill} stroke="#fff" strokeWidth={1.5} />
-              <text x={x} y={y - 4} textAnchor="middle" dominantBaseline="middle" fontSize={size * 0.5} fontWeight={700} fill="#fff">
-                {initial}
-              </text>
-              <text x={x} y={y + size * 0.35} textAnchor="middle" dominantBaseline="middle" fontSize={size * 0.28} fill="#fff">
+              {avatar ? (
+                <image
+                  href={avatar}
+                  x={x - r}
+                  y={y - r}
+                  width={r * 2}
+                  height={r * 2}
+                  clipPath={`url(#avatar-clip-${u.id})`}
+                  preserveAspectRatio="xMidYMid slice"
+                />
+              ) : (
+                <text x={x} y={y - 4} textAnchor="middle" dominantBaseline="middle" fontSize={size * 0.5} fontWeight={700} fill="#fff">
+                  {initial}
+                </text>
+              )}
+              <text x={x} y={y + size * 0.35} textAnchor="middle" dominantBaseline="middle" fontSize={size * 0.28} fill="#fff" stroke="#000" strokeWidth={0.6} paintOrder="stroke">
                 {u.hp}/{u.hpMax}{u.shield > 0 ? ` ⛨${u.shield}` : ''}
               </text>
               {u.conditions.length > 0 && (

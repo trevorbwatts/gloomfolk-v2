@@ -210,6 +210,30 @@ async function handle(
       return;
     }
 
+    case 'player_short_rest': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.shortRest(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_short_rest_reroll': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.shortRestReroll(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_short_rest_accept': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      rooms.get(conn.campaignId)?.shortRestAccept(conn.playerId);
+      return;
+    }
+
     case 'player_unsubmit': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       rooms.get(conn.campaignId)?.unsubmit(conn.playerId);

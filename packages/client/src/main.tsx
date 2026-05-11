@@ -4,6 +4,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { useSocketBootstrap } from './net/useSocket.js';
 import { HostScreen } from './host/HostScreen.js';
 import { PlayerScreen } from './player/PlayerScreen.js';
+import { BuilderScreen } from './builder/BuilderScreen.js';
 
 function App() {
   useSocketBootstrap();
@@ -12,6 +13,7 @@ function App() {
       <Routes>
         <Route path="/" element={<HostScreen />} />
         <Route path="/p" element={<PlayerScreen />} />
+        <Route path="/builder" element={<BuilderScreen />} />
       </Routes>
     </BrowserRouter>
   );

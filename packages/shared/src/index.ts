@@ -6,3 +6,5 @@ export * from './hex.js';
 export * from './messages.js';
 export * from './scenarios/index.js';
 export * from './decks/index.js';
+export * from './scenario-level.js';
+export * from './tiles/index.js';

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { bruiser, silentKnife } from '@gloomfolk/shared';
 import type { CharacterClass, CharacterInstance } from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
+import { classAvatarUrl, onAvatarError } from '../avatars.js';
+import { btn, theme } from '../theme.js';
 
 const CLASSES: readonly { class: CharacterClass; tagline: string }[] = [
   {
@@ -17,6 +19,28 @@ const CLASSES: readonly { class: CharacterClass; tagline: string }[] = [
 const CLASS_BY_ID: Record<string, CharacterClass> = {
   [bruiser.id]: bruiser,
   [silentKnife.id]: silentKnife,
+};
+
+const h2Style: React.CSSProperties = {
+  marginTop: 0,
+  fontFamily: theme.headingFont,
+  fontWeight: 500,
+  color: theme.accent,
+  letterSpacing: 0.5,
+};
+
+const cardButtonStyle: React.CSSProperties = {
+  textAlign: 'left',
+  background: theme.panel,
+  color: theme.text,
+  border: `1px solid ${theme.border}`,
+  borderRadius: 6,
+  padding: 16,
+  cursor: 'pointer',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+  fontFamily: theme.font,
 };
 
 export function CharacterSelect({
@@ -39,7 +63,7 @@ export function CharacterSelect({
     const cls = CLASS_BY_ID[pickedClassId];
     return (
       <div>
-        <h2 style={{ marginTop: 0 }}>Name your {cls?.name ?? 'character'}</h2>
+        <h2 style={h2Style}>Name your {cls?.name ?? 'character'}</h2>
         <input
           autoFocus
           style={{
@@ -47,11 +71,12 @@ export function CharacterSelect({
             width: '100%',
             fontSize: 18,
             padding: 8,
-            background: '#1c1c20',
-            color: '#eee',
-            border: '1px solid #444',
-            borderRadius: 4,
+            background: theme.panel,
+            color: theme.text,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 3,
             boxSizing: 'border-box',
+            fontFamily: theme.font,
           }}
           value={charName}
           onChange={(e) => setCharName(e.target.value)}
@@ -60,15 +85,7 @@ export function CharacterSelect({
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button
             onClick={() => { setStep('pick-class'); setCharName(''); }}
-            style={{
-              fontSize: 14,
-              padding: '8px 14px',
-              background: 'transparent',
-              color: '#eee',
-              border: '1px solid #444',
-              borderRadius: 4,
-              cursor: 'pointer',
-            }}
+            style={btn.ghost()}
           >
             Back
           </button>
@@ -81,15 +98,7 @@ export function CharacterSelect({
                 name: charName.trim(),
               });
             }}
-            style={{
-              fontSize: 14,
-              padding: '8px 14px',
-              background: charName.trim() ? '#3b82f6' : '#333',
-              color: '#eee',
-              border: 'none',
-              borderRadius: 4,
-              cursor: charName.trim() ? 'pointer' : 'default',
-            }}
+            style={btn.primary(!charName.trim())}
           >
             Create
           </button>
@@ -101,7 +110,7 @@ export function CharacterSelect({
   if (step === 'pick-class') {
     return (
       <div>
-        <h2 style={{ marginTop: 0 }}>Choose a class</h2>
+        <h2 style={h2Style}>Choose a class</h2>
         <div
           style={{
             display: 'grid',
@@ -117,25 +126,28 @@ export function CharacterSelect({
                 setPickedClassId(cls.id);
                 setStep('name');
               }}
-              style={{
-                textAlign: 'left',
-                background: '#1c1c20',
-                color: '#eee',
-                border: '2px solid #444',
-                borderRadius: 8,
-                padding: 16,
-                cursor: 'pointer',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-              }}
+              style={cardButtonStyle}
             >
-              <div style={{ fontSize: 20, fontWeight: 600 }}>{cls.name}</div>
-              <div style={{ display: 'flex', gap: 12, fontSize: 13, opacity: 0.85 }}>
+              <img
+                src={classAvatarUrl(cls.id)}
+                onError={onAvatarError}
+                alt=""
+                style={{
+                  width: '100%',
+                  aspectRatio: '1 / 1',
+                  objectFit: 'cover',
+                  borderRadius: 6,
+                  background: theme.bgSolid,
+                }}
+              />
+              <div style={{ fontSize: 20, fontWeight: 600, fontFamily: theme.headingFont, color: theme.accent }}>
+                {cls.name}
+              </div>
+              <div style={{ display: 'flex', gap: 12, fontSize: 13, color: theme.muted }}>
                 <span>HP {cls.hp[1]}</span>
                 <span>Hand {cls.handSize}</span>
               </div>
-              <div style={{ fontSize: 13, opacity: 0.75, lineHeight: 1.4 }}>
+              <div style={{ fontSize: 13, color: theme.muted, lineHeight: 1.4 }}>
                 {tagline}
               </div>
             </button>
@@ -143,16 +155,7 @@ export function CharacterSelect({
         </div>
         <button
           onClick={() => setStep('roster')}
-          style={{
-            marginTop: 12,
-            fontSize: 14,
-            padding: '8px 14px',
-            background: 'transparent',
-            color: '#eee',
-            border: '1px solid #444',
-            borderRadius: 4,
-            cursor: 'pointer',
-          }}
+          style={{ ...btn.ghost(), marginTop: 12 }}
         >
           Back
         </button>
@@ -160,12 +163,11 @@ export function CharacterSelect({
     );
   }
 
-  // Roster view (default)
   return (
     <div>
       {available.length > 0 && (
         <>
-          <h2 style={{ marginTop: 0 }}>Choose a character</h2>
+          <h2 style={h2Style}>Choose a character</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {available.map((ch) => {
               const cls = CLASS_BY_ID[ch.classId];
@@ -179,25 +181,37 @@ export function CharacterSelect({
                     });
                   }}
                   style={{
-                    textAlign: 'left',
-                    background: '#1c1c20',
-                    color: '#eee',
-                    border: '2px solid #444',
-                    borderRadius: 8,
+                    ...cardButtonStyle,
+                    flexDirection: 'row',
                     padding: 14,
-                    cursor: 'pointer',
-                    display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
                   }}
                 >
-                  <div>
-                    <div style={{ fontSize: 18, fontWeight: 600 }}>{ch.name}</div>
-                    <div style={{ fontSize: 13, opacity: 0.7 }}>
-                      {cls?.name ?? ch.classId} · Level {ch.level}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <img
+                      src={classAvatarUrl(ch.classId)}
+                      onError={onAvatarError}
+                      alt=""
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: '50%',
+                        objectFit: 'cover',
+                        background: theme.bgSolid,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 18, fontWeight: 600, fontFamily: theme.headingFont, color: theme.text }}>
+                        {ch.name}
+                      </div>
+                      <div style={{ fontSize: 13, color: theme.muted }}>
+                        {cls?.name ?? ch.classId} · Level {ch.level}
+                      </div>
                     </div>
                   </div>
-                  <div style={{ fontSize: 13, opacity: 0.5 }}>
+                  <div style={{ fontSize: 13, color: theme.muted }}>
                     {ch.xp} XP
                   </div>
                 </button>
@@ -207,21 +221,16 @@ export function CharacterSelect({
         </>
       )}
       {available.length === 0 && (
-        <h2 style={{ marginTop: 0 }}>No characters yet</h2>
+        <h2 style={h2Style}>No characters yet</h2>
       )}
       <button
         onClick={() => setStep('pick-class')}
         style={{
+          ...btn.primary(false),
           marginTop: 16,
           width: '100%',
           fontSize: 16,
-          padding: '12px 16px',
-          background: '#3b82f6',
-          color: '#fff',
-          border: 'none',
-          borderRadius: 8,
-          cursor: 'pointer',
-          fontWeight: 500,
+          padding: '14px 16px',
         }}
       >
         Start a New Character
