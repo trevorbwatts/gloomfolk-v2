@@ -18,6 +18,7 @@ interface AppState {
   setCampaigns: (c: CampaignSummary[]) => void;
   setJoined: (role: Role, playerId: string, campaignId: string) => void;
   setGameState: (s: PublicGameState, you: PrivatePlayerState | null) => void;
+  clearCampaign: () => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -32,4 +33,5 @@ export const useStore = create<AppState>((set) => ({
   setCampaigns: (c) => set({ campaigns: c }),
   setJoined: (role, playerId, campaignId) => set({ role, playerId, campaignId }),
   setGameState: (s, you) => set({ gameState: s, you }),
+  clearCampaign: () => set({ campaignId: null, gameState: null }),
 }));

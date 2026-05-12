@@ -86,6 +86,8 @@ const CHARACTER_CLASSES: Record<string, CharacterClass> = {
 // (in the action queue) but their gameplay effect may be a no-op for now.
 const SUPPORTED_CONDITIONS = new Set<string>(['stun', 'immobilize', 'disarm', 'muddle']);
 
+const MAX_PLAYERS = 4;
+
 function unlockedSlot(): HalfSlot {
   return { status: 'unlocked', cardId: null, useBasic: false, actions: [], performedCount: 0 };
 }
@@ -422,6 +424,8 @@ export class Room {
 
   constructor(campaign: CampaignSave) {
     this.campaign = campaign;
+    // Drop stale entries from prior sessions that never claimed a character.
+    campaign.players = campaign.players.filter((p) => p.activeCharacterId);
     for (const p of campaign.players) {
       this.players.set(p.playerId, {
         playerId: p.playerId,
@@ -467,13 +471,18 @@ export class Room {
     }
   }
 
-  attachPlayer(ws: WebSocket, name: string, requestedId?: string): string {
+  attachPlayer(ws: WebSocket, requestedId?: string): string | null {
     let entry = requestedId ? this.players.get(requestedId) : undefined;
     if (entry) {
-      entry.name = name;
       entry.socket = ws;
     } else {
+      if (this.players.size >= MAX_PLAYERS) {
+        this.send(ws, { type: 'error', message: 'room_full' });
+        try { ws.close(); } catch { /* noop */ }
+        return null;
+      }
       const playerId = 'p_' + Math.random().toString(36).slice(2, 8);
+      const name = `Player ${this.players.size + 1}`;
       entry = {
         playerId,
         name,
@@ -506,10 +515,16 @@ export class Room {
 
   detachPlayer(playerId: string): void {
     const entry = this.players.get(playerId);
-    if (entry) {
-      entry.socket = null;
-      this.broadcastState();
+    if (!entry) return;
+    entry.socket = null;
+    // An unclaimed slot (player connected but never picked a character) is
+    // dropped on disconnect so the lobby only lists actual participants.
+    if (!entry.activeCharacterId && this.phase === 'lobby') {
+      this.players.delete(playerId);
+      this.campaign.players = this.campaign.players.filter((p) => p.playerId !== playerId);
+      void this.persist();
     }
+    this.broadcastState();
   }
 
   startScenario(scenarioId: string): { ok: true } | { ok: false; reason: string } {
@@ -621,6 +636,14 @@ export class Room {
     return { ok: true };
   }
 
+  private playerDisplayName(p: PlayerEntry): string {
+    if (p.activeCharacterId) {
+      const charInst = this.campaign.characters.find((c) => c.id === p.activeCharacterId);
+      if (charInst) return charInst.name;
+    }
+    return p.name;
+  }
+
   shortRest(playerId: string): { ok: true } | { ok: false; reason: string } {
     if (this.phase !== 'card_select') return { ok: false, reason: 'wrong_phase' };
     const p = this.players.get(playerId);
@@ -638,7 +661,7 @@ export class Room {
       lostCardId: lost.id,
       rerollableCardIds: returned.map((c) => c.id),
     };
-    this.pushEvent(`${p.name} took a short rest. Lost: ${lost.name}.`);
+    this.pushEvent(`${this.playerDisplayName(p)} took a short rest. Lost: ${lost.name}.`);
     this.broadcastState();
     return { ok: true };
   }
@@ -667,7 +690,7 @@ export class Room {
     if (unit) unit.hp = Math.max(0, unit.hp - 1);
 
     p.shortRestPending = null;
-    this.pushEvent(`${p.name} suffered 1 damage to reroll their short rest. Lost: ${newLost.name}.`);
+    this.pushEvent(`${this.playerDisplayName(p)} suffered 1 damage to reroll their short rest. Lost: ${newLost.name}.`);
     this.broadcastState();
     return { ok: true };
   }
@@ -1105,7 +1128,7 @@ export class Room {
     p.modifierDeck = reshuffleModifierDeck(p.modifierDeck, p.modifierDiscard);
     p.modifierDiscard = [];
     p.modifierNeedsReshuffle = false;
-    this.pushEvent(`${p.name}'s modifier deck reshuffles.`);
+    this.pushEvent(`${this.playerDisplayName(p)}'s modifier deck reshuffles.`);
   }
 
   private disposePlayerCards(p: PlayerEntry): void {
@@ -1476,6 +1499,20 @@ export class Room {
     void this.persist();
     this.broadcastState();
     return { ok: true };
+  }
+
+  unclaimCharacter(playerId: string): void {
+    const entry = this.players.get(playerId);
+    if (!entry) return;
+    const instance = this.campaign.characters.find((c) => c.id === entry.activeCharacterId);
+    if (instance && instance.claimedByPlayerId === playerId) {
+      instance.claimedByPlayerId = null;
+    }
+    entry.activeCharacterId = null;
+    const saved = this.campaign.players.find((p) => p.playerId === playerId);
+    if (saved) saved.activeCharacterId = null;
+    void this.persist();
+    this.broadcastState();
   }
 
   pickCharacter(playerId: string, characterId: string): void {

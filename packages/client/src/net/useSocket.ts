@@ -2,11 +2,10 @@ import { useEffect } from 'react';
 import { getSocket } from './socket.js';
 import { useStore } from '../store.js';
 
-function saveSession(playerId: string, campaignId: string, name: string): void {
+function saveSession(playerId: string, campaignId: string): void {
   try {
     sessionStorage.setItem('gf:playerId', playerId);
     sessionStorage.setItem('gf:campaignId', campaignId);
-    sessionStorage.setItem('gf:name', name);
   } catch { /* noop */ }
 }
 
@@ -14,16 +13,14 @@ function clearSession(): void {
   try {
     sessionStorage.removeItem('gf:playerId');
     sessionStorage.removeItem('gf:campaignId');
-    sessionStorage.removeItem('gf:name');
   } catch { /* noop */ }
 }
 
-export function getSavedSession(): { playerId: string; campaignId: string; name: string } | null {
+export function getSavedSession(): { playerId: string; campaignId: string } | null {
   try {
     const playerId = sessionStorage.getItem('gf:playerId');
     const campaignId = sessionStorage.getItem('gf:campaignId');
-    const name = sessionStorage.getItem('gf:name');
-    if (playerId && campaignId && name) return { playerId, campaignId, name };
+    if (playerId && campaignId) return { playerId, campaignId };
   } catch { /* noop */ }
   return null;
 }
@@ -44,7 +41,6 @@ export function useSocketBootstrap(): void {
             sock.send({
               type: 'player_join',
               campaignId: saved.campaignId,
-              name: saved.name,
               playerId: saved.playerId,
             });
           }
@@ -56,10 +52,7 @@ export function useSocketBootstrap(): void {
         case 'joined': {
           setJoined(msg.role, msg.playerId, msg.campaignId);
           if (msg.role === 'player') {
-            const name = useStore.getState().gameState?.players.find(
-              (p) => p.playerId === msg.playerId,
-            )?.name ?? sessionStorage.getItem('gf:name') ?? '';
-            saveSession(msg.playerId, msg.campaignId, name);
+            saveSession(msg.playerId, msg.campaignId);
           }
           break;
         }

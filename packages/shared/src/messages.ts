@@ -60,7 +60,7 @@ export interface CampaignSummary {
   createdAt: number;
   updatedAt: number;
   scenarioId: string | null;
-  playerNames: string[];
+  characterNames: string[];
 }
 
 export interface LobbyPlayer {
@@ -301,11 +301,13 @@ export type ClientToServer =
   | { type: 'host_list_campaigns' }
   | { type: 'host_create_campaign'; name: string }
   | { type: 'host_load_campaign'; campaignId: string }
+  | { type: 'host_leave_campaign' }
   | { type: 'host_delete_campaign'; campaignId: string }
-  | { type: 'player_join'; campaignId: string; name: string; playerId?: string }
+  | { type: 'player_join'; campaignId: string; playerId?: string }
   | { type: 'player_create_character'; classId: string; name: string }
   | { type: 'player_claim_character'; characterInstanceId: string }
   | { type: 'player_pick_character'; characterId: string }
+  | { type: 'player_unclaim_character' }
   | { type: 'host_start_scenario'; scenarioId: string }
   | { type: 'player_select_cards'; leadingId: string; secondId: string }
   | { type: 'player_long_rest' }

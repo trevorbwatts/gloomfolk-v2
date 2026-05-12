@@ -131,6 +131,15 @@ async function handle(
       return;
     }
 
+    case 'host_leave_campaign': {
+      if (conn.campaignId) {
+        rooms.get(conn.campaignId)?.detachHost(ws);
+        conn.campaignId = null;
+      }
+      send(ws, { type: 'campaign_list', campaigns: await listCampaigns() });
+      return;
+    }
+
     case 'host_load_campaign': {
       const room = await getOrLoadRoom(msg.campaignId);
       if (!room) {
@@ -155,7 +164,8 @@ async function handle(
         send(ws, { type: 'error', message: 'campaign_not_found' });
         return;
       }
-      const playerId = room.attachPlayer(ws, msg.name, msg.playerId);
+      const playerId = room.attachPlayer(ws, msg.playerId);
+      if (!playerId) return;
       conn.role = 'player';
       conn.campaignId = room.campaign.id;
       conn.playerId = playerId;
@@ -192,6 +202,12 @@ async function handle(
         return;
       }
       rooms.get(conn.campaignId)?.pickCharacter(conn.playerId, msg.characterId);
+      return;
+    }
+
+    case 'player_unclaim_character': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      rooms.get(conn.campaignId)?.unclaimCharacter(conn.playerId);
       return;
     }
 

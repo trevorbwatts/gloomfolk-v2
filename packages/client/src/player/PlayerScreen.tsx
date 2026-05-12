@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   bruiser,
   silentKnife,
@@ -8,7 +8,7 @@ import {
 } from '@gloomfolk/shared';
 import { getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
-import { theme } from '../theme.js';
+import { btn, theme } from '../theme.js';
 import { CharacterSelect } from './CharacterSelect.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
@@ -20,9 +20,8 @@ const CLASS_BY_ID: Record<string, CharacterClass> = {
 };
 
 function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTurn: boolean): string {
-  if (!hasCharacter) return 'Pick your character';
+  if (!hasCharacter) return '';
   switch (phase) {
-    case 'lobby': return 'Waiting to begin…';
     case 'card_select': return 'Choose your cards';
     case 'turn_resolution': return isMyTurn ? 'Take your turn' : 'Turn in progress';
     case 'round_end': return 'Round complete';
@@ -66,9 +65,6 @@ export function PlayerScreen() {
   const gameState = useStore((s) => s.gameState);
   const you = useStore((s) => s.you);
 
-  const [name, setName] = useState(() => {
-    try { return localStorage.getItem('gf:name') ?? ''; } catch { return ''; }
-  });
   const [campaignId, setCampaignId] = useState<string>(() => {
     return readCampaignFromHash() ?? (() => {
       try { return localStorage.getItem('gf:campaignId') ?? ''; } catch { return ''; }
@@ -76,6 +72,7 @@ export function PlayerScreen() {
   });
 
   const [editingLoadout, setEditingLoadout] = useState(false);
+  const prevCharIdRef = useRef<string | null | undefined>(undefined);
   const [loadoutByClassId, setLoadoutByClassId] = useState<
     Record<string, readonly string[]>
   >({});
@@ -92,6 +89,26 @@ export function PlayerScreen() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  const myCharId = gameState?.players.find((p) => p.playerId === playerId)?.characterId ?? null;
+  useEffect(() => {
+    if (prevCharIdRef.current === undefined) {
+      prevCharIdRef.current = myCharId ?? null;
+      return;
+    }
+    if (myCharId && !prevCharIdRef.current) {
+      history.pushState({ gf: 'loadout' }, '');
+      setEditingLoadout(true);
+    }
+    prevCharIdRef.current = myCharId ?? null;
+  }, [myCharId]);
+
+  useEffect(() => {
+    if (!editingLoadout) return;
+    const onPop = () => setEditingLoadout(false);
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [editingLoadout]);
 
   if (role !== 'player') {
     const savedSession = getSavedSession();
@@ -117,14 +134,6 @@ export function PlayerScreen() {
           >
             Join Gloomfolk
           </h1>
-          <label style={{ display: 'block', marginBottom: 12, color: theme.muted, fontSize: 13 }}>
-            Your name
-            <input
-              style={inputStyle}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </label>
           <label style={{ display: 'block', marginBottom: 16, color: theme.muted, fontSize: 13 }}>
             Campaign ID
             <input
@@ -147,16 +156,11 @@ export function PlayerScreen() {
               textTransform: 'uppercase',
               cursor: 'pointer',
             }}
-            disabled={!name.trim() || !campaignId.trim()}
+            disabled={!campaignId.trim()}
             onClick={() => {
-              try {
-                localStorage.setItem('gf:name', name.trim());
-                sessionStorage.setItem('gf:name', name.trim());
-              } catch { /* noop */ }
               sock.send({
                 type: 'player_join',
                 campaignId: campaignId.trim(),
-                name: name.trim(),
               });
             }}
           >
@@ -183,10 +187,34 @@ export function PlayerScreen() {
   return (
     <div style={shellStyle}>
       <div style={{ padding: 16, maxWidth: 540, color: theme.text, boxSizing: 'border-box', overflow: 'hidden' }}>
-        <p style={{ color: theme.muted, fontSize: 12, margin: 0, letterSpacing: 1, textTransform: 'uppercase' }}>
-          {gameState?.campaignName}
-          {me?.name && ` · ${me.name}${myCharInstance ? `, ${myCharInstance.name}` : ''}`}
-        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            onClick={() => {
+              if ((history.state as { gf?: string } | null)?.gf) {
+                history.back();
+                return;
+              }
+              try {
+                sessionStorage.removeItem('gf:playerId');
+                sessionStorage.removeItem('gf:campaignId');
+              } catch { /* noop */ }
+              useStore.setState({
+                role: null,
+                playerId: null,
+                campaignId: null,
+                gameState: null,
+                you: null,
+              });
+            }}
+            style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12 }}
+          >
+            ← Back
+          </button>
+          <p style={{ color: theme.muted, fontSize: 12, margin: 0, letterSpacing: 1, textTransform: 'uppercase' }}>
+            {gameState?.campaignName}
+            {myCharInstance && ` · ${myCharInstance.name}`}
+          </p>
+        </div>
         {myCharInstance && (() => {
           const myUnit = gameState?.units.find(
             (u) => u.kind === 'player' && u.ownerPlayerId === playerId,
@@ -202,7 +230,7 @@ export function PlayerScreen() {
             </p>
           );
         })()}
-        <h1
+        {phaseHeadline(phase, !!me?.characterId, isMyTurn) && <h1
           style={{
             marginTop: 6,
             marginBottom: 12,
@@ -214,7 +242,7 @@ export function PlayerScreen() {
           }}
         >
           {phaseHeadline(phase, !!me?.characterId, isMyTurn)}
-        </h1>
+        </h1>}
         {phase === 'card_select' && me?.characterId && submittedCount > 0 && submittedCount < totalReady && (
           <p style={{ color: theme.muted, fontSize: 13, marginTop: -8, marginBottom: 12 }}>
             Waiting on {totalReady - submittedCount} other {totalReady - submittedCount === 1 ? 'player' : 'players'}.
@@ -233,7 +261,7 @@ export function PlayerScreen() {
             {...(loadoutByClassId[myClassId]
               ? { initialChosenIds: loadoutByClassId[myClassId] }
               : {})}
-            onBack={() => setEditingLoadout(false)}
+            onBack={() => history.back()}
             onLockIn={(chosenCardIds) => {
               setLoadoutByClassId((prev) => ({
                 ...prev,
@@ -246,23 +274,45 @@ export function PlayerScreen() {
         {me?.characterId && !editingLoadout && phase === 'lobby' && (
           <div>
             <p style={{ color: theme.muted }}>Waiting for host to start the scenario…</p>
-            <button
-              onClick={() => setEditingLoadout(true)}
-              style={{
-                fontSize: 14,
-                padding: '8px 14px',
-                background: 'transparent',
-                color: theme.accent,
-                border: `1px solid ${theme.accent}`,
-                borderRadius: 3,
-                fontFamily: theme.headingFont,
-                letterSpacing: 1,
-                textTransform: 'uppercase',
-                cursor: 'pointer',
-              }}
-            >
-              Edit hand
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
+                style={{
+                  fontSize: 14,
+                  padding: '8px 14px',
+                  background: 'transparent',
+                  color: theme.accent,
+                  border: `1px solid ${theme.accent}`,
+                  borderRadius: 3,
+                  fontFamily: theme.headingFont,
+                  letterSpacing: 1,
+                  textTransform: 'uppercase',
+                  cursor: 'pointer',
+                }}
+              >
+                Edit hand
+              </button>
+              <button
+                onClick={() => {
+                  setEditingLoadout(false);
+                  sock.send({ type: 'player_unclaim_character' });
+                }}
+                style={{
+                  fontSize: 14,
+                  padding: '8px 14px',
+                  background: 'transparent',
+                  color: theme.muted,
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 3,
+                  fontFamily: theme.headingFont,
+                  letterSpacing: 1,
+                  textTransform: 'uppercase',
+                  cursor: 'pointer',
+                }}
+              >
+                Change hero
+              </button>
+            </div>
           </div>
         )}
         {me?.characterId && phase === 'card_select' && you && (

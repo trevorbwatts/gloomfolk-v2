@@ -41,7 +41,9 @@ export async function listCampaigns(): Promise<CampaignSummary[]> {
         createdAt: data.createdAt,
         updatedAt: data.updatedAt,
         scenarioId: data.scenarioId,
-        playerNames: data.players.map((p) => p.name),
+        characterNames: data.characters
+          .filter((c) => c.claimedByPlayerId)
+          .map((c) => c.name),
       });
     } catch {
       // skip malformed files

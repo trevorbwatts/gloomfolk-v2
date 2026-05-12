@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { btn, theme } from '../theme.js';
 import {
   type ScenarioData,
@@ -8,6 +8,7 @@ import {
   isBuilt,
   saveScenario,
 } from './scenarios.js';
+import { ScenarioEditor } from './ScenarioEditor.js';
 
 const layoutStyle: React.CSSProperties = {
   display: 'grid',
@@ -65,7 +66,7 @@ const inputStyle: React.CSSProperties = {
 
 export function ScenariosTab() {
   const [version, setVersion] = useState(0);
-  const [selectedNumber, setSelectedNumber] = useState<number>(1);
+  const [selectedNumber, setSelectedNumber] = useState<number>(0);
 
   const selectedData: ScenarioData | null = useMemo(() => {
     void version;
@@ -91,10 +92,9 @@ export function ScenariosTab() {
 
   function handleRename(name: string) {
     if (!selectedData) return;
-    const trimmed = name.trim();
-    const next: ScenarioData = { number: selectedData.number };
-    if (trimmed) next.name = trimmed;
-    else if (selectedData.name !== undefined) next.name = selectedData.name;
+    const next: ScenarioData = { ...selectedData };
+    if (name) next.name = name;
+    else delete next.name;
     saveScenario(next);
     refresh();
   }
@@ -108,7 +108,7 @@ export function ScenariosTab() {
   return (
     <div style={layoutStyle}>
       <aside style={sidebarStyle}>
-        <div style={headingStyle}>Scenarios · 1–100</div>
+        <div style={headingStyle}>Scenarios · 0–100</div>
         {SCENARIO_NUMBERS.map((n) => {
           const data = builtSet.has(n) ? getScenario(n) : null;
           return (
@@ -136,6 +136,10 @@ export function ScenariosTab() {
           onStart={handleStart}
           onRename={handleRename}
           onClear={handleClear}
+          onChange={(next) => {
+            saveScenario(next);
+            refresh();
+          }}
         />
       </main>
     </div>
@@ -148,10 +152,16 @@ interface DetailProps {
   onStart: () => void;
   onRename: (name: string) => void;
   onClear: () => void;
+  onChange: (next: ScenarioData) => void;
 }
 
-function ScenarioDetail({ number, data, onStart, onRename, onClear }: DetailProps) {
-  const [draftName, setDraftName] = useState('');
+function ScenarioDetail({ number, data, onStart, onRename, onClear, onChange }: DetailProps) {
+  const savedRules = data?.specialRules ?? '';
+  const [rulesDraft, setRulesDraft] = useState(savedRules);
+  useEffect(() => {
+    setRulesDraft(savedRules);
+  }, [savedRules, number]);
+  const rulesDirty = rulesDraft !== savedRules;
 
   if (!data) {
     return (
@@ -180,7 +190,7 @@ function ScenarioDetail({ number, data, onStart, onRename, onClear }: DetailProp
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <h2
           style={{
             margin: 0,
@@ -200,6 +210,23 @@ function ScenarioDetail({ number, data, onStart, onRename, onClear }: DetailProp
         >
           Clear
         </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          {rulesDirty && (
+            <button
+              style={{ ...btn.ghost(), fontSize: 12, padding: '4px 10px' }}
+              onClick={() => setRulesDraft(savedRules)}
+            >
+              Revert
+            </button>
+          )}
+          <button
+            style={btn.outline()}
+            onClick={() => onChange({ ...data, specialRules: rulesDraft })}
+            disabled={!rulesDirty}
+          >
+            Save
+          </button>
+        </div>
       </div>
 
       <div style={{ marginTop: 16, marginBottom: 24 }}>
@@ -208,27 +235,20 @@ function ScenarioDetail({ number, data, onStart, onRename, onClear }: DetailProp
         </label>
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
           <input
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            placeholder={data.name ?? 'Untitled'}
+            value={data.name ?? ''}
+            onChange={(e) => onRename(e.target.value)}
+            placeholder="Untitled"
             style={{ ...inputStyle, flex: 1, maxWidth: 360 }}
           />
-          <button
-            style={btn.outline()}
-            onClick={() => {
-              onRename(draftName);
-              setDraftName('');
-            }}
-          >
-            Save name
-          </button>
         </div>
       </div>
 
-      <p style={{ color: theme.muted }}>
-        Scenario canvas coming next: place tiles, rotate them, snap to connectors, add
-        overlays (doors, terrain, traps, treasure).
-      </p>
+      <ScenarioEditor
+        data={data}
+        onChange={onChange}
+        rulesDraft={rulesDraft}
+        onRulesDraftChange={setRulesDraft}
+      />
     </div>
   );
 }

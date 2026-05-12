@@ -54,6 +54,7 @@ export function HostScreen() {
   const campaigns = useStore((s) => s.campaigns);
   const gameState = useStore((s) => s.gameState);
   const campaignId = useStore((s) => s.campaignId);
+  const clearCampaign = useStore((s) => s.clearCampaign);
   const [newName, setNewName] = useState('');
 
   useEffect(() => {
@@ -96,7 +97,7 @@ export function HostScreen() {
                     {c.name}
                   </button>
                   <span style={{ flex: 1, color: theme.muted, fontSize: 12 }}>
-                    {c.playerNames.join(', ') || 'no players'} · updated{' '}
+                    {c.characterNames.join(', ') || 'no heroes'} · updated{' '}
                     {new Date(c.updatedAt).toLocaleString()}
                   </span>
                   <button
@@ -164,7 +165,15 @@ export function HostScreen() {
   return (
     <div style={shellStyle}>
       <div style={{ padding: 24 }}>
-        <h1 style={h1Style}>{gameState?.campaignName ?? 'Loading…'}</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 4 }}>
+          <button
+            onClick={() => { clearCampaign(); sock.send({ type: 'host_leave_campaign' }); }}
+            style={{ ...btn.ghost(), padding: '6px 10px' }}
+          >
+            ← Back
+          </button>
+          <h1 style={{ ...h1Style, margin: 0 }}>{gameState?.campaignName ?? 'Loading…'}</h1>
+        </div>
         {inLobby && (
           <p style={{ color: theme.muted }}>
             Players join at:{' '}
@@ -193,10 +202,10 @@ export function HostScreen() {
                 const gold = charInst?.gold ?? 0;
                 return (
                   <li key={p.playerId} style={{ marginBottom: 4 }}>
-                    <strong>{p.name}</strong>{' '}
+                    <strong>{charInst ? charInst.name : p.name}</strong>{' '}
                     <span style={{ color: theme.muted }}>
-                      {p.connected ? '●' : '○'}{' '}
-                      {charInst ? charInst.name : 'no character'}
+                      {p.connected ? '●' : '○'}
+                      {!charInst && ' no character'}
                     </span>
                     {p.submitted && (
                       <span style={{ marginLeft: 6, color: theme.good }}>✓ ready</span>

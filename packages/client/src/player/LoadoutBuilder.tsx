@@ -31,7 +31,7 @@ export function LoadoutBuilder({
   characterClass: CharacterClass;
   pool: CharacterPool;
   initialChosenIds?: readonly string[];
-  onBack: () => void;
+  onBack?: () => void;
   onLockIn: (chosenCardIds: readonly string[]) => void;
 }) {
   const handSize = characterClass.handSize;
@@ -93,19 +93,18 @@ export function LoadoutBuilder({
   }
 
   return (
-    <div>
+    <div style={{ paddingBottom: 80 }}>
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 8,
+          gap: 10,
           marginBottom: 8,
         }}
       >
         <button
           onClick={onBack}
-          style={{ ...btn.ghost(), padding: '6px 10px' }}
+          style={{ ...btn.ghost(), padding: '6px 10px', flexShrink: 0 }}
         >
           ← Back
         </button>
@@ -124,19 +123,6 @@ export function LoadoutBuilder({
           />
           {characterClass.name} — Build your hand
         </h2>
-        <div
-          aria-live="polite"
-          style={{
-            fontFamily: 'monospace',
-            fontSize: 16,
-            fontWeight: 600,
-            color: counterColor,
-            minWidth: 60,
-            textAlign: 'right',
-          }}
-        >
-          {selectedCount}/{handSize}
-        </div>
       </div>
 
       <p style={{ color: theme.muted, fontSize: 13, marginTop: 0 }}>
@@ -171,12 +157,12 @@ export function LoadoutBuilder({
 
       <div
         style={{
-          position: 'sticky',
+          position: 'fixed',
           bottom: 0,
+          left: 0,
+          right: 0,
           background: theme.bgSolid,
-          paddingTop: 12,
-          paddingBottom: 12,
-          marginTop: 16,
+          padding: '12px 16px',
           borderTop: `1px solid ${theme.border}`,
         }}
       >

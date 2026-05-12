@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { bruiser, silentKnife } from '@gloomfolk/shared';
 import type { CharacterClass, CharacterInstance } from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
@@ -21,10 +21,12 @@ const CLASS_BY_ID: Record<string, CharacterClass> = {
   [silentKnife.id]: silentKnife,
 };
 
-const h2Style: React.CSSProperties = {
-  marginTop: 0,
+const h1Style: React.CSSProperties = {
+  marginTop: 6,
+  marginBottom: 12,
   fontFamily: theme.headingFont,
   fontWeight: 500,
+  fontSize: 28,
   color: theme.accent,
   letterSpacing: 0.5,
 };
@@ -59,11 +61,23 @@ export function CharacterSelect({
     (c) => !c.claimedByPlayerId || c.claimedByPlayerId === myPlayerId,
   );
 
+  useEffect(() => {
+    if (step === 'roster') return;
+    const onPop = () => {
+      setStep((prev) => {
+        if (prev === 'name') { setCharName(''); return 'pick-class'; }
+        return 'roster';
+      });
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [step]);
+
   if (step === 'name' && pickedClassId) {
     const cls = CLASS_BY_ID[pickedClassId];
     return (
       <div>
-        <h2 style={h2Style}>Name your {cls?.name ?? 'character'}</h2>
+        <h1 style={h1Style}>Name your {cls?.name ?? 'character'}</h1>
         <input
           autoFocus
           style={{
@@ -82,13 +96,7 @@ export function CharacterSelect({
           onChange={(e) => setCharName(e.target.value)}
           placeholder="e.g. Thorgrim"
         />
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button
-            onClick={() => { setStep('pick-class'); setCharName(''); }}
-            style={btn.ghost()}
-          >
-            Back
-          </button>
+        <div style={{ marginTop: 12 }}>
           <button
             disabled={!charName.trim()}
             onClick={() => {
@@ -110,7 +118,7 @@ export function CharacterSelect({
   if (step === 'pick-class') {
     return (
       <div>
-        <h2 style={h2Style}>Choose a class</h2>
+        <h1 style={h1Style}>Choose a class</h1>
         <div
           style={{
             display: 'grid',
@@ -123,6 +131,7 @@ export function CharacterSelect({
             <button
               key={cls.id}
               onClick={() => {
+                history.pushState({ gf: 'name' }, '');
                 setPickedClassId(cls.id);
                 setStep('name');
               }}
@@ -153,21 +162,15 @@ export function CharacterSelect({
             </button>
           ))}
         </div>
-        <button
-          onClick={() => setStep('roster')}
-          style={{ ...btn.ghost(), marginTop: 12 }}
-        >
-          Back
-        </button>
       </div>
     );
   }
 
   return (
     <div>
+      <h1 style={h1Style}>Pick your character</h1>
       {available.length > 0 && (
         <>
-          <h2 style={h2Style}>Choose a character</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {available.map((ch) => {
               const cls = CLASS_BY_ID[ch.classId];
@@ -221,10 +224,10 @@ export function CharacterSelect({
         </>
       )}
       {available.length === 0 && (
-        <h2 style={h2Style}>No characters yet</h2>
+        <p style={{ color: theme.muted, fontSize: 13, margin: 0 }}>No characters yet</p>
       )}
       <button
-        onClick={() => setStep('pick-class')}
+        onClick={() => { history.pushState({ gf: 'pick-class' }, ''); setStep('pick-class'); }}
         style={{
           ...btn.primary(false),
           marginTop: 16,
