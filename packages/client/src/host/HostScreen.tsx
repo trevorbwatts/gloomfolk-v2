@@ -3,14 +3,17 @@ import { Link } from 'react-router-dom';
 import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { HexBoard } from '../board/HexBoard.js';
+import { ElementBoard } from '../board/ElementBoard.js';
+import { useMoveAnim } from '../board/useMoveAnim.js';
 import { TurnOrder } from './TurnOrder.js';
 import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
 import { btn, theme } from '../theme.js';
-import type { Unit } from '@gloomfolk/shared';
+import type { CharacterInstance, LobbyPlayer, MonsterTurnAnim, Unit } from '@gloomfolk/shared';
 import {
   bonusExperienceFor,
   goldConversionFor,
   hazardousTerrainDamageFor,
+  modifierLabel,
   trapDamageFor,
 } from '@gloomfolk/shared';
 
@@ -53,6 +56,7 @@ export function HostScreen() {
   const sock = useSocket();
   const campaigns = useStore((s) => s.campaigns);
   const gameState = useStore((s) => s.gameState);
+  const { moveAnim, onMoveAnimDone } = useMoveAnim(gameState?.lastMove);
   const campaignId = useStore((s) => s.campaignId);
   const clearCampaign = useStore((s) => s.clearCampaign);
   const [newName, setNewName] = useState('');
@@ -141,9 +145,14 @@ export function HostScreen() {
 
   const joinUrl = `${location.origin}/p#${campaignId}`;
   const playersWithChars = gameState?.players.filter((p) => p.characterId) ?? [];
+  const playersReady = playersWithChars.filter((p) => {
+    const ch = gameState?.characters.find((c) => c.id === p.characterId);
+    return ch?.loadout != null;
+  });
+  const waitingOn = playersWithChars.length - playersReady.length;
+  const canStart = playersWithChars.length > 0 && waitingOn === 0;
   const inLobby = gameState?.phase === 'lobby';
   const inTurnRes = gameState?.phase === 'turn_resolution';
-  const inRoundEnd = gameState?.phase === 'round_end';
 
   const activeUnitIds: string[] = [];
   if (gameState && inTurnRes) {
@@ -164,141 +173,464 @@ export function HostScreen() {
 
   return (
     <div style={shellStyle}>
-      <div style={{ padding: 24 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 4 }}>
-          <button
-            onClick={() => { clearCampaign(); sock.send({ type: 'host_leave_campaign' }); }}
-            style={{ ...btn.ghost(), padding: '6px 10px' }}
-          >
-            ← Back
-          </button>
-          <h1 style={{ ...h1Style, margin: 0 }}>{gameState?.campaignName ?? 'Loading…'}</h1>
-        </div>
-        {inLobby && (
-          <p style={{ color: theme.muted }}>
-            Players join at:{' '}
-            <code style={{ background: theme.panel, padding: '2px 8px', borderRadius: 3, color: theme.accent, border: `1px solid ${theme.border}` }}>
-              {joinUrl}
-            </code>
-          </p>
-        )}
-        <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          <div style={{ minWidth: 240 }}>
-            <h2 style={h2Style}>Players</h2>
-            {gameState && gameState.players.length === 0 && (
-              <p style={{ color: theme.muted }}>Waiting for players…</p>
-            )}
-            <ul style={{ paddingLeft: 18, color: theme.text }}>
-              {gameState?.players.map((p) => {
-                const charInst = p.characterId
-                  ? gameState?.characters.find((c) => c.id === p.characterId)
-                  : null;
-                const myUnit = charInst
-                  ? gameState.units.find(
-                      (u) => u.kind === 'player' && u.ownerPlayerId === p.playerId,
-                    )
-                  : null;
-                const held = myUnit?.moneyTokensHeld ?? 0;
-                const gold = charInst?.gold ?? 0;
-                return (
-                  <li key={p.playerId} style={{ marginBottom: 4 }}>
-                    <strong>{charInst ? charInst.name : p.name}</strong>{' '}
-                    <span style={{ color: theme.muted }}>
-                      {p.connected ? '●' : '○'}
-                      {!charInst && ' no character'}
-                    </span>
-                    {p.submitted && (
-                      <span style={{ marginLeft: 6, color: theme.good }}>✓ ready</span>
-                    )}
-                    {charInst && (
-                      <span style={{ marginLeft: 8, color: '#d9a441' }}>
-                        {held > 0 && `🪙 ${held}`}
-                        {held > 0 && gold > 0 && ' · '}
-                        {gold > 0 && `${gold}g`}
-                      </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-            {inLobby && (
-              <button
-                disabled={playersWithChars.length === 0}
-                onClick={() => sock.send({ type: 'host_start_scenario', scenarioId: 'level1' })}
-                style={{ ...btn.primary(playersWithChars.length === 0), marginTop: 12 }}
+      <div
+        style={{
+          background: '#000',
+          borderBottom: `1px solid ${theme.border}`,
+          padding: '6px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+        }}
+      >
+        <button
+          onClick={() => { clearCampaign(); sock.send({ type: 'host_leave_campaign' }); }}
+          style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12 }}
+        >
+          ← Back
+        </button>
+        <h1
+          style={{
+            ...h1Style,
+            margin: 0,
+            fontSize: 18,
+            fontVariant: 'small-caps',
+            letterSpacing: 1,
+          }}
+        >
+          {gameState?.campaignName ?? 'Loading…'}
+        </h1>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center' }}>
+          {!inLobby && gameState?.players.map((p) => {
+            const charInst = p.characterId
+              ? gameState.characters.find((c) => c.id === p.characterId)
+              : null;
+            const unit = gameState.units.find(
+              (u) => u.kind === 'player' && u.ownerPlayerId === p.playerId,
+            );
+            const displayName = charInst?.name ?? p.name;
+            return (
+              <div
+                key={p.playerId}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '4px 10px',
+                  background: theme.panel,
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 4,
+                  fontSize: 13,
+                  color: theme.text,
+                }}
               >
-                Start Scenario: Level 1
-              </button>
-            )}
-            {inTurnRes && (
-              <>
-                <h3 style={{ ...h2Style, fontSize: 14, marginBottom: 6, marginTop: 18 }}>Turn order</h3>
-                <TurnOrder
-                  order={gameState!.turnOrder}
-                  activeIndex={gameState!.activeTurnIndex}
-                  players={gameState!.players}
-                />
-                <button
-                  onClick={() => sock.send({ type: 'end_turn' })}
-                  style={{ ...btn.ghost(), marginTop: 8 }}
-                >
-                  End current turn
-                </button>
-              </>
-            )}
-            {inRoundEnd && (
-              <button
-                onClick={() => sock.send({ type: 'host_next_round' })}
-                style={{ ...btn.primary(false), marginTop: 12 }}
-              >
-                Next round
-              </button>
-            )}
-            <p style={{ marginTop: 24, fontSize: 12, color: theme.muted, letterSpacing: 0.5 }}>
-              Phase: {gameState?.phase} · Round: {gameState?.round}
-              {gameState?.scenarioName ? ` · ${gameState.scenarioName}` : ''}
-            </p>
-          </div>
-          <div style={{ flex: 1, minWidth: 360 }}>
-            {gameState && gameState.tiles.length > 0 ? (
-              <>
-                <HexBoard
-                  tiles={gameState.tiles}
-                  units={gameState.units}
-                  moneyTokens={gameState.moneyTokens}
-                  activeUnitIds={activeUnitIds}
-                  unitAvatarUrl={(u: Unit) =>
-                    u.kind === 'monster'
-                      ? monsterAvatarUrl(u.defId)
-                      : classAvatarUrl(u.defId)
-                  }
-                />
-                <ScenarioLevelStrip level={gameState.scenarioLevel} />
-                {gameState.events.length > 0 && (
-                  <div
-                    style={{
-                      marginTop: 12,
-                      padding: 10,
-                      background: theme.panel,
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: 6,
-                      fontSize: 13,
-                      maxHeight: 180,
-                      overflowY: 'auto',
-                      color: theme.text,
-                    }}
-                  >
-                    {gameState.events.slice(-8).map((ev) => (
-                      <div key={ev.id} style={{ color: theme.muted }}>{ev.text}</div>
-                    ))}
-                  </div>
+                <span style={{ color: p.connected ? theme.good : theme.muted }}>
+                  {p.connected ? '✓' : '○'}
+                </span>
+                <strong style={{ fontWeight: 600 }}>{displayName}</strong>
+                {unit && (
+                  <span style={{ color: theme.muted }}>
+                    {unit.hp}/{unit.hpMax} HP
+                  </span>
                 )}
-              </>
-            ) : (
-              <p style={{ color: theme.muted }}>No board yet — start a scenario.</p>
-            )}
-          </div>
+              </div>
+            );
+          })}
         </div>
+        <div style={{ flex: 1 }} />
+      </div>
+      {gameState && gameState.tiles.length > 0 && !inLobby && (
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'center',
+            padding: '10px 24px',
+            borderBottom: `1px solid ${theme.border}`,
+          }}
+        >
+          <ScenarioLevelStrip level={gameState.scenarioLevel} />
+        </div>
+      )}
+      <div style={{ padding: 24 }}>
+        {inLobby ? (
+          <WaitingRoom
+            scenarioName={gameState?.scenarioName ?? null}
+            joinUrl={joinUrl}
+            players={gameState?.players ?? []}
+            characters={gameState?.characters ?? []}
+            canStart={canStart}
+            waitingOn={waitingOn}
+            playersWithChars={playersWithChars.length}
+            onStart={() => sock.send({ type: 'host_start_scenario', scenarioId: 'level1' })}
+          />
+        ) : (
+          <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 240 }}>
+              {gameState && (
+                <>
+                  <TurnOrder
+                    order={gameState.turnOrder}
+                    activeIndex={gameState.activeTurnIndex}
+                    players={gameState.players}
+                    characters={gameState.characters}
+                    units={gameState.units}
+                    scenarioLevel={gameState.scenarioLevel}
+                    round={gameState.round}
+                  />
+                  {inTurnRes && (
+                    <button
+                      onClick={() => sock.send({ type: 'end_turn' })}
+                      style={{ ...btn.ghost(), marginTop: 8 }}
+                    >
+                      End current turn
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            <div style={{ flex: 1, minWidth: 360 }}>
+              {gameState && gameState.tiles.length > 0 ? (
+                <>
+                  {gameState.monsterTurnAnim && (
+                    <MonsterTurnPanel
+                      anim={gameState.monsterTurnAnim}
+                      units={gameState.units}
+                      onSkip={() => sock.send({ type: 'host_skip_monster_anim' })}
+                    />
+                  )}
+                  <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <HexBoard
+                        tiles={gameState.tiles}
+                        units={gameState.units}
+                        moneyTokens={gameState.moneyTokens}
+                        activeUnitIds={activeUnitIds}
+                        pathHexes={gameState.pendingForcedMove?.path}
+                        unitAvatarUrl={(u: Unit) =>
+                          u.kind === 'monster'
+                            ? monsterAvatarUrl(u.defId)
+                            : classAvatarUrl(u.defId)
+                        }
+                        moveAnim={moveAnim}
+                        onMoveAnimDone={onMoveAnimDone}
+                        monsterTurnAnim={gameState.monsterTurnAnim}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <ElementBoard board={gameState.elementBoard} />
+                    </div>
+                  </div>
+                  {gameState.events.length > 0 && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 10,
+                        background: theme.panel,
+                        border: `1px solid ${theme.border}`,
+                        borderRadius: 6,
+                        fontSize: 13,
+                        maxHeight: 180,
+                        overflowY: 'auto',
+                        color: theme.text,
+                      }}
+                    >
+                      {gameState.events.slice(-8).map((ev) => (
+                        <div key={ev.id} style={{ color: theme.muted }}>{ev.text}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p style={{ color: theme.muted }}>No board yet — start a scenario.</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MonsterTurnPanel({
+  anim,
+  units,
+  onSkip,
+}: {
+  anim: MonsterTurnAnim;
+  units: Unit[];
+  onSkip: () => void;
+}) {
+  const active = units.find((u) => u.id === anim.activeMonsterId) ?? null;
+  const target = anim.targetUnitId
+    ? units.find((u) => u.id === anim.targetUnitId) ?? null
+    : null;
+  const phaseLabel = (() => {
+    switch (anim.phase) {
+      case 'focus':
+        return target ? `Choosing target: ${target.name}` : 'Choosing target…';
+      case 'move':
+        return target ? `Moving toward ${target.name}` : 'Moving…';
+      case 'modifier-draw':
+        return 'Drawing attack modifier…';
+      case 'damage':
+        return target ? `Attacking ${target.name}` : 'Resolving attack';
+      case 'idle':
+        return '…';
+    }
+  })();
+  const draw = anim.modifierDraw;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        padding: '10px 14px',
+        background: theme.panel,
+        border: `1px solid ${theme.accent}`,
+        borderRadius: 6,
+        marginBottom: 12,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontFamily: theme.headingFont,
+            fontSize: 11,
+            letterSpacing: 0.8,
+            textTransform: 'uppercase',
+            color: theme.accent,
+          }}
+        >
+          Monster turn · {anim.abilityCardName}
+        </div>
+        <div style={{ fontSize: 14, marginTop: 2 }}>
+          <span style={{ color: '#ff6b6b', fontWeight: 600 }}>
+            {active?.name ?? '—'}
+          </span>
+          <span style={{ color: theme.muted, margin: '0 6px' }}>→</span>
+          <span style={{ color: target ? '#ffd84d' : theme.muted }}>
+            {target ? target.name : 'no target'}
+          </span>
+        </div>
+        <div style={{ fontSize: 12, color: theme.muted, marginTop: 2 }}>{phaseLabel}</div>
+      </div>
+      {draw && (
+        <div
+          style={{
+            width: 56,
+            height: 72,
+            borderRadius: 6,
+            border: `1px solid ${theme.border}`,
+            background: theme.panelRaised,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontFamily: theme.headingFont,
+            color:
+              draw.card.kind === 'crit'
+                ? theme.accent
+                : draw.card.kind === 'null'
+                  ? theme.bad
+                  : theme.text,
+          }}
+        >
+          <div
+            style={{
+              fontSize: modifierLabel(draw.card).length > 2 ? 14 : 22,
+              fontWeight: 700,
+            }}
+          >
+            {modifierLabel(draw.card)}
+          </div>
+          <div style={{ fontSize: 10, color: theme.muted, marginTop: 2 }}>
+            {draw.baseAmount} → {draw.finalAmount}
+          </div>
+          {draw.damageDealt !== null && (
+            <div style={{ fontSize: 10, color: theme.bad }}>−{draw.damageDealt}</div>
+          )}
+        </div>
+      )}
+      <button onClick={onSkip} style={{ ...btn.outline(), fontSize: 12, padding: '6px 12px' }}>
+        Skip ▶▶
+      </button>
+    </div>
+  );
+}
+
+function WaitingRoom({
+  scenarioName,
+  joinUrl,
+  players,
+  characters,
+  canStart,
+  waitingOn,
+  playersWithChars,
+  onStart,
+}: {
+  scenarioName: string | null;
+  joinUrl: string;
+  players: LobbyPlayer[];
+  characters: CharacterInstance[];
+  canStart: boolean;
+  waitingOn: number;
+  playersWithChars: number;
+  onStart: () => void;
+}) {
+  const hint = playersWithChars === 0
+    ? 'Waiting for at least one player to pick a character.'
+    : waitingOn > 0
+      ? `Waiting on ${waitingOn} ${waitingOn === 1 ? 'player' : 'players'} to lock in their hand.`
+      : 'Everyone is ready.';
+  return (
+    <div style={{ maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
+      <div style={{ textAlign: 'center' }}>
+        <div
+          style={{
+            fontFamily: theme.headingFont,
+            fontSize: 11,
+            letterSpacing: 1,
+            textTransform: 'uppercase',
+            color: theme.muted,
+          }}
+        >
+          Next scenario
+        </div>
+        <div
+          style={{
+            fontFamily: theme.headingFont,
+            fontSize: 28,
+            color: theme.accent,
+            marginTop: 4,
+            letterSpacing: 0.5,
+          }}
+        >
+          {scenarioName ?? 'Level 1'}
+        </div>
+      </div>
+
+      <div
+        style={{
+          padding: '20px 24px',
+          background: theme.panel,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 8,
+          textAlign: 'center',
+        }}
+      >
+        <div
+          style={{
+            fontFamily: theme.headingFont,
+            fontSize: 11,
+            letterSpacing: 1,
+            textTransform: 'uppercase',
+            color: theme.muted,
+          }}
+        >
+          Players join at
+        </div>
+        <code
+          style={{
+            display: 'inline-block',
+            marginTop: 8,
+            fontSize: 20,
+            color: theme.accent,
+            background: 'transparent',
+            wordBreak: 'break-all',
+          }}
+        >
+          {joinUrl}
+        </code>
+      </div>
+
+      <div>
+        <div
+          style={{
+            fontFamily: theme.headingFont,
+            fontSize: 11,
+            letterSpacing: 1,
+            textTransform: 'uppercase',
+            color: theme.muted,
+            marginBottom: 8,
+          }}
+        >
+          Players ({players.length})
+        </div>
+        {players.length === 0 ? (
+          <div
+            style={{
+              padding: 16,
+              border: `1px dashed ${theme.border}`,
+              borderRadius: 6,
+              color: theme.muted,
+              textAlign: 'center',
+              fontSize: 14,
+            }}
+          >
+            No one's signed in yet.
+          </div>
+        ) : (
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {players.map((p) => {
+              const ch = p.characterId ? characters.find((c) => c.id === p.characterId) ?? null : null;
+              const status = !ch
+                ? 'Choosing character…'
+                : ch.loadout == null
+                  ? 'Building loadout…'
+                  : 'Ready';
+              const statusColor = !ch ? theme.muted : ch.loadout == null ? theme.muted : theme.good;
+              return (
+                <li
+                  key={p.playerId}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '10px 14px',
+                    background: theme.panel,
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 6,
+                  }}
+                >
+                  <span style={{ color: p.connected ? theme.good : theme.muted, fontSize: 16 }}>
+                    {p.connected ? '✓' : '○'}
+                  </span>
+                  {ch && (
+                    <img
+                      src={classAvatarUrl(ch.classId)}
+                      alt=""
+                      style={{ width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' }}
+                    />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, color: theme.text }}>
+                      {ch?.name ?? p.name}
+                    </div>
+                    {ch && (
+                      <div style={{ fontSize: 12, color: theme.muted }}>
+                        {p.name}
+                      </div>
+                    )}
+                  </div>
+                  <span style={{ fontSize: 12, color: statusColor }}>{status}</span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+        <button
+          disabled={!canStart}
+          onClick={onStart}
+          style={{ ...btn.primary(!canStart), fontSize: 16, padding: '12px 28px' }}
+        >
+          Start Scenario
+        </button>
+        <p style={{ color: theme.muted, fontSize: 12, margin: 0 }}>{hint}</p>
       </div>
     </div>
   );
@@ -324,7 +656,6 @@ function ScenarioLevelStrip({ level }: { level: number }) {
   return (
     <div
       style={{
-        marginTop: 10,
         display: 'flex',
         gap: 8,
         flexWrap: 'wrap',
@@ -337,11 +668,7 @@ function ScenarioLevelStrip({ level }: { level: number }) {
         {level}
       </span>
       <span style={chipStyle}>
-        <span style={labelStyle}>Monster Lv</span>
-        {level}
-      </span>
-      <span style={chipStyle}>
-        <span style={labelStyle}>Gold/Token</span>
+        <span style={labelStyle}>Gold</span>
         ×{goldConversionFor(level)}
       </span>
       <span style={chipStyle}>

@@ -18,6 +18,8 @@ export interface SpawnSlot {
 export interface Scenario {
   id: string;
   name: string;
+  /** One-line victory condition shown to players in the Scenario tab. */
+  objective: string;
   tiles: Tile[];
   spawns: SpawnSlot[];
 }

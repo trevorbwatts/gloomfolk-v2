@@ -22,6 +22,7 @@ function buildTiles(): Tile[] {
 export const level1: Scenario = {
   id: 'level1',
   name: 'The Bandit Camp',
+  objective: 'Defeat all enemies.',
   tiles: buildTiles(),
   spawns: [
     { hex: { q: 0, r: 2 }, side: 'player' },

@@ -10,10 +10,39 @@ export interface ModifierCardInstance {
 }
 
 /**
- * Every character starts with the same 19-card attack-modifier deck:
+ * Every character starts with the same 20-card attack-modifier deck:
  * 6× +0, 5× +1, 5× -1, 1× +2, 1× -2, 1× Null, 1× ×2 (Crit).
  */
 export const STARTING_MODIFIER_DECK_TEMPLATE: readonly ModifierCard[] = [
+  { kind: 'flat', amount: 0 },
+  { kind: 'flat', amount: 0 },
+  { kind: 'flat', amount: 0 },
+  { kind: 'flat', amount: 0 },
+  { kind: 'flat', amount: 0 },
+  { kind: 'flat', amount: 0 },
+  { kind: 'flat', amount: 1 },
+  { kind: 'flat', amount: 1 },
+  { kind: 'flat', amount: 1 },
+  { kind: 'flat', amount: 1 },
+  { kind: 'flat', amount: 1 },
+  { kind: 'flat', amount: -1 },
+  { kind: 'flat', amount: -1 },
+  { kind: 'flat', amount: -1 },
+  { kind: 'flat', amount: -1 },
+  { kind: 'flat', amount: -1 },
+  { kind: 'flat', amount: 2 },
+  { kind: 'flat', amount: -2 },
+  { kind: 'null' },
+  { kind: 'crit' },
+];
+
+/**
+ * The shared monster attack-modifier deck. All monsters in a scenario draw
+ * from this single deck (one deck per scenario, not per monster type).
+ * Same composition as the player template for now; broken out so the two
+ * can diverge cleanly later (e.g. blessings/curses sliding cards in).
+ */
+export const MONSTER_MODIFIER_DECK_TEMPLATE: readonly ModifierCard[] = [
   { kind: 'flat', amount: 0 },
   { kind: 'flat', amount: 0 },
   { kind: 'flat', amount: 0 },
@@ -51,6 +80,15 @@ export function createStartingModifierDeck(): ModifierCardInstance[] {
   );
   return shuffleInPlace(instances);
 }
+
+/** Build a fresh, shuffled monster attack-modifier deck with stable ids. */
+export function createMonsterModifierDeck(): ModifierCardInstance[] {
+  const instances: ModifierCardInstance[] = MONSTER_MODIFIER_DECK_TEMPLATE.map(
+    (card, i) => ({ id: `mm${i + 1}`, card }),
+  );
+  return shuffleInPlace(instances);
+}
+
 
 /** Combine deck + discard, shuffle, return as the new deck. */
 export function reshuffleModifierDeck(

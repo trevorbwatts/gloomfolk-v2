@@ -1,14 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Card, CardSelection, PrivatePlayerState } from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
 import { btn, theme } from '../theme.js';
 import { CardView } from './CardView.js';
+import { BOTTOM_BAR_HEIGHT } from './BottomBar.js';
 
 export function Hand({ you }: { you: PrivatePlayerState }) {
   const sock = useSocket();
   const { hand, selection, discard, lost, shortRestPending } = you;
-  const [leading, setLeading] = useState<string | null>(null);
-  const [second, setSecond] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [leadingId, setLeadingId] = useState<string | null>(null);
 
   if (selection) {
     return <SubmittedView selection={selection} hand={hand} />;
@@ -20,25 +21,38 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
   const canReroll = !!shortRestPending && shortRestPending.rerollableCardIds.length > 0;
 
   function tap(cardId: string) {
-    if (leading === cardId) {
-      setLeading(null);
-      return;
-    }
-    if (second === cardId) {
-      setSecond(null);
-      return;
-    }
-    if (!leading) setLeading(cardId);
-    else if (!second) setSecond(cardId);
-    else setSecond(cardId);
+    setSelectedIds((current) => {
+      if (current.includes(cardId)) {
+        if (leadingId === cardId) setLeadingId(null);
+        return current.filter((id) => id !== cardId);
+      }
+      if (current.length >= 2) return current;
+      return [...current, cardId];
+    });
   }
 
-  const selectedCount = (leading ? 1 : 0) + (second ? 1 : 0);
-  const canConfirm = leading && second && leading !== second;
+  const selectedCards = selectedIds
+    .map((id) => hand.find((c) => c.id === id))
+    .filter((c): c is Card => !!c);
+  const bothSelected = selectedCards.length === 2;
+  const canConfirm = bothSelected && leadingId !== null;
   const canShortRest = discard.length >= 2;
+  const secondId = bothSelected ? selectedIds.find((id) => id !== leadingId) ?? null : null;
+
+  // Default leading to the quicker (lower-initiative) card once both are
+  // picked. The player can still tap the other chip to override.
+  useEffect(() => {
+    if (!bothSelected) {
+      if (leadingId !== null) setLeadingId(null);
+      return;
+    }
+    if (leadingId && selectedIds.includes(leadingId)) return;
+    const quicker = selectedCards.reduce((a, b) => (a.initiative <= b.initiative ? a : b));
+    setLeadingId(quicker.id);
+  }, [bothSelected, leadingId, selectedIds, selectedCards]);
 
   return (
-    <div>
+    <div style={{ paddingBottom: 88 + BOTTOM_BAR_HEIGHT }}>
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <button
           style={{ ...btn.outline(), opacity: canShortRest && !shortRestPending ? 1 : 0.5, cursor: canShortRest && !shortRestPending ? 'pointer' : 'not-allowed' }}
@@ -71,14 +85,20 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
           }}
         >
           <div style={{ fontSize: 12, color: theme.muted, textTransform: 'uppercase', letterSpacing: 1, fontFamily: theme.headingFont }}>
-            Short rest
+            Short rest — losing
           </div>
-          <div style={{ fontSize: 16, color: theme.text, margin: '4px 0 10px' }}>
-            Lost: <strong style={{ color: theme.accent }}>{pendingLost.name}</strong>
+          <div style={{ margin: '4px 0 10px' }}>
+            <CardView card={pendingLost} />
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button
-              style={{ ...btn.outline(), opacity: canReroll ? 1 : 0.5, cursor: canReroll ? 'pointer' : 'not-allowed' }}
+              style={btn.outline()}
+              onClick={() => sock.send({ type: 'player_short_rest_accept' })}
+            >
+              Confirm
+            </button>
+            <button
+              style={{ ...btn.ghost(), opacity: canReroll ? 1 : 0.5, cursor: canReroll ? 'pointer' : 'not-allowed' }}
               disabled={!canReroll}
               title={canReroll ? 'Take 1 damage, lose a different random card instead (once per short rest)' : 'No other cards to swap to'}
               onClick={() => {
@@ -86,32 +106,30 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
                 sock.send({ type: 'player_short_rest_reroll' });
               }}
             >
-              Suffer 1 to reroll
-            </button>
-            <button
-              style={btn.ghost()}
-              onClick={() => sock.send({ type: 'player_short_rest_accept' })}
-            >
-              Keep
+              Suffer 1 damage to reroll
             </button>
           </div>
         </div>
       )}
 
       <p style={{ fontSize: 13, color: theme.muted, marginTop: 0 }}>
-        Tap a card to mark it <strong>leading</strong>, then another for <strong>second</strong>.
-        The leading card sets your initiative.
+        Tap two cards to play this round, then choose which one sets your <strong>initiative</strong>.
       </p>
 
       {hand.length === 0 && <p style={{ color: theme.muted }}>No cards in hand.</p>}
       {[...hand].sort((a, b) => a.initiative - b.initiative).map((c) => {
-        const marker = leading === c.id ? 'L' : second === c.id ? '2nd' : null;
+        const isSelected = selectedIds.includes(c.id);
+        const marker = leadingId === c.id
+          ? 'L'
+          : bothSelected && secondId === c.id
+            ? '2nd'
+            : null;
         return (
           <CardView
             key={c.id}
             card={c}
             marker={marker}
-            selected={marker !== null}
+            selected={isSelected}
             onClick={() => tap(c.id)}
           />
         );
@@ -119,31 +137,147 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
 
       <div
         style={{
-          position: 'sticky',
-          bottom: 0,
+          position: 'fixed',
+          bottom: BOTTOM_BAR_HEIGHT,
+          left: 0,
+          right: 0,
           background: theme.bgSolid,
-          paddingTop: 12,
-          paddingBottom: 12,
-          marginTop: 16,
+          padding: '8px 12px',
           borderTop: `1px solid ${theme.border}`,
+          zIndex: 40,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
         }}
       >
+        {bothSelected ? (
+          <>
+            <span
+              style={{
+                fontSize: 10,
+                color: theme.muted,
+                textTransform: 'uppercase',
+                letterSpacing: 1.2,
+                fontFamily: theme.headingFont,
+              }}
+            >
+              Initiative
+            </span>
+            {selectedCards
+              .slice()
+              .sort((a, b) => a.initiative - b.initiative)
+              .map((c) => {
+                const isLeading = leadingId === c.id;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => setLeadingId(c.id)}
+                    style={{
+                      padding: '8px 12px',
+                      fontSize: 16,
+                      fontFamily: theme.headingFont,
+                      fontWeight: 600,
+                      background: isLeading ? theme.accent : 'transparent',
+                      color: isLeading ? '#0e1612' : theme.text,
+                      border: `1px solid ${isLeading ? theme.accent : theme.border}`,
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      minWidth: 44,
+                    }}
+                  >
+                    {String(c.initiative).padStart(2, '0')}
+                  </button>
+                );
+              })}
+          </>
+        ) : (
+          <span style={{ fontSize: 13, color: theme.muted }}>
+            {selectedIds.length === 0 ? 'Select 2 cards' : 'Select 1 more card'}
+          </span>
+        )}
+        <span
+          aria-hidden
+          style={{
+            marginLeft: 'auto',
+            width: 1,
+            alignSelf: 'stretch',
+            background: theme.border,
+          }}
+        />
         <button
           onClick={() => {
             if (!canConfirm) return;
-            sock.send({ type: 'player_select_cards', leadingId: leading!, secondId: second! });
+            sock.send({ type: 'player_select_cards', leadingId: leadingId!, secondId: secondId! });
           }}
           disabled={!canConfirm}
           style={{
             ...btn.primary(!canConfirm),
-            width: '100%',
-            fontSize: 16,
-            padding: '14px 16px',
+            width: 160,
+            flexShrink: 0,
+            fontSize: 15,
+            padding: '10px 18px',
           }}
         >
-          Confirm ({selectedCount}/2)
+          Confirm
         </button>
       </div>
+    </div>
+  );
+}
+
+type CardTab = 'hand' | 'discard' | 'lost';
+
+export function CardsOverview({ you }: { you: PrivatePlayerState }) {
+  const [tab, setTab] = useState<CardTab>('hand');
+  const groups: { id: CardTab; label: string; cards: Card[] }[] = [
+    { id: 'hand', label: 'Hand', cards: [...you.hand].sort((a, b) => a.initiative - b.initiative) },
+    { id: 'discard', label: 'Discard', cards: [...you.discard].sort((a, b) => a.initiative - b.initiative) },
+    { id: 'lost', label: 'Lost', cards: [...you.lost].sort((a, b) => a.initiative - b.initiative) },
+  ];
+  const active = groups.find((g) => g.id === tab) ?? groups[0]!;
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div
+        role="tablist"
+        style={{
+          display: 'flex',
+          gap: 4,
+          borderBottom: `1px solid ${theme.border}`,
+          marginBottom: 12,
+        }}
+      >
+        {groups.map((g) => {
+          const isActive = g.id === active.id;
+          return (
+            <button
+              key={g.id}
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => setTab(g.id)}
+              style={{
+                background: 'transparent',
+                color: isActive ? theme.accent : theme.muted,
+                border: 'none',
+                borderBottom: `2px solid ${isActive ? theme.accent : 'transparent'}`,
+                padding: '8px 12px',
+                fontSize: 12,
+                textTransform: 'uppercase',
+                letterSpacing: 1.5,
+                fontFamily: theme.headingFont,
+                cursor: 'pointer',
+                marginBottom: -1,
+              }}
+            >
+              {g.label} ({g.cards.length})
+            </button>
+          );
+        })}
+      </div>
+      {active.cards.length === 0 ? (
+        <p style={{ color: theme.muted, fontSize: 13, margin: '4px 0' }}>—</p>
+      ) : (
+        active.cards.map((c) => <CardView key={c.id} card={c} />)
+      )}
     </div>
   );
 }

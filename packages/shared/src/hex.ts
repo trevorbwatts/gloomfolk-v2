@@ -62,6 +62,135 @@ export function bfsReachable(
 }
 
 /**
+ * Shortest passable path from `start` to `goal`, including both endpoints.
+ * Returns null if `goal` is unreachable within `budget` steps.
+ */
+export function bfsPath(
+  start: Hex,
+  goal: Hex,
+  budget: number,
+  passable: (h: Hex) => boolean,
+): Hex[] | null {
+  if (hexEqual(start, goal)) return [start];
+  if (budget <= 0) return null;
+  const parents = new Map<string, Hex>();
+  const seen = new Set<string>([hexKey(start)]);
+  let frontier: Hex[] = [start];
+  for (let step = 1; step <= budget; step++) {
+    const next: Hex[] = [];
+    for (const h of frontier) {
+      for (const n of hexNeighbors(h)) {
+        const k = hexKey(n);
+        if (seen.has(k)) continue;
+        if (!passable(n)) continue;
+        seen.add(k);
+        parents.set(k, h);
+        if (hexEqual(n, goal)) {
+          const out: Hex[] = [n];
+          let cur = h;
+          while (!hexEqual(cur, start)) {
+            out.push(cur);
+            cur = parents.get(hexKey(cur))!;
+          }
+          out.push(start);
+          return out.reverse();
+        }
+        next.push(n);
+      }
+    }
+    frontier = next;
+    if (frontier.length === 0) break;
+  }
+  return null;
+}
+
+/**
+ * BFS reachable destinations for a Jump move. Jumping ignores enemies in
+ * pass-through hexes but the last hex of the move is treated normally.
+ *
+ *   - `walkable(h)` decides if a hex can be traversed (walls block; enemies
+ *     do not).
+ *   - `canEnd(h)` decides if a hex is a legal destination (must also be
+ *     unoccupied by another figure).
+ *
+ * `start` is included with distance 0 to match `bfsReachable`.
+ */
+export function bfsReachableJump(
+  start: Hex,
+  budget: number,
+  walkable: (h: Hex) => boolean,
+  canEnd: (h: Hex) => boolean,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  out.set(hexKey(start), 0);
+  if (budget <= 0) return out;
+  const seen = new Set<string>([hexKey(start)]);
+  let frontier: Hex[] = [start];
+  for (let step = 1; step <= budget; step++) {
+    const next: Hex[] = [];
+    for (const h of frontier) {
+      for (const n of hexNeighbors(h)) {
+        const k = hexKey(n);
+        if (seen.has(k)) continue;
+        if (!walkable(n)) continue;
+        seen.add(k);
+        if (canEnd(n)) out.set(k, step);
+        next.push(n);
+      }
+    }
+    frontier = next;
+    if (frontier.length === 0) break;
+  }
+  return out;
+}
+
+/**
+ * Shortest jump path from `start` to `goal`, including both endpoints.
+ * Mid-path hexes need only be `walkable`; the goal must also satisfy
+ * `canEnd`. Returns null if no path exists within `budget`.
+ */
+export function bfsPathJump(
+  start: Hex,
+  goal: Hex,
+  budget: number,
+  walkable: (h: Hex) => boolean,
+  canEnd: (h: Hex) => boolean,
+): Hex[] | null {
+  if (hexEqual(start, goal)) return [start];
+  if (budget <= 0) return null;
+  if (!canEnd(goal)) return null;
+  const parents = new Map<string, Hex>();
+  const seen = new Set<string>([hexKey(start)]);
+  let frontier: Hex[] = [start];
+  for (let step = 1; step <= budget; step++) {
+    const next: Hex[] = [];
+    for (const h of frontier) {
+      for (const n of hexNeighbors(h)) {
+        const k = hexKey(n);
+        if (seen.has(k)) continue;
+        if (!walkable(n)) continue;
+        seen.add(k);
+        parents.set(k, h);
+        if (hexEqual(n, goal)) {
+          const out: Hex[] = [n];
+          let cur = h;
+          while (!hexEqual(cur, start)) {
+            out.push(cur);
+            cur = parents.get(hexKey(cur))!;
+          }
+          out.push(start);
+          return out.reverse();
+        }
+        next.push(n);
+      }
+    }
+    frontier = next;
+    if (frontier.length === 0) break;
+  }
+  return null;
+}
+
+/**
  * Rotate an axial hex 60° counter-clockwise around the origin.
  * Six rotations cycle back to identity.
  */
@@ -172,4 +301,52 @@ export function bfsForcedMove(
     if (frontier.length === 0) break;
   }
   return out;
+}
+
+/**
+ * Like `bfsForcedMove` but returns the path from `start` to `dest` (excluding
+ * `start`). Each step satisfies the push/pull directional rule. Returns null
+ * if `dest` is not reachable within the budget.
+ */
+export function bfsForcedMovePath(
+  start: Hex,
+  dest: Hex,
+  budget: number,
+  anchor: Hex,
+  direction: 'push' | 'pull',
+  passable: (h: Hex) => boolean,
+): Hex[] | null {
+  if (budget <= 0) return null;
+  const startKey = hexKey(start);
+  const parent = new Map<string, Hex | null>();
+  parent.set(startKey, null);
+  let frontier: Hex[] = [start];
+  for (let step = 1; step <= budget; step++) {
+    const next: Hex[] = [];
+    for (const h of frontier) {
+      const curDist = hexDistance(anchor, h);
+      for (const n of hexNeighbors(h)) {
+        const k = hexKey(n);
+        if (parent.has(k)) continue;
+        if (!passable(n)) continue;
+        const newDist = hexDistance(anchor, n);
+        if (direction === 'push' && newDist <= curDist) continue;
+        if (direction === 'pull' && newDist >= curDist) continue;
+        parent.set(k, h);
+        if (n.q === dest.q && n.r === dest.r) {
+          const out: Hex[] = [];
+          let cur: Hex | null = n;
+          while (cur && hexKey(cur) !== startKey) {
+            out.unshift(cur);
+            cur = parent.get(hexKey(cur)) ?? null;
+          }
+          return out;
+        }
+        next.push(n);
+      }
+    }
+    frontier = next;
+    if (frontier.length === 0) break;
+  }
+  return null;
 }

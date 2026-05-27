@@ -6,13 +6,21 @@ import {
   type CharacterClass,
   type CharacterPool,
 } from '@gloomfolk/shared';
-import { getSavedSession, useSocket } from '../net/useSocket.js';
+import { clearSession, getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { btn, theme } from '../theme.js';
 import { CharacterSelect } from './CharacterSelect.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
-import { TurnPlay } from './TurnPlay.js';
+import { ActiveArea, TurnPlay } from './TurnPlay.js';
+import {
+  BottomBar,
+  BOTTOM_BAR_HEIGHT,
+  PlayerHeader,
+  ScenarioPanel,
+  CharacterPanel,
+  type TabId,
+} from './BottomBar.js';
 
 const CLASS_BY_ID: Record<string, CharacterClass> = {
   [bruiser.id]: bruiser,
@@ -23,8 +31,7 @@ function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTur
   if (!hasCharacter) return '';
   switch (phase) {
     case 'card_select': return 'Choose your cards';
-    case 'turn_resolution': return isMyTurn ? 'Take your turn' : 'Turn in progress';
-    case 'round_end': return 'Round complete';
+    case 'turn_resolution': return isMyTurn ? '' : 'Turn in progress';
     case 'victory': return 'Victory';
     case 'defeat': return 'Defeated';
     default: return '';
@@ -37,7 +44,7 @@ function readCampaignFromHash(): string | null {
 }
 
 const shellStyle: React.CSSProperties = {
-  background: theme.bg,
+  background: theme.bgSolid,
   color: theme.text,
   minHeight: '100vh',
   width: '100%',
@@ -72,6 +79,7 @@ export function PlayerScreen() {
   });
 
   const [editingLoadout, setEditingLoadout] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabId>('play');
   const prevCharIdRef = useRef<string | null | undefined>(undefined);
   const [loadoutByClassId, setLoadoutByClassId] = useState<
     Record<string, readonly string[]>
@@ -109,6 +117,21 @@ export function PlayerScreen() {
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, [editingLoadout]);
+
+  const meEarly = gameState?.players.find((p) => p.playerId === playerId);
+  const phaseEarly = gameState?.phase;
+  const viewKey = !meEarly?.characterId
+    ? 'character-select'
+    : editingLoadout
+      ? 'loadout'
+      : phaseEarly === 'card_select'
+        ? 'card-select'
+        : phaseEarly === 'turn_resolution'
+          ? 'turn-play'
+          : `phase:${phaseEarly ?? 'lobby'}`;
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [viewKey]);
 
   if (role !== 'player') {
     const savedSession = getSavedSession();
@@ -183,54 +206,90 @@ export function PlayerScreen() {
     : null;
   const myClassId = myCharInstance?.classId ?? null;
   const myClass = myClassId ? CLASS_BY_ID[myClassId] : null;
+  const myUnit =
+    gameState?.units.find(
+      (u) => u.kind === 'player' && u.ownerPlayerId === playerId,
+    ) ?? null;
+
+  const showBottomBar = !!me?.characterId;
+  const onPlayTab = activeTab === 'play' || !showBottomBar;
+  const headerTitle =
+    showBottomBar && activeTab === 'scenario'
+      ? 'Scenario'
+      : showBottomBar && activeTab === 'character'
+        ? 'Character'
+        : undefined;
 
   return (
     <div style={shellStyle}>
-      <div style={{ padding: 16, maxWidth: 540, color: theme.text, boxSizing: 'border-box', overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            onClick={() => {
-              if ((history.state as { gf?: string } | null)?.gf) {
-                history.back();
-                return;
-              }
-              try {
-                sessionStorage.removeItem('gf:playerId');
-                sessionStorage.removeItem('gf:campaignId');
-              } catch { /* noop */ }
-              useStore.setState({
-                role: null,
-                playerId: null,
-                campaignId: null,
-                gameState: null,
-                you: null,
-              });
-            }}
-            style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12 }}
-          >
-            ← Back
-          </button>
-          <p style={{ color: theme.muted, fontSize: 12, margin: 0, letterSpacing: 1, textTransform: 'uppercase' }}>
-            {gameState?.campaignName}
-            {myCharInstance && ` · ${myCharInstance.name}`}
-          </p>
+      {myCharInstance && (
+        <div
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 50,
+            background: theme.bgSolid,
+          }}
+        >
+          <PlayerHeader
+            character={myCharInstance}
+            unit={myUnit}
+            {...(headerTitle ? { title: headerTitle } : {})}
+          />
+          {you && <ActiveArea you={you} />}
         </div>
-        {myCharInstance && (() => {
+      )}
+      <div
+        style={{
+          padding: 16,
+          paddingBottom: showBottomBar ? BOTTOM_BAR_HEIGHT + 16 : 16,
+          maxWidth: 540,
+          color: theme.text,
+          boxSizing: 'border-box',
+          overflow: 'clip',
+        }}
+      >
+        {onPlayTab && (!myCharInstance || editingLoadout) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <button
+              onClick={() => {
+                if ((history.state as { gf?: string } | null)?.gf) {
+                  history.back();
+                  return;
+                }
+                clearSession();
+                useStore.setState({
+                  role: null,
+                  playerId: null,
+                  campaignId: null,
+                  gameState: null,
+                  you: null,
+                });
+              }}
+              style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12 }}
+            >
+              ← Back
+            </button>
+            {!myCharInstance && (
+              <p style={{ color: theme.muted, fontSize: 12, margin: 0, letterSpacing: 1, textTransform: 'uppercase' }}>
+                {gameState?.campaignName}
+              </p>
+            )}
+          </div>
+        )}
+        {onPlayTab && (() => {
           const myUnit = gameState?.units.find(
             (u) => u.kind === 'player' && u.ownerPlayerId === playerId,
           );
           const held = myUnit?.moneyTokensHeld ?? 0;
-          const gold = myCharInstance.gold ?? 0;
-          if (held === 0 && gold === 0) return null;
+          if (!myCharInstance || held === 0) return null;
           return (
-            <p style={{ color: '#d9a441', fontSize: 12, margin: '4px 0 0', letterSpacing: 0.3 }}>
-              {held > 0 && <>🪙 {held} token{held === 1 ? '' : 's'}</>}
-              {held > 0 && gold > 0 && ' · '}
-              {gold > 0 && <>{gold} gold</>}
+            <p style={{ color: '#d9a441', fontSize: 12, margin: '0 0 8px', letterSpacing: 0.3 }}>
+              🪙 {held} token{held === 1 ? '' : 's'} this round
             </p>
           );
         })()}
-        {phaseHeadline(phase, !!me?.characterId, isMyTurn) && <h1
+        {onPlayTab && phaseHeadline(phase, !!me?.characterId, isMyTurn) && <h1
           style={{
             marginTop: 6,
             marginBottom: 12,
@@ -243,88 +302,158 @@ export function PlayerScreen() {
         >
           {phaseHeadline(phase, !!me?.characterId, isMyTurn)}
         </h1>}
-        {phase === 'card_select' && me?.characterId && submittedCount > 0 && submittedCount < totalReady && (
+        {onPlayTab && phase === 'card_select' && me?.characterId && submittedCount > 0 && submittedCount < totalReady && (
           <p style={{ color: theme.muted, fontSize: 13, marginTop: -8, marginBottom: 12 }}>
             Waiting on {totalReady - submittedCount} other {totalReady - submittedCount === 1 ? 'player' : 'players'}.
           </p>
         )}
-        {!me?.characterId && playerId && gameState && (
+        {onPlayTab && !me?.characterId && playerId && gameState && (
           <CharacterSelect
             characters={gameState.characters}
+            players={gameState.players}
             myPlayerId={playerId}
           />
         )}
-        {myClassId && myClass && editingLoadout && (
-          <LoadoutBuilder
-            characterClass={myClass}
-            pool={poolByClassId[myClassId]!}
-            {...(loadoutByClassId[myClassId]
-              ? { initialChosenIds: loadoutByClassId[myClassId] }
-              : {})}
-            onBack={() => history.back()}
-            onLockIn={(chosenCardIds) => {
-              setLoadoutByClassId((prev) => ({
-                ...prev,
-                [myClassId]: chosenCardIds,
-              }));
-              setEditingLoadout(false);
-            }}
-          />
-        )}
-        {me?.characterId && !editingLoadout && phase === 'lobby' && (
-          <div>
-            <p style={{ color: theme.muted }}>Waiting for host to start the scenario…</p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button
-                onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
+        {onPlayTab && myClassId && myClass && editingLoadout && (() => {
+          const savedLoadout =
+            loadoutByClassId[myClassId] ?? myCharInstance?.loadout ?? undefined;
+          return (
+            <LoadoutBuilder
+              characterClass={myClass}
+              pool={poolByClassId[myClassId]!}
+              {...(savedLoadout ? { initialChosenIds: savedLoadout } : {})}
+              onLockIn={(chosenCardIds) => {
+                setLoadoutByClassId((prev) => ({
+                  ...prev,
+                  [myClassId]: chosenCardIds,
+                }));
+                sock.send({
+                  type: 'player_set_loadout',
+                  cardIds: [...chosenCardIds],
+                });
+                setEditingLoadout(false);
+              }}
+            />
+          );
+        })()}
+        {onPlayTab && me?.characterId && !editingLoadout && phase === 'lobby' && (() => {
+          const ready = myCharInstance?.loadout != null;
+          return (
+            <div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
+                  style={ready ? {
+                    fontSize: 14,
+                    padding: '8px 14px',
+                    background: 'transparent',
+                    color: theme.accent,
+                    border: `1px solid ${theme.accent}`,
+                    borderRadius: 3,
+                    fontFamily: theme.headingFont,
+                    letterSpacing: 1,
+                    textTransform: 'uppercase',
+                    cursor: 'pointer',
+                  } : {
+                    fontSize: 16,
+                    padding: '12px 18px',
+                    background: theme.accent,
+                    color: '#0e1612',
+                    border: 'none',
+                    borderRadius: 3,
+                    fontFamily: theme.headingFont,
+                    letterSpacing: 1,
+                    textTransform: 'uppercase',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {ready ? 'Edit hand' : 'Pick cards'}
+                </button>
+                <button
+                  onClick={() => {
+                    setEditingLoadout(false);
+                    sock.send({ type: 'player_unclaim_character' });
+                  }}
+                  style={{
+                    fontSize: 14,
+                    padding: '8px 14px',
+                    background: 'transparent',
+                    color: theme.muted,
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 3,
+                    fontFamily: theme.headingFont,
+                    letterSpacing: 1,
+                    textTransform: 'uppercase',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Change hero
+                </button>
+              </div>
+              <div
                 style={{
-                  fontSize: 14,
-                  padding: '8px 14px',
-                  background: 'transparent',
-                  color: theme.accent,
-                  border: `1px solid ${theme.accent}`,
-                  borderRadius: 3,
-                  fontFamily: theme.headingFont,
-                  letterSpacing: 1,
-                  textTransform: 'uppercase',
-                  cursor: 'pointer',
+                  marginTop: 48,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  textAlign: 'center',
+                  padding: '48px 16px',
                 }}
               >
-                Edit hand
-              </button>
-              <button
-                onClick={() => {
-                  setEditingLoadout(false);
-                  sock.send({ type: 'player_unclaim_character' });
-                }}
-                style={{
-                  fontSize: 14,
-                  padding: '8px 14px',
-                  background: 'transparent',
-                  color: theme.muted,
-                  border: `1px solid ${theme.border}`,
-                  borderRadius: 3,
-                  fontFamily: theme.headingFont,
-                  letterSpacing: 1,
-                  textTransform: 'uppercase',
-                  cursor: 'pointer',
-                }}
-              >
-                Change hero
-              </button>
+                {ready ? (
+                  <>
+                    <div
+                      style={{
+                        fontSize: 64,
+                        fontFamily: theme.headingFont,
+                        color: theme.good,
+                        letterSpacing: 1,
+                        lineHeight: 1,
+                      }}
+                    >
+                      ✓ Ready
+                    </div>
+                    <p
+                      style={{
+                        marginTop: 16,
+                        color: theme.muted,
+                        fontSize: 14,
+                        letterSpacing: 0.5,
+                      }}
+                    >
+                      Waiting for host to start the scenario…
+                    </p>
+                  </>
+                ) : (
+                  <p style={{ color: theme.muted, fontSize: 14 }}>
+                    Build your hand to ready up.
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-        {me?.characterId && phase === 'card_select' && you && (
+          );
+        })()}
+        {onPlayTab && me?.characterId && phase === 'card_select' && you && (
           <Hand you={you} />
         )}
-        {me?.characterId && phase === 'turn_resolution' && gameState && (
+        {onPlayTab && me?.characterId && phase === 'turn_resolution' && gameState && (
           <TurnPlay gameState={gameState} myPlayerId={playerId!} you={you} />
         )}
-        {me?.characterId && phase === 'round_end' && (
-          <p style={{ color: theme.muted }}>Round complete. Waiting for host to start the next round…</p>
+        {showBottomBar && activeTab === 'scenario' && (
+          <ScenarioPanel gameState={gameState ?? null} />
+        )}
+        {showBottomBar && activeTab === 'character' && (
+          <CharacterPanel
+            you={you}
+            character={myCharInstance ?? null}
+            characterClass={myClass ?? null}
+          />
         )}
       </div>
+      {showBottomBar && (
+        <BottomBar active={activeTab} onChange={setActiveTab} />
+      )}
     </div>
   );
 }

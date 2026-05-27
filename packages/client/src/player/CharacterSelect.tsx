@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { bruiser, silentKnife } from '@gloomfolk/shared';
-import type { CharacterClass, CharacterInstance } from '@gloomfolk/shared';
+import type { CharacterClass, CharacterInstance, LobbyPlayer } from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
 import { classAvatarUrl, onAvatarError } from '../avatars.js';
 import { btn, theme } from '../theme.js';
@@ -47,9 +47,11 @@ const cardButtonStyle: React.CSSProperties = {
 
 export function CharacterSelect({
   characters,
+  players,
   myPlayerId,
 }: {
   characters: CharacterInstance[];
+  players: LobbyPlayer[];
   myPlayerId: string;
 }) {
   const sock = useSocket();
@@ -57,8 +59,16 @@ export function CharacterSelect({
   const [pickedClassId, setPickedClassId] = useState<string | null>(null);
   const [charName, setCharName] = useState('');
 
+  // A character is "available" if it's unclaimed, claimed by me, or claimed by
+  // a player who isn't in the current room (they were in a previous session
+  // and never rejoined — take over).
+  const livePlayerIds = new Set(players.map((p) => p.playerId));
+  const reclaimable = (c: CharacterInstance): boolean =>
+    !!c.claimedByPlayerId
+    && c.claimedByPlayerId !== myPlayerId
+    && !livePlayerIds.has(c.claimedByPlayerId);
   const available = characters.filter(
-    (c) => !c.claimedByPlayerId || c.claimedByPlayerId === myPlayerId,
+    (c) => !c.claimedByPlayerId || c.claimedByPlayerId === myPlayerId || reclaimable(c),
   );
 
   useEffect(() => {
@@ -174,6 +184,7 @@ export function CharacterSelect({
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {available.map((ch) => {
               const cls = CLASS_BY_ID[ch.classId];
+              const isReclaim = reclaimable(ch);
               return (
                 <button
                   key={ch.id}
@@ -214,7 +225,12 @@ export function CharacterSelect({
                       </div>
                     </div>
                   </div>
-                  <div style={{ fontSize: 13, color: theme.muted }}>
+                  <div style={{ fontSize: 13, color: theme.muted, textAlign: 'right' }}>
+                    {isReclaim && (
+                      <div style={{ color: theme.accent, fontSize: 11, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 2 }}>
+                        Returning?
+                      </div>
+                    )}
                     {ch.xp} XP
                   </div>
                 </button>

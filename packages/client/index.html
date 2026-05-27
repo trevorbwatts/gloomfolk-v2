@@ -2,10 +2,40 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Gloomfolk" />
+    <meta name="theme-color" content="#0e1612" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+
     <title>Gloomfolk</title>
     <style>
-      html, body { margin: 0; padding: 0; background: #0e1612; color: #e7e2cf; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #0e1612;
+        color: #e7e2cf;
+        overscroll-behavior: none;
+        overflow: hidden;
+        height: 100%;
+        width: 100%;
+        position: fixed;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-touch-callout: none;
+        touch-action: manipulation;
+      }
+      #root {
+        height: 100%;
+        width: 100%;
+        overflow: auto;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+      }
     </style>
   </head>
   <body>

@@ -1,17 +1,170 @@
-import type { Ability, AbilityStep, Card, CardHalf, Disposition } from '@gloomfolk/shared';
+import type {
+  Ability,
+  AbilityStep,
+  Card,
+  CardHalf,
+  Disposition,
+  Element,
+  ElementBoardState,
+  ElementSelector,
+} from '@gloomfolk/shared';
+import { Fragment } from 'react';
+import { Flame, Snowflake, Wind, Stone, SunMedium, Moon } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { theme } from '../theme.js';
+import { GameIcon, type IconKey } from '../icons.js';
 
-function dispositionLabel(half: CardHalf): string {
+/**
+ * Live element state passed down through CardView/HalfView so that element
+ * icons on create-element steps, elementRiders, and requiredElementCost can
+ * glow when the element is currently available to consume.
+ *
+ * `null` when no live context applies (e.g. browsing your hand outside your
+ * turn). The chips still render, just without availability emphasis.
+ */
+export interface CardElementContext {
+  /** Live board (post-consume / pre-end-of-turn-infuse). */
+  board: ElementBoardState;
+  /** Snapshot at this turn's start — eligibility for consume is "strong or
+   *  waning at start of turn", not live. */
+  turnStartBoard: ElementBoardState;
+  /** Already consumed this turn. Same-element-once-per-turn rule. */
+  consumedThisTurn: ReadonlySet<Element>;
+}
+
+/** Human label for an element selector or a multi-element consume bundle. */
+function elementSelectorText(
+  sel: ElementSelector | { readonly all: readonly Element[] },
+): string {
+  if (typeof sel === 'string') return cap(sel);
+  if ('all' in sel) return sel.all.map(cap).join(' + ');
+  if (sel.kind === 'wild') return 'Wild';
+  return sel.options.map(cap).join('/');
+}
+
+/** Visual chip showing one element. Glows when the live context says the
+ *  element is currently available to consume (strong/waning at turn-start,
+ *  not yet consumed). */
+function ElementChip({
+  element,
+  context,
+  consumeIntent,
+}: {
+  element: Element | { kind: 'wild' } | { kind: 'mixed'; options: readonly [Element, Element] };
+  context: CardElementContext | null;
+  /** When true, available = strong/waning at turn-start AND uncon­sumed.
+   *  When false (e.g. on a create-element step), no glow. */
+  consumeIntent: boolean;
+}) {
+  // Concrete element — render the Lucide glyph, no text label (the
+  // surrounding "INFUSE" / "CONSUME" word in the row supplies context).
+  if (typeof element === 'string') {
+    const meta = ELEMENT_META[element];
+    const Icon = meta.icon;
+    const available = !!(
+      consumeIntent &&
+      context &&
+      (context.turnStartBoard[element] === 'strong' ||
+        context.turnStartBoard[element] === 'waning') &&
+      !context.consumedThisTurn.has(element)
+    );
+    return (
+      <span
+        title={meta.label}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 3,
+          borderRadius: 4,
+          background: theme.bgSolid,
+          border: `1px solid ${available ? theme.accent : theme.border}`,
+          boxShadow: available ? `0 0 8px ${theme.accent}` : 'none',
+          transition: 'box-shadow 0.2s ease, border-color 0.2s ease',
+        }}
+      >
+        <Icon size={16} strokeWidth={1.75} color={meta.color} />
+      </span>
+    );
+  }
+  // Wild / mixed — render as a multi-pip badge.
+  const options = element.kind === 'wild' ? ALL_ELEMENT_KEYS : element.options;
+  return (
+    <span
+      title={element.kind === 'wild' ? 'Wild — pick any element' : `Mixed — ${options.map(cap).join(' or ')}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 2,
+        padding: '1px 6px',
+        borderRadius: 4,
+        background: theme.bgSolid,
+        border: `1px solid ${theme.border}`,
+        fontSize: 11,
+        color: theme.muted,
+      }}
+    >
+      {options.map((opt) => (
+        <span
+          key={opt}
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: ELEMENT_META[opt].color,
+            border: `1px solid ${theme.border}`,
+          }}
+        />
+      ))}
+      <span style={{ marginLeft: 3 }}>{element.kind === 'wild' ? 'Wild' : 'Mixed'}</span>
+    </span>
+  );
+}
+
+const ALL_ELEMENT_KEYS: readonly Element[] = ['fire', 'ice', 'air', 'earth', 'light', 'dark'];
+
+interface ChipElementMeta {
+  label: string;
+  color: string;
+  icon: LucideIcon;
+}
+
+const ELEMENT_META: Record<Element, ChipElementMeta> = {
+  fire: { label: 'Fire', color: '#d96a4a', icon: Flame },
+  ice: { label: 'Ice', color: '#74c2d6', icon: Snowflake },
+  air: { label: 'Air', color: '#e7e2cf', icon: Wind },
+  earth: { label: 'Earth', color: '#8a6f3b', icon: Stone },
+  light: { label: 'Light', color: '#f0d774', icon: SunMedium },
+  dark: { label: 'Dark', color: '#8b6cb0', icon: Moon },
+};
+
+function finalPileOf(half: CardHalf): 'lost' | 'discard' {
   const d = half.disposition;
-  if (d === 'discard') return 'Discard';
-  if (d === 'lost') return 'Lost';
-  const finalPile = half.finalPile ?? (d === 'persistent-round' ? 'discard' : 'lost');
-  const finalLabel = finalPile === 'lost' ? 'Lost' : 'Discard';
+  if (d === 'discard') return 'discard';
+  if (d === 'lost') return 'lost';
+  return half.finalPile ?? (d === 'persistent-round' ? 'discard' : 'lost');
+}
+
+function LostBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span style={{ color: theme.bad, fontWeight: 700, opacity: 1 }}>{children}</span>
+  );
+}
+
+function DispositionLabel({ half }: { half: CardHalf }) {
+  const d = half.disposition;
+  if (d === 'discard') return <>Discard</>;
+  if (d === 'lost') return <LostBadge>Lost</LostBadge>;
+  const finalPile = finalPileOf(half);
   const base =
     d === 'persistent-round' ? 'Persistent Round' :
     d === 'persistent-tracked' ? 'Persistent Tracked' :
     'Persistent Scenario';
-  return `${base} · ${finalLabel}`;
+  return (
+    <>
+      {base} · {finalPile === 'lost' ? <LostBadge>Lost</LostBadge> : 'Discard'}
+    </>
+  );
 }
 
 function amountStr(a: unknown): string {
@@ -68,17 +221,14 @@ function bonusParts(r: {
   advantage?: boolean;
 }): string {
   const parts: string[] = [];
-  if (typeof r.attackBonus === 'number') parts.push(`+${r.attackBonus} attack`);
-  else if (r.attackBonus) parts.push('+X attack');
-  if (r.pierce) parts.push(`+${r.pierce.amount} pierce`);
-  if (r.advantage) parts.push('advantage');
+  if (typeof r.attackBonus === 'number') parts.push(`+${r.attackBonus} Attack`);
+  else if (r.attackBonus) parts.push('+X Attack');
+  if (r.pierce) parts.push(`+${r.pierce.amount} Pierce`);
+  if (r.advantage) parts.push('Advantage');
   if (r.gainExp) parts.push(`+${r.gainExp} XP`);
   return parts.join(', ');
 }
 
-function elementRiderLine(r: ElementRiderT): string {
-  return `Consume ${cap(r.consume)}: ${bonusParts(r)}`;
-}
 function conditionRiderLine(r: ConditionRiderT): string {
   return `If ${causeText(r.when)}: ${bonusParts(r)}`;
 }
@@ -86,10 +236,11 @@ function targetCondBonusLine(r: TargetCondBonusT): string {
   return `Against ${targetConditionText(r.condition)}: ${bonusParts(r)}`;
 }
 
+/** Non-element rider text (element riders surface in the chip block above
+ *  with their own effect row, so they're excluded here to avoid duplication). */
 function attackRiderLines(mods: AttackModifiersT | undefined): string[] {
   if (!mods) return [];
   const lines: string[] = [];
-  for (const r of mods.elementRiders ?? []) lines.push(elementRiderLine(r));
   for (const r of mods.conditionRiders ?? []) lines.push(conditionRiderLine(r));
   for (const r of mods.targetConditionalBonuses ?? []) lines.push(targetCondBonusLine(r));
   return lines;
@@ -174,16 +325,17 @@ function AoePattern({ pattern }: { pattern: readonly HexPt[] }) {
   );
 }
 
-function attackTargetText(t: AttackTargetT): string {
-  if (!t || t.kind === 'melee') return '';
+function attackTargetText(t: AttackTargetT): React.ReactNode {
+  if (!t || t.kind === 'melee') return null;
   switch (t.kind) {
     case 'ranged': {
       const targets = t.targets && t.targets > 1 ? `, ${t.targets} targets` : '';
-      return `range ${t.range}${targets}`;
+      return <><GameIcon kind="range" /> Range {t.range}{targets}</>;
     }
     case 'enemies-moved-through': return 'each enemy moved through';
-    case 'all-within-range': return `all ${t.scope ?? 'enemies'} within range ${t.range}`;
-    case 'aoe': return '';
+    case 'all-within-range':
+      return <>all {t.scope ?? 'enemies'} within <GameIcon kind="range" /> Range {t.range}</>;
+    case 'aoe': return null;
   }
 }
 
@@ -196,87 +348,131 @@ function causeText(c: CauseT): string {
   }
 }
 
-function withParen(base: string, suffix: string): string {
-  return suffix ? `${base} (${suffix})` : base;
+function withParen(base: React.ReactNode, suffix: React.ReactNode): React.ReactNode {
+  const empty =
+    suffix == null ||
+    suffix === '' ||
+    (Array.isArray(suffix) && suffix.length === 0);
+  if (empty) return base;
+  return <>{base} ({suffix})</>;
 }
 
-function stepLabel(step: AbilityStep): string {
+function joinNodes(nodes: readonly React.ReactNode[], sep: React.ReactNode = ', '): React.ReactNode {
+  return nodes.map((n, i) => (
+    <Fragment key={i}>
+      {i > 0 ? sep : null}
+      {n}
+    </Fragment>
+  ));
+}
+
+function withIcon(kind: IconKey, label: React.ReactNode): React.ReactNode {
+  return (
+    <>
+      <GameIcon kind={kind} /> {label}
+    </>
+  );
+}
+
+function stepLabel(step: AbilityStep): React.ReactNode {
   switch (step.type) {
     case 'attack': {
-      const bits: string[] = [];
+      const bits: React.ReactNode[] = [];
       const tgt = attackTargetText(step.target);
       if (tgt) bits.push(tgt);
-      if (step.modifiers?.pierce) bits.push(`pierce ${step.modifiers.pierce.amount}`);
-      return withParen(`Attack ${amountStr(step.amount)}`, bits.join(', '));
+      if (step.modifiers?.pierce)
+        bits.push(
+          <>
+            <GameIcon kind="pierce" /> Pierce {step.modifiers.pierce.amount}
+          </>,
+        );
+      return withParen(withIcon('attack', `Attack ${amountStr(step.amount)}`), joinNodes(bits));
     }
     case 'move': {
       const traits = step.traits ?? [];
-      const verb = traits.includes('jump') ? 'Jump' : 'Move';
+      const isJump = traits.includes('jump');
+      const verb = isJump ? 'Jump' : 'Move';
       const extras: string[] = [];
       if (step.lootEnteredHexes) extras.push('loot hexes entered');
       if (step.mayBypassTraps) extras.push('may bypass traps');
-      return withParen(`${verb} ${amountStr(step.amount)}`, extras.join(', '));
+      return withParen(
+        withIcon(isJump ? 'jump' : 'move', `${verb} ${amountStr(step.amount)}`),
+        extras.join(', '),
+      );
     }
-    case 'heal': return `Heal ${step.amount} (self)`;
-    case 'shield': return `Shield ${step.amount}`;
-    case 'retaliate': return `Retaliate ${step.amount}`;
+    case 'heal': return withIcon('heal', `Heal ${step.amount} (self)`);
+    case 'shield': return withIcon('shield', `Shield ${step.amount}`);
+    case 'retaliate': return withIcon('retaliate', `Retaliate ${step.amount}`);
     case 'push': {
-      const range = step.range ? `range ${step.range}` : '';
-      return withParen(`Push ${step.amount}`, range);
+      const range: React.ReactNode = step.range
+        ? <><GameIcon kind="range" /> Range {step.range}</>
+        : '';
+      return withParen(withIcon('push', `Push ${step.amount}`), range);
     }
     case 'pull': {
-      const range = step.range ? `range ${step.range}` : '';
-      return withParen(`Pull ${step.amount}`, range);
+      const range: React.ReactNode = step.range
+        ? <><GameIcon kind="range" /> Range {step.range}</>
+        : '';
+      return withParen(withIcon('pull', `Pull ${step.amount}`), range);
     }
     case 'apply-condition': {
-      const name = cap(step.condition);
+      const name = withIcon(step.condition, cap(step.condition));
       if (!step.target || step.target.kind === 'self') return name;
-      if (step.target.kind === 'melee') return `${name} an adjacent enemy`;
-      if (step.target.kind === 'ranged') return `${name} a target at range ${step.target.range}`;
+      if (step.target.kind === 'melee') return <>{name} an adjacent enemy</>;
+      if (step.target.kind === 'ranged')
+        return <>{name} a target at <GameIcon kind="range" /> Range {step.target.range}</>;
       if (step.target.kind === 'all-within-range') {
-        return `${name} all ${step.target.scope ?? 'enemies'} within range ${step.target.range}`;
+        return <>{name} all {step.target.scope ?? 'enemies'} within <GameIcon kind="range" /> Range {step.target.range}</>;
       }
       return name;
     }
     case 'gain-exp': {
       const t = step.trigger?.kind;
       if (t === 'per-enemy-targeted') return `+${step.amount} XP per enemy targeted`;
-      if (t === 'on-next-retaliate-this-round') return `+${step.amount} XP on your next Retaliate this round`;
+      if (t === 'on-next-retaliate-this-round')
+        return <>+{step.amount} XP on your next <GameIcon kind="retaliate" /> Retaliate this round</>;
       return `+${step.amount} XP`;
     }
     case 'loot':
       return step.range === 0 ? 'Loot your hex' : `Loot within ${step.range}`;
-    case 'create-element': return `Create ${cap(step.element)}`;
+    case 'create-element': return `Create ${elementSelectorText(step.element)}`;
     case 'when': {
-      const inner = step.effects.map(stepLabel).join(', ');
-      return `If ${causeText(step.cause)}: ${inner}`;
+      const inner = step.effects
+        .filter((s) => s.type !== 'create-element')
+        .map(stepLabel);
+      return <>If {causeText(step.cause)}: {joinNodes(inner)}</>;
     }
     case 'modify-future-move':
-      return `+${step.bonusAmount} to your move abilities while active`;
+      return <>+{step.bonusAmount} to your <GameIcon kind="move" /> Move abilities while active</>;
     case 'modify-future-attack': {
-      const parts: string[] = [];
-      if (step.doubleAttack) parts.push('double attack');
-      if (typeof step.bonusAmount === 'number') parts.push(`+${step.bonusAmount} attack`);
-      else if (step.bonusAmount) parts.push('+X attack');
-      if (step.pierceBonus) parts.push(`+${step.pierceBonus} pierce`);
-      const bonus = parts.join(', ') || '+attack';
+      const parts: React.ReactNode[] = [];
+      if (step.doubleAttack) parts.push('double Attack');
+      if (typeof step.bonusAmount === 'number')
+        parts.push(<>+{step.bonusAmount} <GameIcon kind="attack" /> Attack</>);
+      else if (step.bonusAmount)
+        parts.push(<>+X <GameIcon kind="attack" /> Attack</>);
+      if (step.pierceBonus)
+        parts.push(<>+{step.pierceBonus} <GameIcon kind="pierce" /> Pierce</>);
+      const bonus: React.ReactNode = parts.length > 0
+        ? joinNodes(parts)
+        : <>+<GameIcon kind="attack" /> Attack</>;
       const scope =
-        step.appliesTo === 'next-attack-ability' ? 'on your next attack' :
-        step.appliesTo === 'all-attacks-this-round' ? 'on all attacks this round' :
+        step.appliesTo === 'next-attack-ability' ? 'on your next Attack' :
+        step.appliesTo === 'all-attacks-this-round' ? 'on all Attacks this round' :
         'while active';
       const filter = step.attackKind ? ` (${step.attackKind} only)` : '';
-      return `${bonus} ${scope}${filter}`;
+      return <>{bonus} {scope}{filter}</>;
     }
     case 'control-enemy-move': {
       const end = step.endConstraint === 'adjacent-to-actor' ? ', ending adjacent to you' : '';
-      return `Force a target enemy to move ${step.moveAmount}${end}`;
+      return `Force a target enemy to Move ${step.moveAmount}${end}`;
     }
     case 'destroy-trap':
       return 'Destroy a trap in a hex you entered this move';
     case 'negate-damage':
       return 'Negate one source of damage';
     case 'redirect-attack': {
-      const base = 'When an enemy targets an adjacent ally, redirect the attack to yourself';
+      const base = 'When an enemy targets an adjacent ally, redirect the Attack to yourself';
       const bypasses = step.bypasses ?? [];
       if (bypasses.length === 0) return base;
       const ignoreParts = bypasses.map((b) => b === 'line-of-sight' ? 'line of sight' : b);
@@ -285,8 +481,40 @@ function stepLabel(step: AbilityStep): string {
   }
 }
 
-function abilityLabel(a: Ability): string {
-  return a.steps.map(stepLabel).join(', ');
+function abilityLabel(a: Ability): React.ReactNode {
+  // create-element steps are surfaced as their own "INFUSE [icon]" block
+  // below the ability, so we drop them from the inline label to avoid
+  // duplication.
+  return joinNodes(a.steps.filter((s) => s.type !== 'create-element').map(stepLabel));
+}
+
+/** Element references on an ability: create-element steps and elementRiders
+ *  on its attack steps. Each entry becomes one block in the card UI: a
+ *  header row ("INFUSE [icon]" or "CONSUME [icon(s)]") and, for consume,
+ *  a second row with the bonus effects. */
+type ChipElementRef =
+  | Element
+  | { kind: 'wild' }
+  | { kind: 'mixed'; options: readonly [Element, Element] };
+type AbilityElementEntry =
+  | { kind: 'create'; elements: readonly ChipElementRef[] }
+  | { kind: 'consume'; elements: readonly ChipElementRef[]; effects: string };
+function abilityElements(a: Ability): AbilityElementEntry[] {
+  const out: AbilityElementEntry[] = [];
+  for (const step of a.steps) {
+    if (step.type === 'create-element') {
+      out.push({ kind: 'create', elements: [step.element] });
+    } else if (step.type === 'attack') {
+      const riders = step.modifiers?.elementRiders ?? [];
+      for (const r of riders) {
+        const c = r.consume;
+        const elements: ChipElementRef[] =
+          typeof c === 'object' && 'all' in c ? [...c.all] : [c];
+        out.push({ kind: 'consume', elements, effects: bonusParts(r) });
+      }
+    }
+  }
+  return out;
 }
 
 type PersistentTriggerT = NonNullable<CardHalf['persistentTrigger']>;
@@ -301,12 +529,12 @@ function triggerNoun(t: PersistentTriggerT): string {
   }
 }
 
-function trackedSentence(half: CardHalf): string {
+function trackedSentence(half: CardHalf): React.ReactNode {
   const n = half.trackedUses ?? 0;
   const trigger = half.persistentTrigger;
-  const body = half.abilities.map(abilityLabel).join('; ');
+  const body = joinNodes(half.abilities.map(abilityLabel), '; ');
   if (!trigger || n <= 0) return body;
-  return `On the next ${n} ${triggerNoun(trigger)}, gain ${body}.`;
+  return <>On the next {n} {triggerNoun(trigger)}, gain {body}.</>;
 }
 
 function UseTrack({ half }: { half: CardHalf }) {
@@ -370,21 +598,45 @@ function UseTrack({ half }: { half: CardHalf }) {
       <span
         style={{
           fontSize: 11,
-          opacity: 0.55,
+          opacity: finalPile === 'lost' ? 1 : 0.55,
           letterSpacing: 0.5,
           textTransform: 'uppercase',
         }}
       >
-        {finalPile === 'lost' ? 'Lost' : 'Discard'}
+        {finalPile === 'lost' ? <LostBadge>Lost</LostBadge> : 'Discard'}
       </span>
     </div>
   );
 }
 
-export function HalfView({ half }: { half: CardHalf }) {
+export function HalfView({
+  half,
+  elementContext = null,
+}: {
+  half: CardHalf;
+  elementContext?: CardElementContext | null;
+}) {
   const isTracked = half.disposition === 'persistent-tracked';
+  const cost = half.requiredElementCost ?? [];
   return (
     <>
+      {cost.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 0 8px',
+            fontSize: 12,
+            color: theme.muted,
+          }}
+        >
+          <span style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>Cost:</span>
+          {cost.map((e, i) => (
+            <ElementChip key={`${e}_${i}`} element={e} context={elementContext} consumeIntent />
+          ))}
+        </div>
+      )}
       {half.abilities.length === 0 ? (
         <div style={{ padding: '8px 0' }}>—</div>
       ) : isTracked ? (
@@ -393,6 +645,7 @@ export function HalfView({ half }: { half: CardHalf }) {
         half.abilities.map((a, i) => {
           const extras = abilityExtras(a);
           const patterns = abilityAoePatterns(a);
+          const ele = abilityElements(a);
           return (
             <div
               key={i}
@@ -409,22 +662,53 @@ export function HalfView({ half }: { half: CardHalf }) {
                   </div>
                 )}
               </div>
-              {extras.map((line, j) => (
+              {(ele.length > 0 || extras.length > 0) && (
                 <div
-                  key={j}
                   style={{
-                    fontSize: 14,
-                    opacity: 0.85,
                     paddingLeft: 14,
                     paddingTop: 6,
-                    borderLeft: `2px solid ${theme.border}`,
                     marginLeft: 2,
                     marginTop: 6,
+                    borderLeft: `2px solid ${theme.border}`,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
                   }}
                 >
-                  {line}
+                  {ele.map((entry, j) => (
+                    <div key={`ele-${j}`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <span
+                          style={{
+                            fontSize: 10,
+                            color: theme.muted,
+                            textTransform: 'uppercase',
+                            letterSpacing: 0.5,
+                          }}
+                        >
+                          {entry.kind === 'create' ? 'Infuse' : 'Consume'}
+                        </span>
+                        {entry.elements.map((e, k) => (
+                          <ElementChip
+                            key={k}
+                            element={e}
+                            context={elementContext}
+                            consumeIntent={entry.kind === 'consume'}
+                          />
+                        ))}
+                      </div>
+                      {entry.kind === 'consume' && entry.effects && (
+                        <div style={{ fontSize: 14, opacity: 0.85 }}>{entry.effects}</div>
+                      )}
+                    </div>
+                  ))}
+                  {extras.map((line, j) => (
+                    <div key={`ex-${j}`} style={{ fontSize: 14, opacity: 0.85 }}>
+                      {line}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
           );
         })
@@ -433,14 +717,17 @@ export function HalfView({ half }: { half: CardHalf }) {
       <div
         style={{
           fontSize: 11,
-          opacity: 0.55,
+          opacity: finalPileOf(half) === 'lost' ? 1 : 0.55,
           letterSpacing: 0.5,
           textTransform: 'uppercase',
           textAlign: 'right',
           paddingTop: 4,
         }}
       >
-        {dispositionLabel(half)}
+        <DispositionLabel half={half} />
+        {typeof half.expOnPerform === 'number' && (
+          <span style={{ marginLeft: 6 }}>· +{half.expOnPerform} XP</span>
+        )}
       </div>
     </>
   );
@@ -451,11 +738,13 @@ export function CardView({
   marker,
   onClick,
   selected,
+  elementContext = null,
 }: {
   card: Card;
   marker?: 'L' | '2nd' | null;
   onClick?: () => void;
   selected?: boolean;
+  elementContext?: CardElementContext | null;
 }) {
   const border = selected ? theme.accent : theme.border;
   return (
@@ -476,41 +765,53 @@ export function CardView({
         fontFamily: theme.font,
       }}
     >
-      {marker && (
-        <span
-          style={{
-            position: 'absolute',
-            top: 6,
-            right: 8,
-            fontSize: 11,
-            background: theme.accent,
-            color: '#0e1612',
-            padding: '2px 6px',
-            borderRadius: 3,
-            fontWeight: 600,
-            letterSpacing: 0.5,
-          }}
-        >
-          {marker === 'L' ? 'LEADING' : 'SECOND'}
-        </span>
-      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
         <span style={{ fontSize: 11, opacity: 0.55, letterSpacing: 0.5, textTransform: 'uppercase' }}>
           {card.level} · {card.name}
         </span>
-        <span style={{ fontSize: 11, opacity: 0.55, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-          {String(card.initiative).padStart(2, '0')}
-        </span>
+        {marker ? (
+          <span
+            style={{
+              fontSize: 11,
+              background: theme.accent,
+              color: '#0e1612',
+              padding: '2px 6px',
+              borderRadius: 3,
+              fontWeight: 600,
+              letterSpacing: 0.5,
+              display: 'inline-flex',
+              alignItems: 'baseline',
+              gap: 6,
+            }}
+          >
+            <span>{marker === 'L' ? 'LEADING' : 'SECOND'}</span>
+            <span>{String(card.initiative).padStart(2, '0')}</span>
+          </span>
+        ) : (
+          <span
+            style={{
+              fontSize: 11,
+              opacity: 0.55,
+              letterSpacing: 0.5,
+              textTransform: 'uppercase',
+              padding: '2px 6px',
+              display: 'inline-flex',
+              alignItems: 'baseline',
+            }}
+          >
+            {String(card.initiative).padStart(2, '0')}
+          </span>
+        )}
       </div>
       <div style={{ fontSize: 18, lineHeight: 1.35 }}>
-        <div><HalfView half={card.top} /></div>
+        <div><HalfView half={card.top} elementContext={elementContext} /></div>
         <div
           style={{
             borderTop: `2px solid ${theme.border}`,
             margin: '16px -18px 4px',
           }}
         />
-        <div><HalfView half={card.bottom} /></div>
+        <div><HalfView half={card.bottom} elementContext={elementContext} /></div>
       </div>
     </button>
   );

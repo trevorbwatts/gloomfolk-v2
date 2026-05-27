@@ -15,7 +15,12 @@
  * for the rules these shapes encode.
  */
 
-import type { Condition, MoveTrait, NegativeCondition } from '../cards/types.js';
+import type {
+  Condition,
+  ElementSelector,
+  MoveTrait,
+  NegativeCondition,
+} from '../cards/types.js';
 
 export type MonsterRank = 'normal' | 'elite' | 'named' | 'boss';
 
@@ -119,7 +124,30 @@ export type MonsterAbilityStep =
       readonly kind: 'create-trap';
       readonly damage: number;
       readonly placement: 'adjacent-empty-closest-to-enemy';
+    }
+  | {
+      /** Mark an element for end-of-block infusion. Fires once per set
+          turn block at the end (after the last member's turn), provided
+          at least one member of the set acted. */
+      readonly kind: 'infuse';
+      readonly element: ElementSelector;
+    }
+  | {
+      /** Consume an element at the start of the set's turn block (before
+          the first member acts), provided at least one member will act.
+          Every member acting in the block benefits from `effect`; members
+          that arrive after the block start (spawned/revealed later) do
+          NOT benefit retroactively. */
+      readonly kind: 'consume';
+      readonly element: ElementSelector;
+      readonly effect: MonsterConsumeEffect;
     };
+
+/** A bonus a monster set picks up by consuming an element at block start. */
+export type MonsterConsumeEffect =
+  | { readonly kind: 'attack-bonus'; readonly amount: number }
+  | { readonly kind: 'range-bonus'; readonly amount: number }
+  | { readonly kind: 'shield-bonus'; readonly amount: number };
 
 export interface MonsterAbilityCard {
   /** Stable id, e.g. `archer.greed`. */

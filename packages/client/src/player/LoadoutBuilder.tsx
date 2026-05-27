@@ -10,6 +10,7 @@ import {
 import { CardView } from './CardView.js';
 import { classAvatarUrl, onAvatarError } from '../avatars.js';
 import { btn, theme } from '../theme.js';
+import { BOTTOM_BAR_HEIGHT } from './BottomBar.js';
 
 /**
  * The order of level groups shown in the picker. Level 1 first (the default
@@ -25,13 +26,11 @@ export function LoadoutBuilder({
   characterClass,
   pool,
   initialChosenIds,
-  onBack,
   onLockIn,
 }: {
   characterClass: CharacterClass;
   pool: CharacterPool;
   initialChosenIds?: readonly string[];
-  onBack?: () => void;
   onLockIn: (chosenCardIds: readonly string[]) => void;
 }) {
   const handSize = characterClass.handSize;
@@ -93,7 +92,7 @@ export function LoadoutBuilder({
   }
 
   return (
-    <div style={{ paddingBottom: 80 }}>
+    <div style={{ paddingTop: 12, paddingBottom: 80 + BOTTOM_BAR_HEIGHT }}>
       <div
         style={{
           display: 'flex',
@@ -102,12 +101,6 @@ export function LoadoutBuilder({
           marginBottom: 8,
         }}
       >
-        <button
-          onClick={onBack}
-          style={{ ...btn.ghost(), padding: '6px 10px', flexShrink: 0 }}
-        >
-          ← Back
-        </button>
         <h2 style={{ margin: 0, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
           <img
             src={classAvatarUrl(characterClass.id)}
@@ -158,12 +151,13 @@ export function LoadoutBuilder({
       <div
         style={{
           position: 'fixed',
-          bottom: 0,
+          bottom: BOTTOM_BAR_HEIGHT,
           left: 0,
           right: 0,
           background: theme.bgSolid,
-          padding: '12px 16px',
+          padding: '8px 16px',
           borderTop: `1px solid ${theme.border}`,
+          zIndex: 40,
         }}
       >
         {warning && (
@@ -184,11 +178,11 @@ export function LoadoutBuilder({
           style={{
             ...btn.primary(!lockable),
             width: '100%',
-            fontSize: 16,
-            padding: '14px 16px',
+            fontSize: 15,
+            padding: '10px 16px',
           }}
         >
-          Lock in ({selectedCount}/{handSize})
+          Lock in Cards ({selectedCount}/{handSize})
         </button>
       </div>
     </div>

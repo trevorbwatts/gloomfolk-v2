@@ -91,10 +91,12 @@ export interface PierceModifier {
   readonly mandatory?: boolean;
 }
 
-/** A conditional bonus on an attack: if the named element is consumed, all
-    bundled bonuses apply (cannot opt into a subset). */
+/** A conditional bonus on an attack: if the named element(s) are consumed,
+    all bundled bonuses apply (cannot opt into a subset). `consume` is either
+    a single element or an `all` bundle meaning every listed element must be
+    consumed together to fire this rider. */
 export interface AttackElementRider {
-  readonly consume: Element;
+  readonly consume: ElementSelector | { readonly all: readonly Element[] };
   readonly attackBonus?: number;
   readonly pierce?: PierceModifier;
   readonly gainExp?: number;
@@ -142,6 +144,30 @@ export interface AttackModifiers {
 }
 
 export type Element = 'fire' | 'ice' | 'air' | 'earth' | 'light' | 'dark';
+
+export const ALL_ELEMENTS: readonly Element[] = [
+  'fire',
+  'ice',
+  'air',
+  'earth',
+  'light',
+  'dark',
+] as const;
+
+/** Where each element token sits on the element board. */
+export type ElementColumn = 'strong' | 'waning' | 'inert';
+
+/** The full state of the six-element board. */
+export type ElementBoardState = Readonly<Record<Element, ElementColumn>>;
+
+/** A reference to an element on a card. Concrete element, or a wild slot
+    (player/party picks any of the six), or a mixed slot (player/party picks
+    one of two named options). Resolved at the moment the engine needs a
+    concrete element (infuse-end-of-turn, consume-at-attack-resolve). */
+export type ElementSelector =
+  | Element
+  | { readonly kind: 'wild' }
+  | { readonly kind: 'mixed'; readonly options: readonly [Element, Element] };
 
 export type PositiveCondition =
   | 'safeguard'
@@ -244,8 +270,11 @@ export type AbilityStep =
       readonly mandatory?: boolean;
     }
   | {
+      /** Mark an element for end-of-turn infusion. Concrete element infuses
+          directly; wild/mixed selectors prompt the actor (player) or the
+          party (monster set) to pick at infusion time. */
       readonly type: 'create-element';
-      readonly element: Element;
+      readonly element: ElementSelector;
       readonly mandatory?: boolean;
     }
   | {
@@ -407,6 +436,11 @@ export interface Ability {
 
 export interface CardHalf {
   readonly disposition: Disposition;
+  /** Action-level required elemental cost (upper-left corner on the printed
+      card). All listed elements must be strong/waning at turn-start AND
+      still uncon­sumed when the player engages this half; engaging consumes
+      them. Half cannot be engaged otherwise. */
+  readonly requiredElementCost?: readonly Element[];
   /** Only set for `persistent-tracked`: number of charge slots on the printed card. */
   readonly trackedUses?: number;
   /**

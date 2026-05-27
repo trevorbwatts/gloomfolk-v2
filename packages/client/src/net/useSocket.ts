@@ -4,22 +4,22 @@ import { useStore } from '../store.js';
 
 function saveSession(playerId: string, campaignId: string): void {
   try {
-    sessionStorage.setItem('gf:playerId', playerId);
-    sessionStorage.setItem('gf:campaignId', campaignId);
+    localStorage.setItem('gf:playerId', playerId);
+    localStorage.setItem('gf:campaignId', campaignId);
   } catch { /* noop */ }
 }
 
-function clearSession(): void {
+export function clearSession(): void {
   try {
-    sessionStorage.removeItem('gf:playerId');
-    sessionStorage.removeItem('gf:campaignId');
+    localStorage.removeItem('gf:playerId');
+    localStorage.removeItem('gf:campaignId');
   } catch { /* noop */ }
 }
 
 export function getSavedSession(): { playerId: string; campaignId: string } | null {
   try {
-    const playerId = sessionStorage.getItem('gf:playerId');
-    const campaignId = sessionStorage.getItem('gf:campaignId');
+    const playerId = localStorage.getItem('gf:playerId');
+    const campaignId = localStorage.getItem('gf:campaignId');
     if (playerId && campaignId) return { playerId, campaignId };
   } catch { /* noop */ }
   return null;
@@ -36,13 +36,19 @@ export function useSocketBootstrap(): void {
       switch (msg.type) {
         case 'hello': {
           useStore.setState({ connected: true });
-          const saved = getSavedSession();
-          if (saved) {
-            sock.send({
-              type: 'player_join',
-              campaignId: saved.campaignId,
-              playerId: saved.playerId,
-            });
+          // Only auto-rejoin a saved player session on the player route.
+          // On the host route (/) a stale player session would yank the
+          // host into a scenario view on every refresh.
+          const onPlayerRoute = location.pathname.startsWith('/p');
+          if (onPlayerRoute) {
+            const saved = getSavedSession();
+            if (saved) {
+              sock.send({
+                type: 'player_join',
+                campaignId: saved.campaignId,
+                playerId: saved.playerId,
+              });
+            }
           }
           break;
         }

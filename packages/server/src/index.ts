@@ -211,6 +211,15 @@ async function handle(
       return;
     }
 
+    case 'player_set_loadout': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.setLoadout(conn.playerId, msg.cardIds);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
     case 'player_select_cards': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
@@ -267,6 +276,12 @@ async function handle(
       return;
     }
 
+    case 'host_skip_monster_anim': {
+      if (conn.role !== 'host' || !conn.campaignId) return;
+      rooms.get(conn.campaignId)?.requestSkipMonsterAnim();
+      return;
+    }
+
     case 'player_perform_action': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
@@ -281,6 +296,31 @@ async function handle(
       const r = rooms.get(conn.campaignId);
       if (!r) return;
       const result = r.skipAction(conn.playerId, msg.slot, msg.actionId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_toggle_consume_rider': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.toggleConsumeRider(
+        conn.playerId,
+        msg.slot,
+        msg.actionId,
+        msg.riderIndex,
+      );
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_resolve_element_choice': {
+      if (!conn.campaignId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const actor = conn.role === 'host' ? 'host' : conn.playerId;
+      if (!actor) return;
+      const result = r.resolveElementChoice(actor, msg.choiceId, msg.element);
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }
@@ -303,18 +343,21 @@ async function handle(
       return;
     }
 
+    case 'player_confirm_persistent_half': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.confirmPersistentHalf(conn.playerId, msg.slot);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
     case 'player_skip_half': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
       if (!r) return;
       const result = r.skipHalf(conn.playerId, msg.slot, msg.cardId);
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
-      return;
-    }
-
-    case 'host_next_round': {
-      if (conn.role !== 'host' || !conn.campaignId) return;
-      rooms.get(conn.campaignId)?.nextRound();
       return;
     }
 
@@ -345,6 +388,15 @@ async function handle(
         rooms
           .get(conn.campaignId)
           ?.forwardPendingMove(conn.playerId, msg.hex);
+      }
+      return;
+    }
+
+    case 'player_preview_forced_move': {
+      if (conn.role === 'player' && conn.campaignId && conn.playerId) {
+        rooms
+          .get(conn.campaignId)
+          ?.setForcedMovePreview(conn.playerId, msg.preview);
       }
       return;
     }
