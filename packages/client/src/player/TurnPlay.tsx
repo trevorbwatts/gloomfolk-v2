@@ -1597,8 +1597,18 @@ function BoardForTurn({
     onConsumeSelection();
   };
 
-  const cancelMove = () => {
+  const skipMove = () => {
+    // Skip the underlying Move action entirely (replaces the old "Clear",
+    // which only un-staged the path while keeping you in the action).
+    if (selectedAction?.type === 'move' && activeSlotKind) {
+      sock.send({
+        type: 'player_skip_action',
+        slot: activeSlotKind,
+        actionId: selectedAction.id,
+      });
+    }
     setMovePath([]);
+    onConsumeSelection();
   };
 
   const handleTapHex = (h: Hex) => {
