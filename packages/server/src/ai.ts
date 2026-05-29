@@ -1,6 +1,7 @@
 import type {
   Hex,
   MonsterAbilityCard,
+  MonsterAttackEffect,
   MonsterStatBlock,
   Tile,
   Unit,
@@ -69,6 +70,11 @@ interface AttackInfo {
   range: number;
   /** Damage value (post stat-card + card modifier). */
   damage: number;
+  /** Max distinct targets this attack may hit (card `Target N`; default 1). */
+  targets: number;
+  /** Condition riders applied to every target hit (from the ability card's
+   *  attack step plus the stat block's printed attackEffects). */
+  effects: readonly MonsterAttackEffect[];
 }
 
 interface MoveInfo {
@@ -90,6 +96,8 @@ export function readAbility(
       attack = {
         range: a.range ?? 1,
         damage: Math.max(0, stat.attack + a.modifier),
+        targets: a.targets ?? 1,
+        effects: [...(a.effects ?? []), ...(stat.attackEffects ?? [])],
       };
     }
   }
@@ -203,4 +211,179 @@ export function walkPath(
     if (hexDistance(cur, focusHex) <= attackRange) break;
   }
   return cur;
+}
+
+export interface MovementPlan {
+  /** Where the monster ends up. May equal its start hex (no move). */
+  destination: Hex;
+  /** Animation/replay path: [start, …steps]; just [start] when no move. */
+  path: Hex[];
+  /** Movement points consumed (0 when no move). */
+  pointsSpent: number;
+}
+
+/** What an attack would achieve from a given standing hex. */
+export interface DestinationEval {
+  /** Whether the monster could still land its attack on its FOCUS from here. */
+  canHitFocus: boolean;
+  /** Total attacks landed from here (focus + additional targets, capped at the
+   *  card's Target count). */
+  attacks: number;
+  /** How many of those attacks are made with Disadvantage (ranged attack on an
+   *  adjacent target). */
+  disadvantaged: number;
+}
+
+/**
+ * Terrain-aware shortest-path search from `start`. Difficult terrain costs 2
+ * movement to enter; hazard ("negative") hexes are counted so paths that cross
+ * fewer of them can be preferred. Returns, per reachable hex, the best
+ * (cost, then negative-hex count) and its predecessor for reconstruction.
+ */
+function terrainSearch(
+  start: Hex,
+  passable: (h: Hex) => boolean,
+  enterCost: (h: Hex) => number,
+  isNegative: (h: Hex) => boolean,
+): Map<string, { cost: number; neg: number; prev: string | null }> {
+  const best = new Map<string, { cost: number; neg: number; prev: string | null }>();
+  const visited = new Set<string>();
+  best.set(hexKey(start), { cost: 0, neg: 0, prev: null });
+  for (;;) {
+    // Extract the unvisited node with the lexicographically smallest (cost, neg).
+    let curK: string | null = null;
+    let curV: { cost: number; neg: number } | null = null;
+    for (const [k, v] of best) {
+      if (visited.has(k)) continue;
+      if (!curV || v.cost < curV.cost || (v.cost === curV.cost && v.neg < curV.neg)) {
+        curV = v;
+        curK = k;
+      }
+    }
+    if (curK === null || curV === null) break;
+    visited.add(curK);
+    const [qs, rs] = curK.split(',');
+    const cur = { q: Number(qs), r: Number(rs) };
+    const here = best.get(curK)!;
+    for (const n of hexNeighbors(cur)) {
+      const nk = hexKey(n);
+      if (visited.has(nk)) continue;
+      if (!passable(n)) continue;
+      const cost = here.cost + enterCost(n);
+      const neg = here.neg + (isNegative(n) ? 1 : 0);
+      const ex = best.get(nk);
+      if (!ex || cost < ex.cost || (cost === ex.cost && neg < ex.neg)) {
+        best.set(nk, { cost, neg, prev: curK });
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Decide where a monster moves before attacking, scoring every hex reachable
+ * within `budget` against a lexicographic preference (monster-movement.md):
+ *   1. maximize total attacks landed (focus + additional targets),
+ *   2. minimize disadvantaged attacks (ranged attack on an adjacent target),
+ *   3. spend the fewest movement points,
+ *   4. cross the fewest negative (hazard) hexes.
+ *
+ * `evaluateFrom(hex)` reports what an attack achieves from `hex` (target count
+ * and disadvantage — owned by the caller so this stays board-agnostic). When
+ * no reachable hex can attack the focus, it falls back to approaching the focus
+ * along the shortest path (the shorten-the-path rule).
+ *
+ * Difficult terrain costs 2 to enter; hazard hexes are tracked for the tiebreak.
+ */
+export function determineMovement(
+  monster: Unit,
+  focus: FocusResult,
+  attackRange: number,
+  budget: number,
+  board: BoardView,
+  evaluateFrom: (from: Hex) => DestinationEval,
+): MovementPlan {
+  const tileAt = new Map<string, Tile>();
+  for (const t of board.tiles) tileAt.set(hexKey({ q: t.q, r: t.r }), t);
+  const passable = (h: Hex) => {
+    const tile = tileAt.get(hexKey(h));
+    if (!tile) return false;
+    if (tile.kind === 'wall') return false;
+    for (const u of board.units) {
+      if (u.id === monster.id) continue;
+      if (hexEqual(u.hex, h)) return false;
+    }
+    return true;
+  };
+  const enterCost = (h: Hex) => (tileAt.get(hexKey(h))?.kind === 'difficult' ? 2 : 1);
+  const isNegative = (h: Hex) => tileAt.get(hexKey(h))?.kind === 'hazard';
+
+  const search = terrainSearch(monster.hex, passable, enterCost, isNegative);
+
+  // Enumerate reachable destinations within budget (start hex is cost 0).
+  type Cand = { hex: Hex; cost: number; neg: number; attacks: number; disadv: number };
+  const attackers: Cand[] = [];
+  for (const [k, v] of search) {
+    if (v.cost > budget) continue;
+    const [qs, rs] = k.split(',');
+    const hex = { q: Number(qs), r: Number(rs) };
+    const ev = evaluateFrom(hex);
+    if (!ev.canHitFocus) continue;
+    attackers.push({ hex, cost: v.cost, neg: v.neg, attacks: ev.attacks, disadv: ev.disadvantaged });
+  }
+
+  if (attackers.length > 0) {
+    attackers.sort(
+      (a, b) =>
+        b.attacks - a.attacks || // maximize attacks landed
+        a.disadv - b.disadv || // then avoid disadvantage
+        a.cost - b.cost || // then spend the fewest movement points
+        a.neg - b.neg || // then cross the fewest hazard hexes
+        hexDistance(a.hex, focus.enemy.hex) - hexDistance(b.hex, focus.enemy.hex),
+    );
+    const best = attackers[0]!;
+    return {
+      destination: best.hex,
+      path: reconstructTerrainPath(best.hex, search),
+      pointsSpent: best.cost,
+    };
+  }
+
+  // No reachable hex can attack — approach the focus (terrain-aware): among
+  // reachable hexes, get as close as possible to the focus, breaking ties by
+  // fewest movement points then fewest hazard hexes crossed.
+  void attackRange;
+  let best = { hex: monster.hex, cost: 0, neg: 0, d: hexDistance(monster.hex, focus.enemy.hex) };
+  for (const [k, v] of search) {
+    if (v.cost > budget) continue;
+    const [qs, rs] = k.split(',');
+    const hex = { q: Number(qs), r: Number(rs) };
+    const d = hexDistance(hex, focus.enemy.hex);
+    if (
+      d < best.d ||
+      (d === best.d && (v.cost < best.cost || (v.cost === best.cost && v.neg < best.neg)))
+    ) {
+      best = { hex, cost: v.cost, neg: v.neg, d };
+    }
+  }
+  return {
+    destination: best.hex,
+    path: reconstructTerrainPath(best.hex, search),
+    pointsSpent: best.cost,
+  };
+}
+
+/** Reconstruct [start, …, target] from a terrainSearch predecessor map. */
+function reconstructTerrainPath(
+  target: Hex,
+  search: Map<string, { prev: string | null }>,
+): Hex[] {
+  const path: Hex[] = [target];
+  let cur: string | null = search.get(hexKey(target))?.prev ?? null;
+  while (cur) {
+    const [qs, rs] = cur.split(',');
+    path.unshift({ q: Number(qs), r: Number(rs) });
+    cur = search.get(cur)?.prev ?? null;
+  }
+  return path;
 }

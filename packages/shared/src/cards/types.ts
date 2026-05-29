@@ -21,6 +21,17 @@
 export type CardLevel = 1 | 'X' | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 /**
+ * Whether a card with printed `level` counts as a "level-N card" for effects
+ * that retrieve/reference by level (e.g. Stamina Potion's "Level 1 card").
+ * `X` cards are part of a character's pool from level 1, so they count as
+ * level-1 cards.
+ */
+export function cardMatchesLevel(level: CardLevel, target: number): boolean {
+  if (level === target) return true;
+  return target === 1 && level === 'X';
+}
+
+/**
  * A reference to a value that depends on turn-state, used for "X where X is …"
  * cards. Resolved by the engine at the moment the ability resolves.
  */

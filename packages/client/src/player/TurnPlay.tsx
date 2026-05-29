@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   Card,
   CardHalf,
+  CharacterInstance,
   HalfSlot,
   Hex,
+  ModifierCard,
   ModifierDrawResult,
   MonsterTurnAnim,
   PendingAction,
@@ -11,7 +13,9 @@ import type {
   PublicGameState,
   Unit,
 } from '@gloomfolk/shared';
+import { ALL_ITEMS } from '@gloomfolk/shared';
 import {
+  cardMatchesLevel,
   bfsForcedMove,
   bfsForcedMovePath,
   bfsPath,
@@ -59,6 +63,13 @@ export function TurnPlay({
   const { moveAnim, onMoveAnimDone } = useMoveAnim(gameState.lastMove);
 
   if (!isMyTurn || !ct) {
+    // Long-rest turn: my init-99 slot is up but there's no currentTurn —
+    // the server has set longRestPending and is waiting for me to walk
+    // through the rest. Render the dedicated panel instead of the wait view.
+    if (isMyTurn && you?.longRestPending) {
+      const myChar = gameState.characters.find((c) => c.claimedByPlayerId === myPlayerId) ?? null;
+      return <LongRestPanel you={you} character={myChar} />;
+    }
     const sel = you?.selection;
     const selectedCards = sel?.kind === 'cards' && you
       ? [sel.leadingId, sel.secondId]
@@ -378,6 +389,14 @@ function ActionDriver({
         </p>
       )}
 
+      <ItemTray
+        gameState={gameState}
+        myPlayerId={myPlayerId}
+        firstPending={firstPending}
+        activeSlotKind={activeSlotKind}
+        you={you}
+      />
+
       {activeSlot && (
         <BoardForTurn
           gameState={gameState}
@@ -439,6 +458,297 @@ function ActionDriver({
 
       <ModifierFlipOverlay draws={ct.lastModifierDraws} />
     </div>
+  );
+}
+
+function ItemTray({
+  gameState,
+  myPlayerId,
+  firstPending,
+  activeSlotKind,
+  you,
+}: {
+  gameState: PublicGameState;
+  myPlayerId: string;
+  firstPending: PendingAction | null;
+  activeSlotKind: 'top' | 'bottom' | null;
+  you: PrivatePlayerState | null;
+}) {
+  const sock = useSocket();
+  const [aimingItemId, setAimingItemId] = useState<string | null>(null);
+  const character: CharacterInstance | undefined = gameState.characters.find(
+    (c) => c.claimedByPlayerId === myPlayerId,
+  );
+  if (!character || character.broughtItemIds.length === 0) return null;
+
+  const hasPendingAttack =
+    firstPending != null &&
+    !firstPending.done &&
+    (firstPending.type === 'attack' || firstPending.type === 'attack-aoe');
+  // Poison Dagger is melee-only: an attack action with range 1, or any AOE.
+  const hasPendingMeleeAttack =
+    firstPending != null &&
+    !firstPending.done &&
+    ((firstPending.type === 'attack' && firstPending.range <= 1) ||
+      firstPending.type === 'attack-aoe');
+  // Simple Bow is ranged-only: an attack action with range > 1.
+  const hasPendingRangedAttack =
+    firstPending != null &&
+    !firstPending.done &&
+    firstPending.type === 'attack' &&
+    firstPending.range > 1;
+  const livingMonsters = gameState.units.filter(
+    (u) => u.kind === 'monster' && u.hp > 0,
+  );
+  const myUnit = gameState.units.find((u) => u.ownerPlayerId === myPlayerId) ?? null;
+  const atFullHp = myUnit != null && myUnit.hp >= myUnit.hpMax;
+  // Focusing Rod: gated on having performed a Lost-disposition action this turn,
+  // then heals one figure (self or ally) within range that actually needs it.
+  const performedLostAction = gameState.currentTurn?.performedLostAction ?? false;
+  const healableInRange = (range: number) =>
+    myUnit == null
+      ? []
+      : gameState.units.filter(
+          (u) =>
+            u.kind === 'player' &&
+            hexDistance(u.hex, myUnit.hex) <= range &&
+            (u.hp < u.hpMax ||
+              u.conditions.some((c) => c.kind === 'poison' || c.kind === 'wound')),
+        );
+  // Stamina Potion: cards of the matching level sitting in the discard pile
+  // that can be retrieved to hand (X cards count as level 1).
+  const discardedAtLevel = (level: number) =>
+    (you?.discard ?? []).filter((c) => cardMatchesLevel(c.level, level));
+
+  return (
+    <section
+      style={{
+        marginTop: 12,
+        padding: 10,
+        background: theme.panel,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 4,
+      }}
+    >
+      <h3
+        style={{
+          margin: '0 0 8px',
+          fontSize: 11,
+          color: theme.muted,
+          textTransform: 'uppercase',
+          letterSpacing: 1.5,
+          fontFamily: theme.headingFont,
+        }}
+      >
+        Items
+      </h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {character.broughtItemIds.map((id) => {
+          const item = ALL_ITEMS[id];
+          if (!item) return null;
+          const spent = character.spentItemIds.includes(id);
+          const active = character.activeItems.find((ai) => ai.itemId === id);
+          const hasPendingMove =
+            firstPending != null && !firstPending.done && activeSlotKind != null
+              ? firstPending.type === 'move'
+              : false;
+          // move-bonus must be applied to an in-flight move action; jump and
+          // shield-on-attack are usable anytime during your turn (shield only
+          // if not already active).
+          const usable =
+            !spent &&
+            (item.effect.kind === 'move-bonus'
+              ? hasPendingMove
+              : item.effect.kind === 'jump-this-turn'
+                ? true
+                : item.effect.kind === 'shield-on-attack'
+                  ? !active
+                  : item.effect.kind === 'pierce-one-attack'
+                    ? hasPendingAttack
+                    : item.effect.kind === 'poison-one-attack'
+                      ? hasPendingMeleeAttack
+                      : item.effect.kind === 'advantage-one-attack'
+                        ? hasPendingRangedAttack
+                        : item.effect.kind === 'heal-self'
+                          ? !atFullHp
+                          : item.effect.kind === 'heal-after-lost'
+                            ? performedLostAction &&
+                              healableInRange(item.effect.range).length > 0
+                            : item.effect.kind === 'retrieve-discarded-card'
+                              ? discardedAtLevel(item.effect.cardLevel).length > 0
+                              : item.effect.kind === 'infuse-element'
+                                ? true
+                                : false);
+          const buttonLabel = spent
+            ? 'Spent'
+            : active
+              ? `Active · ${active.usesRemaining}`
+              : item.effect.kind === 'shield-on-attack'
+                ? 'Activate'
+                : item.effect.kind === 'disadvantage-when-attacked' ||
+                    item.effect.kind === 'shield-when-attacked'
+                  ? 'Reactive'
+                  : item.effect.kind === 'pierce-one-attack'
+                    ? 'Aim'
+                    : item.effect.kind === 'poison-one-attack'
+                      ? 'Aim'
+                      : item.effect.kind === 'advantage-one-attack'
+                        ? 'Aim'
+                        : item.effect.kind === 'heal-self'
+                          ? atFullHp
+                            ? 'Full HP'
+                            : `Heal ${item.effect.amount}`
+                          : item.effect.kind === 'heal-after-lost'
+                            ? performedLostAction
+                              ? 'Aim'
+                              : 'Needs Lost'
+                            : item.effect.kind === 'retrieve-discarded-card'
+                              ? discardedAtLevel(item.effect.cardLevel).length > 0
+                                ? 'Retrieve'
+                                : 'Empty'
+                              : item.effect.kind === 'infuse-element'
+                                ? 'Infuse'
+                                : 'Use';
+          const aiming = aimingItemId === id;
+          // Aim picker targets: allies in range for heal-after-lost, else enemies.
+          const pickTargets =
+            item.effect.kind === 'heal-after-lost'
+              ? healableInRange(item.effect.range)
+              : livingMonsters;
+          return (
+            <div key={id} style={{ opacity: spent ? 0.5 : 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <strong style={{ fontSize: 13 }}>{item.name}</strong>
+                  <span style={{ marginLeft: 8, fontSize: 11, color: theme.muted }}>
+                    {item.description}
+                  </span>
+                </div>
+                <button
+                  disabled={!usable}
+                  onClick={() => {
+                    if (!usable) return;
+                    if (item.effect.kind === 'move-bonus') {
+                      if (!firstPending || !activeSlotKind) return;
+                      sock.send({
+                        type: 'player_use_item',
+                        itemId: id,
+                        slot: activeSlotKind,
+                        actionId: firstPending.id,
+                      });
+                    } else if (
+                      item.effect.kind === 'pierce-one-attack' ||
+                      item.effect.kind === 'poison-one-attack' ||
+                      item.effect.kind === 'advantage-one-attack' ||
+                      item.effect.kind === 'heal-after-lost' ||
+                      item.effect.kind === 'retrieve-discarded-card'
+                    ) {
+                      setAimingItemId(aiming ? null : id);
+                    } else {
+                      sock.send({ type: 'player_use_item', itemId: id });
+                    }
+                  }}
+                  style={{
+                    fontSize: 12,
+                    padding: '6px 12px',
+                    background: aiming ? theme.border : usable ? theme.accent : 'transparent',
+                    color: usable ? '#0e1612' : theme.muted,
+                    border: usable ? 'none' : `1px solid ${theme.border}`,
+                    borderRadius: 3,
+                    fontFamily: theme.headingFont,
+                    letterSpacing: 1,
+                    textTransform: 'uppercase',
+                    cursor: usable ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {aiming ? 'Cancel' : buttonLabel}
+                </button>
+              </div>
+              {aiming && item.effect.kind === 'retrieve-discarded-card' && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 6,
+                    marginTop: 6,
+                    paddingLeft: 4,
+                  }}
+                >
+                  {discardedAtLevel(item.effect.cardLevel).length === 0 ? (
+                    <span style={{ fontSize: 11, color: theme.muted }}>No cards to retrieve.</span>
+                  ) : (
+                    discardedAtLevel(item.effect.cardLevel).map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => {
+                          sock.send({
+                            type: 'player_use_item',
+                            itemId: id,
+                            targetCardId: c.id,
+                          });
+                          setAimingItemId(null);
+                        }}
+                        style={{
+                          fontSize: 11,
+                          padding: '4px 8px',
+                          background: 'transparent',
+                          color: theme.text,
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 3,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {c.name}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+              {aiming && item.effect.kind !== 'retrieve-discarded-card' && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 6,
+                    marginTop: 6,
+                    paddingLeft: 4,
+                  }}
+                >
+                  {pickTargets.length === 0 ? (
+                    <span style={{ fontSize: 11, color: theme.muted }}>No targets.</span>
+                  ) : (
+                    pickTargets.map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => {
+                          sock.send({
+                            type: 'player_use_item',
+                            itemId: id,
+                            targetUnitId: m.id,
+                          });
+                          setAimingItemId(null);
+                        }}
+                        style={{
+                          fontSize: 11,
+                          padding: '4px 8px',
+                          background: 'transparent',
+                          color: theme.text,
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 3,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {m.name} ({m.hp})
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -603,61 +913,137 @@ function ModifierFlipOverlay({ draws }: { draws: ModifierDrawResult[] }) {
   );
 }
 
-function FlipCard({ draw }: { draw: ModifierDrawResult }) {
+/** A single attack-modifier card that flips face-up after `delay` ms. When
+ *  `faded` it renders dimmed (the discarded card of an Advantage/Disadvantage
+ *  pair); `chosen` gives the used card an accent ring + checkmark. */
+function ModCardFace({
+  card,
+  width = 80,
+  height = 110,
+  delay = 80,
+  faded = false,
+  chosen = false,
+}: {
+  card: ModifierCard;
+  width?: number;
+  height?: number;
+  delay?: number;
+  faded?: boolean;
+  chosen?: boolean;
+}) {
   const [flipped, setFlipped] = useState(false);
   useEffect(() => {
-    const t = setTimeout(() => setFlipped(true), 80);
+    const t = setTimeout(() => setFlipped(true), delay);
     return () => clearTimeout(t);
-  }, []);
-  const label = modifierLabel(draw.card);
-  const isCrit = draw.card.kind === 'crit';
-  const isNull = draw.card.kind === 'null';
-  const accent = isCrit ? theme.accent : isNull ? theme.bad : theme.border;
+  }, [delay]);
+  const label = modifierLabel(card);
+  const isCrit = card.kind === 'crit';
+  const isNull = card.kind === 'null';
+  const accent = chosen ? theme.good : isCrit ? theme.accent : isNull ? theme.bad : theme.border;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, minWidth: 90 }}>
-      <div style={{ width: 80, height: 110, perspective: 800 }}>
-        <div
+    <div style={{ position: 'relative', width, height, perspective: 800, opacity: faded ? 0.4 : 1 }}>
+      {chosen && (
+        <span
           style={{
-            position: 'relative',
-            width: '100%',
-            height: '100%',
-            transition: 'transform 450ms ease-out',
-            transformStyle: 'preserve-3d',
-            transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
+            position: 'absolute',
+            top: -8,
+            right: -8,
+            zIndex: 2,
+            width: 18,
+            height: 18,
+            borderRadius: 9,
+            background: theme.good,
+            color: '#0e1612',
+            fontSize: 12,
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
           }}
         >
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              backfaceVisibility: 'hidden',
-              background: theme.panelRaised,
-              border: `1px solid ${theme.border}`,
-              borderRadius: 8,
-            }}
-          />
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              backfaceVisibility: 'hidden',
-              transform: 'rotateY(180deg)',
-              background: theme.panelRaised,
-              border: `2px solid ${accent}`,
-              borderRadius: 8,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontWeight: 700,
-              fontSize: label.length > 2 ? 20 : 32,
-              fontFamily: theme.headingFont,
-              color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
-            }}
-          >
-            {label}
-          </div>
+          ✓
+        </span>
+      )}
+      <div
+        style={{
+          position: 'relative',
+          width: '100%',
+          height: '100%',
+          transition: 'transform 450ms ease-out',
+          transformStyle: 'preserve-3d',
+          transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backfaceVisibility: 'hidden',
+            background: theme.panelRaised,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backfaceVisibility: 'hidden',
+            transform: 'rotateY(180deg)',
+            background: theme.panelRaised,
+            border: `2px solid ${accent}`,
+            borderRadius: 8,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: 700,
+            fontSize: label.length > 2 ? 20 : 32,
+            fontFamily: theme.headingFont,
+            color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+            filter: faded ? 'grayscale(1)' : 'none',
+          }}
+        >
+          {label}
         </div>
       </div>
+    </div>
+  );
+}
+
+function FlipCard({ draw }: { draw: ModifierDrawResult }) {
+  const adv = draw.advantageDraw;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, minWidth: 90 }}>
+      {adv ? (
+        <>
+          <span
+            style={{
+              fontSize: 10,
+              letterSpacing: 1.2,
+              textTransform: 'uppercase',
+              fontFamily: theme.headingFont,
+              color: adv.mode === 'advantage' ? theme.good : theme.bad,
+            }}
+          >
+            {adv.mode === 'advantage' ? 'Advantage' : 'Disadvantage'}
+          </span>
+          <div style={{ display: 'flex', gap: 10 }}>
+            {adv.cards.map((c, i) => (
+              <ModCardFace
+                key={i}
+                card={c}
+                width={70}
+                height={96}
+                delay={80 + i * 220}
+                chosen={i === adv.usedIndex}
+                faded={i !== adv.usedIndex}
+              />
+            ))}
+          </div>
+        </>
+      ) : (
+        <ModCardFace card={draw.card} />
+      )}
       <span style={{ fontSize: 11, color: theme.muted, textAlign: 'center' }}>{draw.targetName}</span>
       <span style={{ fontSize: 12, color: theme.muted }}>
         {draw.baseAmount} → <strong style={{ color: theme.text }}>{draw.finalAmount}</strong>
@@ -1787,10 +2173,10 @@ function BoardForTurn({
           }}
         >
           <button
-            onClick={cancelMove}
+            onClick={skipMove}
             style={{ ...btn.ghost(), flex: 1, padding: '6px 14px', fontSize: 13 }}
           >
-            Clear
+            Skip
           </button>
           <button
             onClick={confirmMove}
@@ -1859,40 +2245,236 @@ function MonsterTurnBanner({ anim, units }: { anim: MonsterTurnAnim; units: Unit
         <div style={{ fontSize: 11, color: theme.muted, marginTop: 1 }}>{phaseLabel}</div>
       </div>
       {draw && (
-        <div
-          style={{
-            width: 44,
-            height: 58,
-            borderRadius: 5,
-            border: `1px solid ${theme.border}`,
-            background: theme.panelRaised,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontFamily: theme.headingFont,
-            color:
-              draw.card.kind === 'crit'
-                ? theme.accent
-                : draw.card.kind === 'null'
-                  ? theme.bad
-                  : theme.text,
-          }}
-        >
-          <div
-            style={{
-              fontSize: modifierLabel(draw.card).length > 2 ? 11 : 18,
-              fontWeight: 700,
-            }}
-          >
-            {modifierLabel(draw.card)}
-          </div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+          {draw.advantageDraw ? (
+            <>
+              <span
+                style={{
+                  fontSize: 8,
+                  letterSpacing: 0.8,
+                  textTransform: 'uppercase',
+                  fontFamily: theme.headingFont,
+                  color: draw.advantageDraw.mode === 'advantage' ? theme.good : theme.bad,
+                }}
+              >
+                {draw.advantageDraw.mode === 'advantage' ? 'Advantage' : 'Disadvantage'}
+              </span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {draw.advantageDraw.cards.map((c, i) => (
+                  <MonsterModCardMini
+                    key={i}
+                    card={c}
+                    chosen={i === draw.advantageDraw!.usedIndex}
+                  />
+                ))}
+              </div>
+            </>
+          ) : (
+            <MonsterModCardMini card={draw.card} />
+          )}
           <div style={{ fontSize: 9, color: theme.muted }}>
             {draw.baseAmount}→{draw.finalAmount}
           </div>
           {draw.damageDealt !== null && (
             <div style={{ fontSize: 9, color: theme.bad }}>−{draw.damageDealt}</div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Small attack-modifier card chip used in the player-side monster-turn ticker.
+ *  `chosen` highlights the used card of an Advantage/Disadvantage pair. */
+function MonsterModCardMini({ card, chosen }: { card: ModifierCard; chosen?: boolean }) {
+  const isCrit = card.kind === 'crit';
+  const isNull = card.kind === 'null';
+  const faded = chosen === false;
+  return (
+    <div
+      style={{
+        width: 40,
+        height: 52,
+        borderRadius: 5,
+        border: `${chosen ? 2 : 1}px solid ${chosen ? theme.good : theme.border}`,
+        background: theme.panelRaised,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: theme.headingFont,
+        fontWeight: 700,
+        fontSize: modifierLabel(card).length > 2 ? 11 : 18,
+        opacity: faded ? 0.4 : 1,
+        filter: faded ? 'grayscale(1)' : 'none',
+        color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+      }}
+    >
+      {modifierLabel(card)}
+    </div>
+  );
+}
+
+/** Long-rest turn UI. Two steps:
+ *  1. Pick one card from the effective discard (server-supplied candidates)
+ *     to lose. Remaining discard returns to hand; active cards stay put.
+ *  2. Optional Heal 2 self, then Finish to close out the turn.
+ *  Spent items are refreshed automatically when the rest resolves (step 2). */
+function LongRestPanel({
+  you,
+  character,
+}: {
+  you: PrivatePlayerState;
+  character: CharacterInstance | null;
+}) {
+  const sock = useSocket();
+  const pending = you.longRestPending!;
+  const [stagedId, setStagedId] = useState<string | null>(null);
+  // Clear staging when the step advances (server confirmed our pick).
+  useEffect(() => {
+    if (pending.step !== 'choose_lost') setStagedId(null);
+  }, [pending.step]);
+  const candidates = pending.candidateCardIds
+    .map((id) => {
+      const fromDiscard = you.discard.find((c) => c.id === id);
+      if (fromDiscard) return { card: fromDiscard, source: 'discard' as const };
+      const fromActive = you.active.find((c) => c.id === id);
+      if (fromActive) return { card: fromActive, source: 'active' as const };
+      return null;
+    })
+    .filter((x): x is { card: Card; source: 'discard' | 'active' } => !!x)
+    .sort((a, b) => a.card.initiative - b.card.initiative);
+  const stagedCard = stagedId ? candidates.find((c) => c.card.id === stagedId) ?? null : null;
+
+  return (
+    <div>
+      <h2 style={{ marginBottom: 10, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
+        Long Rest
+      </h2>
+      {pending.step === 'choose_lost' ? (
+        <div style={{ paddingBottom: stagedId ? 96 : 0 }}>
+          <p style={{ color: theme.text, marginTop: 0 }}>
+            <strong>Choose one card to lose.</strong> The rest of your discard returns to your hand.
+          </p>
+          {candidates.length === 0 && (
+            <p style={{ color: theme.muted }}>No eligible cards. This shouldn't happen — please report.</p>
+          )}
+          {candidates.map(({ card, source }) => {
+            const isStaged = stagedId === card.id;
+            return (
+              <div
+                key={card.id}
+                style={{ position: 'relative' }}
+              >
+                {source === 'active' && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 4,
+                      right: 4,
+                      fontSize: 10,
+                      background: theme.panelRaised,
+                      border: `1px solid ${theme.border}`,
+                      color: theme.muted,
+                      padding: '2px 6px',
+                      borderRadius: 3,
+                      textTransform: 'uppercase',
+                      letterSpacing: 1,
+                      zIndex: 2,
+                    }}
+                  >
+                    Active
+                  </div>
+                )}
+                <CardView
+                  card={card}
+                  selected={isStaged}
+                  onClick={() => setStagedId(isStaged ? null : card.id)}
+                />
+              </div>
+            );
+          })}
+          {stagedCard && (
+            <div
+              style={{
+                position: 'fixed',
+                left: 0,
+                right: 0,
+                bottom: BOTTOM_BAR_HEIGHT,
+                background: theme.bgSolid,
+                borderTop: `1px solid ${theme.border}`,
+                zIndex: 55,
+              }}
+            >
+              <div
+                style={{
+                  padding: '6px 14px',
+                  color: theme.text,
+                  fontSize: 14,
+                  borderBottom: `1px solid ${theme.border}`,
+                }}
+              >
+                Lose <strong>{stagedCard.card.name}</strong>?
+              </div>
+              <div style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button
+                  onClick={() => setStagedId(null)}
+                  style={{ ...btn.ghost(), flex: 1, padding: '6px 14px', fontSize: 13 }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() =>
+                    sock.send({ type: 'player_long_rest_choose_lost', cardId: stagedCard.card.id })
+                  }
+                  style={{ ...btn.primary(false), flex: 1, padding: '6px 18px', fontSize: 14 }}
+                >
+                  Confirm
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div>
+          <p style={{ color: theme.text, marginTop: 0 }}>
+            Card lost. Your discard returned to your hand.
+          </p>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              marginTop: 12,
+              padding: 12,
+              background: theme.panel,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 6,
+            }}
+          >
+            <button
+              onClick={() => sock.send({ type: 'player_long_rest_heal' })}
+              disabled={pending.healUsed}
+              style={{
+                ...btn.outline(),
+                opacity: pending.healUsed ? 0.5 : 1,
+                cursor: pending.healUsed ? 'not-allowed' : 'pointer',
+                padding: '10px 14px',
+              }}
+            >
+              {pending.healUsed ? 'Healed 2 ✓' : 'Heal 2 (self)'}
+            </button>
+            <button
+              onClick={() => sock.send({ type: 'player_long_rest_finish' })}
+              style={{ ...btn.primary(false), padding: '10px 14px' }}
+            >
+              Finish Rest
+            </button>
+            {character && character.broughtItemIds.length > 0 && (
+              <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0 0' }}>
+                Spent items refreshed — all your items are ready to use again.
+              </p>
+            )}
+          </div>
         </div>
       )}
     </div>

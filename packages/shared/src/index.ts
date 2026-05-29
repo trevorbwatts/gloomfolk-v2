@@ -8,3 +8,5 @@ export * from './scenarios/index.js';
 export * from './decks/index.js';
 export * from './scenario-level.js';
 export * from './tiles/index.js';
+export * from './items/index.js';
+export * from './battle-goals/index.js';

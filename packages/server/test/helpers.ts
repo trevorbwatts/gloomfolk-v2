@@ -56,6 +56,11 @@ export function makeFixture(opts?: {
     claimedByPlayerId: playerId,
     gold: 0,
     loadout: null,
+    ownedItemIds: [],
+    broughtItemIds: [],
+    spentItemIds: [],
+    activeItems: [],
+    battleGoalCheckmarks: 0,
   };
   const campaign: CampaignSave = {
     id: 'test-campaign',
@@ -218,6 +223,11 @@ export function startTurn(
     turnStartElementBoard: freshElementBoard(),
     pendingInfusions: [],
     consumedThisTurn: [],
+    jumpAllMoves: false,
+    pierceCharge: null,
+    poisonCharge: null,
+    advantageCharge: null,
+    performedLostAction: false,
   };
 }
 

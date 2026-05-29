@@ -7,7 +7,7 @@ import { BOTTOM_BAR_HEIGHT } from './BottomBar.js';
 
 export function Hand({ you }: { you: PrivatePlayerState }) {
   const sock = useSocket();
-  const { hand, selection, discard, lost, shortRestPending } = you;
+  const { hand, selection, discard, lost, active, shortRestPending } = you;
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [leadingId, setLeadingId] = useState<string | null>(null);
 
@@ -37,6 +37,12 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
   const bothSelected = selectedCards.length === 2;
   const canConfirm = bothSelected && leadingId !== null;
   const canShortRest = discard.length >= 2;
+  // Long rest's ≥2 gate also counts active-area cards without lost icons —
+  // per docs/rules/resting.md "Active-area cards and resting".
+  const effectiveDiscardCount =
+    discard.length +
+    active.filter((c) => c.top.disposition !== 'lost' && c.bottom.disposition !== 'lost').length;
+  const canLongRest = effectiveDiscardCount >= 2;
   const secondId = bothSelected ? selectedIds.find((id) => id !== leadingId) ?? null : null;
 
   // Default leading to the quicker (lower-initiative) card once both are
@@ -66,9 +72,13 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
           Short Rest
         </button>
         <button
-          style={btn.outline()}
-          title="Skip this round to recover: choose a card to lose, heal 2, recover items"
-          onClick={() => sock.send({ type: 'player_long_rest' })}
+          style={{ ...btn.outline(), opacity: canLongRest ? 1 : 0.5, cursor: canLongRest ? 'pointer' : 'not-allowed' }}
+          disabled={!canLongRest}
+          title={canLongRest ? 'Skip this round to recover: choose a card to lose, heal 2, recover items' : 'Need 2+ cards in discard (or active area)'}
+          onClick={() => {
+            if (!canLongRest) return;
+            sock.send({ type: 'player_long_rest' });
+          }}
         >
           Long Rest
         </button>

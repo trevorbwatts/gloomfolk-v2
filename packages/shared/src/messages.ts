@@ -75,6 +75,27 @@ export interface CharacterInstance {
    *  player is taking into the next scenario. Null until the player locks
    *  one in; the server falls back to the class's default loadout. */
   loadout: string[] | null;
+  /** Items the character owns (purchased or looted). Persistent across scenarios. */
+  ownedItemIds: string[];
+  /** Items the character is bringing into the next scenario. Subset of
+   *  ownedItemIds; must satisfy slot limits. Persistent across scenarios. */
+  broughtItemIds: string[];
+  /** Items that have been used this scenario. Cleared when a new scenario
+   *  starts. Long-rest recovery not yet implemented. */
+  spentItemIds: string[];
+  /** Persistent active-area items in effect this scenario, with uses left
+   *  (e.g. Hide Armor's shield charges). Cleared when a new scenario starts;
+   *  an entry drops off once its uses hit 0 (and the item becomes spent). */
+  activeItems: { itemId: string; usesRemaining: number }[];
+  /** Lifetime battle-goal checkmarks earned across all scenarios. Every three
+   *  grant one extra perk mark (capped at +6 perk marks / 18 checkmarks). */
+  battleGoalCheckmarks: number;
+}
+
+/** A single entry in the campaign's shop: which item and how many remain. */
+export interface ShopEntry {
+  itemId: string;
+  remaining: number;
 }
 
 export interface CampaignSummary {
@@ -84,6 +105,26 @@ export interface CampaignSummary {
   updatedAt: number;
   scenarioId: string | null;
   characterNames: string[];
+}
+
+/** A character's secret battle-goal hand for the current scenario: the three
+ *  dealt cards and which one they kept. Lives in PrivatePlayerState — only the
+ *  owner sees it during the scenario. */
+export interface BattleGoalHand {
+  dealtGoalIds: string[];
+  chosenGoalId: string | null;
+}
+
+/** A revealed battle-goal outcome at scenario end. Public (goals are no longer
+ *  secret once the scenario is over). */
+export interface BattleGoalScenarioResult {
+  characterId: string;
+  goalId: string;
+  title: string;
+  description: string;
+  achieved: boolean;
+  /** Checkmarks awarded — 0 if not achieved or the scenario was lost. */
+  checkmarks: number;
 }
 
 export interface LobbyPlayer {
@@ -141,6 +182,8 @@ export interface PublicGameState {
   scenarioLevel: number;
   turnOrder: TurnOrderEntry[];
   activeTurnIndex: number;
+  /** Campaign-wide shop stock. Decrements when a character buys an item. */
+  shop: ShopEntry[];
   /** The six-element board state. Each element is `strong`, `waning`, or
    *  `inert`. End-of-round wanes every element one column left; end-of-turn
    *  pending infusions land in `strong`; consumption pushes to `inert`. */
@@ -149,6 +192,10 @@ export interface PublicGameState {
    *  wild/mixed element selector that needs a concrete element picked
    *  before infusion or consumption can resolve. */
   pendingElementChoice: PendingElementChoice | null;
+  /** A reactive item prompt blocking an in-progress monster attack — the
+   *  target may spend it (e.g. Leather Armor) before the modifier is drawn.
+   *  The monster animation is paused while this is set. */
+  pendingReactiveItem: PendingReactiveItem | null;
   /** Live state for the current actor's turn. Null between turns / outside turn_resolution. */
   currentTurn: CurrentTurn | null;
   /** Most recent narration events (oldest first). Capped server-side. */
@@ -175,11 +222,28 @@ export interface PublicGameState {
    *  spotlight the acting monster, draw an arrow to its target, and show
    *  the modifier card it drew. */
   monsterTurnAnim: MonsterTurnAnim | null;
+  /** Revealed battle-goal outcomes, populated only once the scenario ends
+   *  (victory or defeat). Null/empty during play, since goals are secret. */
+  battleGoalResults: BattleGoalScenarioResult[] | null;
 }
 
 /** Per-step view-state for the currently-resolving monster group turn.
  *  The server advances `phase` on a fixed cadence (default ~800ms/step)
  *  and rebroadcasts after each transition. */
+/**
+ * Both attack-modifier cards revealed by a two-card draw (Advantage or
+ * Disadvantage). The parent's `card` field is the one actually used; this lets
+ * the UI show both cards being pulled and highlight the winner.
+ */
+export interface AdvantageDraw {
+  /** 'advantage' keeps the better result, 'disadvantage' the worse. */
+  mode: 'advantage' | 'disadvantage';
+  /** The two cards in draw order. Length 2. */
+  cards: readonly ModifierCard[];
+  /** Index into `cards` of the one actually used (0 = first, 1 = second). */
+  usedIndex: number;
+}
+
 export interface MonsterTurnAnim {
   setId: string;
   abilityCardName: string;
@@ -202,7 +266,25 @@ export interface MonsterTurnAnim {
     damageDealt: number | null;
     targetUnitId: string;
     targetName: string;
+    /** Present when this attack was drawn with Disadvantage (two cards, worse
+     *  result used) — e.g. the target spent Leather Armor. Carries both cards
+     *  so the UI can show the pull. */
+    advantageDraw?: AdvantageDraw;
   } | null;
+}
+
+/**
+ * A reactive item the target may spend in response to an incoming attack,
+ * resolved before the attack modifier is drawn. The monster turn pauses while
+ * this is set; the owning player answers spend/decline and the turn resumes.
+ */
+export interface PendingReactiveItem {
+  playerId: string;
+  itemId: string;
+  attackerName: string;
+  targetUnitId: string;
+  /** Free-text prompt shown to the player. */
+  prompt: string;
 }
 
 export interface PendingForcedMove {
@@ -438,6 +520,9 @@ export interface ModifierDrawResult {
   finalAmount: number;
   /** Damage actually dealt after shield/pierce. */
   damageDealt: number;
+  /** Present when this attack drew with Advantage (two cards, better result
+   *  used) — e.g. Simple Bow. Carries both cards so the UI can show the pull. */
+  advantageDraw?: AdvantageDraw;
 }
 
 export interface CurrentTurn {
@@ -470,6 +555,24 @@ export interface CurrentTurn {
   /** Elements consumed during this turn. Same-element-once-per-turn rule
    *  prevents a second consume. */
   consumedThisTurn: readonly Element[];
+  /** True when a used item (e.g. Winged Shoes) has granted Jump to all of
+   *  this turn's move abilities. Applied to move actions as they are built. */
+  jumpAllMoves: boolean;
+  /** Set when a used item (e.g. Scouting Lens) has designated a single target
+   *  unit to gain Pierce on one attack against it this turn. Cleared once that
+   *  pierce is applied to a resolving attack. */
+  pierceCharge: { unitId: string; amount: number } | null;
+  /** Set when a used item (e.g. Poison Dagger) has designated a single enemy
+   *  to gain Poison on one melee attack against it this turn. Cleared once
+   *  that attack resolves. */
+  poisonCharge: { unitId: string } | null;
+  /** Set when a used item (e.g. Simple Bow) has designated a single target so
+   *  one ranged attack against it draws with Advantage. Cleared once that
+   *  attack resolves. */
+  advantageCharge: { unitId: string } | null;
+  /** True once this turn the actor has performed an action from a card half
+   *  with the Lost disposition. Gates items like Focusing Rod. */
+  performedLostAction: boolean;
 }
 
 /**
@@ -518,6 +621,19 @@ export interface PrivatePlayerState {
    *  the cost of 1 damage. `rerollableCardIds` lists the cards that were just
    *  returned from discard to hand and are eligible to be lost instead. */
   shortRestPending?: { lostCardId: string; rerollableCardIds: readonly string[] } | null;
+  /** Active long-rest turn. Set when the player's init-99 turn opens; cleared
+   *  when they finish. `step` walks the player through the rulebook flow:
+   *  pick a card to lose, then optionally heal / recover items, then finish.
+   *  `candidateCardIds` is the effective-discard pool (discard ∪ qualifying
+   *  active cards) eligible to be the lost card. */
+  longRestPending?: {
+    step: 'choose_lost' | 'choose_optional';
+    candidateCardIds: readonly string[];
+    healUsed: boolean;
+  } | null;
+  /** This player's secret battle-goal hand for the current scenario (dealt
+   *  three, kept one). Null in the lobby / before a scenario deals them. */
+  battleGoal?: BattleGoalHand | null;
 }
 
 export type ClientToServer =
@@ -533,9 +649,32 @@ export type ClientToServer =
   | { type: 'player_pick_character'; characterId: string }
   | { type: 'player_unclaim_character' }
   | { type: 'player_set_loadout'; cardIds: string[] }
+  | { type: 'player_buy_item'; itemId: string }
+  | { type: 'player_set_item_loadout'; itemIds: string[] }
+  | {
+      type: 'player_use_item';
+      itemId: string;
+      /** Action context for items used during a specific action (e.g. a
+       *  move-bonus item used on a move). Omitted for turn-scoped items. */
+      slot?: 'top' | 'bottom';
+      actionId?: string;
+      /** Target unit to designate for items that point an effect at one figure
+       *  (e.g. Scouting Lens Pierce). */
+      targetUnitId?: string;
+      /** Target card to designate for items that act on a card (e.g. Stamina
+       *  Potion retrieving a discarded card). */
+      targetCardId?: string;
+    }
+  /** Answer an outstanding pendingReactiveItem prompt during a monster attack. */
+  | { type: 'player_respond_reactive_item'; spend: boolean }
   | { type: 'host_start_scenario'; scenarioId: string }
+  /** Keep one of the three dealt battle goals for this scenario. */
+  | { type: 'player_choose_battle_goal'; goalId: string }
   | { type: 'player_select_cards'; leadingId: string; secondId: string }
   | { type: 'player_long_rest' }
+  | { type: 'player_long_rest_choose_lost'; cardId: string }
+  | { type: 'player_long_rest_heal' }
+  | { type: 'player_long_rest_finish' }
   | { type: 'player_short_rest' }
   | { type: 'player_short_rest_reroll' }
   | { type: 'player_short_rest_accept' }

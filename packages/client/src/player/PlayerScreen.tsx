@@ -10,8 +10,10 @@ import { clearSession, getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { btn, theme } from '../theme.js';
 import { CharacterSelect } from './CharacterSelect.js';
+import { BattleGoalPicker } from './BattleGoalPicker.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
+import { Shop } from './Shop.js';
 import { ActiveArea, TurnPlay } from './TurnPlay.js';
 import {
   BottomBar,
@@ -41,6 +43,82 @@ function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTur
 function readCampaignFromHash(): string | null {
   const h = location.hash.replace(/^#/, '').trim();
   return h || null;
+}
+
+/** Modal overlay shown when a monster attack pauses for a reactive-item
+ *  decision targeting this player (e.g. Leather Armor → Disadvantage). */
+function ReactivePrompt({
+  prompt,
+  onRespond,
+}: {
+  prompt: string;
+  onRespond: (spend: boolean) => void;
+}) {
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 200,
+        background: 'rgba(0,0,0,0.7)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          background: theme.panel,
+          border: `1px solid ${theme.accent}`,
+          borderRadius: 6,
+          padding: 24,
+          maxWidth: 420,
+          textAlign: 'center',
+        }}
+      >
+        <p style={{ fontSize: 16, lineHeight: 1.4, margin: '0 0 20px', color: theme.text }}>
+          {prompt}
+        </p>
+        <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+          <button
+            onClick={() => onRespond(true)}
+            style={{
+              fontSize: 15,
+              padding: '10px 20px',
+              background: theme.accent,
+              color: '#0e1612',
+              border: 'none',
+              borderRadius: 3,
+              fontFamily: theme.headingFont,
+              letterSpacing: 1,
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+            }}
+          >
+            Spend
+          </button>
+          <button
+            onClick={() => onRespond(false)}
+            style={{
+              fontSize: 15,
+              padding: '10px 20px',
+              background: 'transparent',
+              color: theme.muted,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 3,
+              fontFamily: theme.headingFont,
+              letterSpacing: 1,
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+            }}
+          >
+            Decline
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const shellStyle: React.CSSProperties = {
@@ -222,6 +300,14 @@ export function PlayerScreen() {
 
   return (
     <div style={shellStyle}>
+      {gameState?.pendingReactiveItem?.playerId === playerId && (
+        <ReactivePrompt
+          prompt={gameState.pendingReactiveItem.prompt}
+          onRespond={(spend) =>
+            sock.send({ type: 'player_respond_reactive_item', spend })
+          }
+        />
+      )}
       {myCharInstance && (
         <div
           style={{
@@ -431,17 +517,32 @@ export function PlayerScreen() {
                   </p>
                 )}
               </div>
+              {myCharInstance && gameState && (
+                <Shop character={myCharInstance} shop={gameState.shop} />
+              )}
             </div>
           );
         })()}
-        {onPlayTab && me?.characterId && phase === 'card_select' && you && (
-          <Hand you={you} />
-        )}
+        {onPlayTab && me?.characterId && you?.battleGoal &&
+          you.battleGoal.chosenGoalId == null &&
+          you.battleGoal.dealtGoalIds.length > 0 && (
+            <BattleGoalPicker
+              dealtGoalIds={you.battleGoal.dealtGoalIds}
+              onChoose={(goalId) =>
+                sock.send({ type: 'player_choose_battle_goal', goalId })
+              }
+            />
+          )}
+        {onPlayTab && me?.characterId && phase === 'card_select' && you &&
+          (you.battleGoal?.chosenGoalId != null ||
+            !you.battleGoal?.dealtGoalIds?.length) && (
+            <Hand you={you} />
+          )}
         {onPlayTab && me?.characterId && phase === 'turn_resolution' && gameState && (
           <TurnPlay gameState={gameState} myPlayerId={playerId!} you={you} />
         )}
         {showBottomBar && activeTab === 'scenario' && (
-          <ScenarioPanel gameState={gameState ?? null} />
+          <ScenarioPanel gameState={gameState ?? null} you={you} />
         )}
         {showBottomBar && activeTab === 'character' && (
           <CharacterPanel

@@ -8,7 +8,7 @@ import { useMoveAnim } from '../board/useMoveAnim.js';
 import { TurnOrder } from './TurnOrder.js';
 import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
 import { btn, theme } from '../theme.js';
-import type { CharacterInstance, LobbyPlayer, MonsterTurnAnim, Unit } from '@gloomfolk/shared';
+import type { CharacterInstance, LobbyPlayer, ModifierCard, MonsterTurnAnim, Unit } from '@gloomfolk/shared';
 import {
   bonusExperienceFor,
   goldConversionFor,
@@ -414,38 +414,33 @@ function MonsterTurnPanel({
             {target ? target.name : 'no target'}
           </span>
         </div>
-        <div style={{ fontSize: 12, color: theme.muted, marginTop: 2 }}>{phaseLabel}</div>
+        <div style={{ fontSize: 12, color: theme.muted, marginTop: 2 }}>
+          {phaseLabel}
+          {draw?.advantageDraw && (
+            <span
+              style={{
+                color: draw.advantageDraw.mode === 'advantage' ? theme.good : theme.bad,
+                marginLeft: 6,
+                fontWeight: 600,
+              }}
+            >
+              · {draw.advantageDraw.mode === 'advantage' ? 'Advantage' : 'Disadvantage'}
+            </span>
+          )}
+        </div>
       </div>
       {draw && (
-        <div
-          style={{
-            width: 56,
-            height: 72,
-            borderRadius: 6,
-            border: `1px solid ${theme.border}`,
-            background: theme.panelRaised,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontFamily: theme.headingFont,
-            color:
-              draw.card.kind === 'crit'
-                ? theme.accent
-                : draw.card.kind === 'null'
-                  ? theme.bad
-                  : theme.text,
-          }}
-        >
-          <div
-            style={{
-              fontSize: modifierLabel(draw.card).length > 2 ? 14 : 22,
-              fontWeight: 700,
-            }}
-          >
-            {modifierLabel(draw.card)}
-          </div>
-          <div style={{ fontSize: 10, color: theme.muted, marginTop: 2 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+          {draw.advantageDraw ? (
+            <div style={{ display: 'flex', gap: 6 }}>
+              {draw.advantageDraw.cards.map((c, i) => (
+                <HostModCard key={i} card={c} chosen={i === draw.advantageDraw!.usedIndex} />
+              ))}
+            </div>
+          ) : (
+            <HostModCard card={draw.card} />
+          )}
+          <div style={{ fontSize: 10, color: theme.muted }}>
             {draw.baseAmount} → {draw.finalAmount}
           </div>
           {draw.damageDealt !== null && (
@@ -456,6 +451,37 @@ function MonsterTurnPanel({
       <button onClick={onSkip} style={{ ...btn.outline(), fontSize: 12, padding: '6px 12px' }}>
         Skip ▶▶
       </button>
+    </div>
+  );
+}
+
+/** Attack-modifier card chip for the host monster-turn banner. `chosen`
+ *  highlights the used card of an Advantage/Disadvantage pair (the other is
+ *  rendered dimmed). */
+function HostModCard({ card, chosen }: { card: ModifierCard; chosen?: boolean }) {
+  const isCrit = card.kind === 'crit';
+  const isNull = card.kind === 'null';
+  const faded = chosen === false;
+  return (
+    <div
+      style={{
+        width: 52,
+        height: 68,
+        borderRadius: 6,
+        border: `${chosen ? 2 : 1}px solid ${chosen ? theme.good : theme.border}`,
+        background: theme.panelRaised,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: theme.headingFont,
+        fontWeight: 700,
+        fontSize: modifierLabel(card).length > 2 ? 14 : 22,
+        opacity: faded ? 0.4 : 1,
+        filter: faded ? 'grayscale(1)' : 'none',
+        color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+      }}
+    >
+      {modifierLabel(card)}
     </div>
   );
 }

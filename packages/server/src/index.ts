@@ -220,6 +220,57 @@ async function handle(
       return;
     }
 
+    case 'player_buy_item': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.buyItem(conn.playerId, msg.itemId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_set_item_loadout': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.setItemLoadout(conn.playerId, msg.itemIds);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_use_item': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.useItem(
+        conn.playerId,
+        msg.itemId,
+        msg.slot,
+        msg.actionId,
+        msg.targetUnitId,
+        msg.targetCardId,
+      );
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_respond_reactive_item': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      r.respondReactiveItem(conn.playerId, msg.spend);
+      return;
+    }
+
+    case 'player_choose_battle_goal': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.chooseBattleGoal(conn.playerId, msg.goalId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
     case 'player_select_cards': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
@@ -231,7 +282,37 @@ async function handle(
 
     case 'player_long_rest': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
-      rooms.get(conn.campaignId)?.longRest(conn.playerId);
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.longRest(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_long_rest_choose_lost': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.longRestChooseLost(conn.playerId, msg.cardId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_long_rest_heal': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.longRestHeal(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_long_rest_finish': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.longRestFinish(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }
 

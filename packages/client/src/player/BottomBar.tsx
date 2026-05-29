@@ -12,6 +12,7 @@ import type {
 import {
   banditArcher,
   banditScout,
+  getBattleGoal,
   getScenario,
   modifierLabel,
 } from '@gloomfolk/shared';
@@ -531,8 +532,10 @@ function PerksList({
 
 export function ScenarioPanel({
   gameState,
+  you,
 }: {
   gameState: PublicGameState | null;
+  you?: PrivatePlayerState | null;
 }) {
   if (!gameState || !gameState.scenarioId) {
     return <EmptyHint text="No scenario active." />;
@@ -540,6 +543,11 @@ export function ScenarioPanel({
   const scenario = getScenario(gameState.scenarioId);
   const revealedMonsters = uniqueMonsters(gameState.units);
   const level = gameState.scenarioLevel;
+  const chosenGoal =
+    you?.battleGoal?.chosenGoalId != null
+      ? getBattleGoal(you.battleGoal.chosenGoalId)
+      : null;
+  const results = gameState.battleGoalResults;
   return (
     <div>
       <SectionTitle>Objective</SectionTitle>
@@ -553,10 +561,43 @@ export function ScenarioPanel({
       )}
 
       <div style={{ height: 24 }} />
-      <SectionTitle>Your goal</SectionTitle>
-      <p style={{ color: theme.muted, fontSize: 13, margin: 0, lineHeight: 1.4 }}>
-        Individual round goals aren't implemented yet.
-      </p>
+      <SectionTitle>Your battle goal</SectionTitle>
+      {chosenGoal ? (
+        <div>
+          <p style={{ color: theme.accent, fontSize: 14, margin: '0 0 2px', fontFamily: theme.headingFont, letterSpacing: 0.5 }}>
+            {chosenGoal.title}
+          </p>
+          <p style={{ color: theme.text, fontSize: 13, margin: 0, lineHeight: 1.4 }}>
+            {chosenGoal.description}
+          </p>
+        </div>
+      ) : (
+        <p style={{ color: theme.muted, fontSize: 13, margin: 0, lineHeight: 1.4 }}>
+          {you?.battleGoal?.dealtGoalIds?.length
+            ? 'Choose a battle goal to begin.'
+            : 'No battle goal this scenario.'}
+        </p>
+      )}
+
+      {results && results.length > 0 && (
+        <>
+          <div style={{ height: 24 }} />
+          <SectionTitle>Battle goal results</SectionTitle>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {results.map((r) => (
+              <div key={r.characterId} style={cardStyle()}>
+                <p style={{ margin: '0 0 2px', fontSize: 13, color: r.achieved ? theme.good : theme.muted }}>
+                  {r.achieved ? '✓' : '✗'} {r.title}
+                  {r.checkmarks > 0 ? ` (+${r.checkmarks})` : ''}
+                </p>
+                <p style={{ margin: 0, fontSize: 12, color: theme.muted, lineHeight: 1.4 }}>
+                  {r.description}
+                </p>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div style={{ height: 24 }} />
       <SectionTitle>Monsters revealed</SectionTitle>

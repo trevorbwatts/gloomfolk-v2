@@ -5,6 +5,9 @@ import type {
   AmountRef,
   AttackConsumeOffer,
   AttackElementRider,
+  BattleGoalEvent,
+  BattleGoalHand,
+  BattleGoalScenarioResult,
   Card,
   CardHalf,
   CardSelection,
@@ -15,6 +18,7 @@ import type {
   CurrentTurn,
   Element,
   ElementBoardState,
+  AdvantageDraw,
   ElementSelector,
   GameEvent,
   HalfSlot,
@@ -22,6 +26,7 @@ import type {
   ModifierCardInstance,
   ModifierDrawResult,
   MoneyToken,
+  MonsterAttackEffect,
   MonsterConsumeEffect,
   MonsterStatCard,
   MonsterTurnAnim,
@@ -30,12 +35,14 @@ import type {
   PendingAction,
   PendingElementChoice,
   PendingForcedMove,
+  PendingReactiveItem,
   PersistentTrigger,
   PublicGameState,
   ServerToClient,
   TrackedHalfState,
   TurnOrderEntry,
   Unit,
+  ShopEntry,
 } from '@gloomfolk/shared';
 import {
   ALL_ELEMENTS,
@@ -43,6 +50,7 @@ import {
   archerDeck,
   banditArcher,
   banditScout,
+  cardMatchesLevel,
   bfsForcedMove,
   bfsForcedMovePath,
   bfsReachable,
@@ -51,7 +59,10 @@ import {
   silentKnife,
   createMonsterModifierDeck,
   createStartingModifierDeck,
+  dealBattleGoalIds,
+  evaluateBattleGoal,
   experienceRequirementByLevel,
+  getBattleGoal,
   getScenario,
   goldConversionFor,
   hasLineOfSight,
@@ -68,6 +79,9 @@ import {
   defaultPoolForClass,
   startingHandFor,
   triggersReshuffle,
+  DEFAULT_SHOP_STOCK,
+  getItem,
+  validateItemLoadout,
 } from '@gloomfolk/shared';
 
 const MONSTER_DECKS = {
@@ -75,7 +89,8 @@ const MONSTER_DECKS = {
   scout: scoutDeck,
 } as const;
 import { type CampaignSave, saveCampaign } from './saves.js';
-import { determineFocus, readAbility, walkPath } from './ai.js';
+import type { DestinationEval } from './ai.js';
+import { determineFocus, determineMovement, readAbility } from './ai.js';
 
 const MONSTER_DEFS = {
   'bandit-archer': banditArcher,
@@ -92,6 +107,14 @@ function monsterDefMatchesSet(defId: string, setId: string): boolean {
   return def?.setId === setId;
 }
 
+/** True if the unit's monster type is immune to `condition`. Player units have
+ *  no immunities. */
+function unitImmuneTo(unit: Unit, condition: NegativeCondition): boolean {
+  if (unit.kind !== 'monster') return false;
+  const def = MONSTER_DEFS[unit.defId as keyof typeof MONSTER_DEFS];
+  return def?.immunities?.includes(condition) ?? false;
+}
+
 const CHARACTER_NAMES: Record<string, string> = {
   bruiser: 'Bruiser',
   'silent-knife': 'Silent Knife',
@@ -104,7 +127,17 @@ const CHARACTER_CLASSES: Record<string, CharacterClass> = {
 
 // Negative conditions the engine actually enforces today. Others are recognized
 // (in the action queue) but their gameplay effect may be a no-op for now.
-const SUPPORTED_CONDITIONS = new Set<string>(['stun', 'immobilize', 'disarm', 'muddle']);
+const SUPPORTED_CONDITIONS = new Set<string>([
+  'stun',
+  'immobilize',
+  'disarm',
+  'muddle',
+  'poison',
+]);
+
+/** Conditions that persist until the figure is healed (rather than ticking off
+ *  at the end of a turn). Poison and Wound per conditions.md. */
+const PERSIST_UNTIL_HEALED = new Set<string>(['poison', 'wound']);
 
 const MAX_PLAYERS = 4;
 
@@ -156,6 +189,24 @@ function nextDrawId(): string {
 
 function hasCondition(unit: Unit, kind: NegativeCondition): boolean {
   return unit.conditions.some((c) => c.kind === kind);
+}
+
+/** Poison: all attacks targeting a poisoned figure gain +1 Attack
+ *  (conditions.md). Returned as a flat add applied after any ×2 doubling. */
+function poisonBonus(target: Unit): number {
+  return hasCondition(target, 'poison') ? 1 : 0;
+}
+
+/** Reconcile advantage and disadvantage sources for a single attack. They do
+ *  not stack: an attack carrying both is considered to have neither (a flat
+ *  single draw), per advantage-disadvantage-pierce.md. Returns the net mode,
+ *  or null for a normal single draw. */
+export function resolveAdvantage(
+  hasAdvantage: boolean,
+  hasDisadvantage: boolean,
+): 'advantage' | 'disadvantage' | null {
+  if (hasAdvantage === hasDisadvantage) return null;
+  return hasAdvantage ? 'advantage' : 'disadvantage';
 }
 
 /** Sum of all active move-bonus effects. */
@@ -227,6 +278,8 @@ function applyConditionToUnit(unit: Unit, kind: NegativeCondition, isOwnTurn: bo
 function tickConditionsEndOfTurn(unit: Unit): NegativeCondition[] {
   const removed: NegativeCondition[] = [];
   unit.conditions = unit.conditions.filter((c) => {
+    // Poison/Wound don't expire on a turn boundary — they stay until a heal.
+    if (PERSIST_UNTIL_HEALED.has(c.kind)) return true;
     if (c.appliedThisTurn) {
       c.appliedThisTurn = false;
       return true;
@@ -642,6 +695,11 @@ interface PlayerEntry {
   modifierDiscard: ModifierCardInstance[];
   modifierNeedsReshuffle: boolean;
   shortRestPending: { lostCardId: string; rerollableCardIds: string[] } | null;
+  longRestPending: {
+    step: 'choose_lost' | 'choose_optional';
+    candidateCardIds: string[];
+    healUsed: boolean;
+  } | null;
 }
 
 export class Room {
@@ -678,14 +736,31 @@ export class Room {
    *  spotlight + arrow + modifier flip per step. Null when no monster group
    *  is currently resolving. */
   monsterTurnAnim: MonsterTurnAnim | null = null;
-  private monsterAnimGen: Generator<void, void, void> | null = null;
+  private monsterAnimGen: Generator<unknown, void, unknown> | null = null;
   private monsterAnimTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Outstanding reactive-item prompt pausing the monster animation (e.g.
+   *  Leather Armor). The generator is suspended until respondReactiveItem. */
+  pendingReactiveItem: PendingReactiveItem | null = null;
   /** Outstanding wild/mixed element selector waiting on a party/player pick. */
   pendingElementChoice: PendingElementChoice | null = null;
   /** Continuation invoked when `pendingElementChoice` is resolved. Captures
    *  whatever follow-up the prompt was blocking (queue the infusion, mark
    *  consume, etc.). */
   private pendingChoiceFollowup: ((picked: Element) => void) | null = null;
+  /** Battle goals dealt this scenario, keyed by characterId. Secret — only
+   *  surfaced to the owning player via PrivatePlayerState, and revealed to
+   *  everyone at scenario end. */
+  private battleGoalHands = new Map<string, BattleGoalHand>();
+  /** Append-only log of battle-goal events for the current scenario. Folded
+   *  through each character's chosen-goal tracker at scenario end. */
+  private battleGoalLog: BattleGoalEvent[] = [];
+  /** Revealed results, populated by endScenario. */
+  private battleGoalResults: BattleGoalScenarioResult[] | null = null;
+  /** Monster-type ids that appeared this scenario (for Exterminator). */
+  private monsterTypesSeen = new Set<string>();
+  /** Unit ids of monsters whose group has taken its turn this round. Cleared
+   *  each round. Drives Assassin (kill before it acts) and Vanguard. */
+  private monstersActedThisRound = new Set<string>();
   private nextEventId = 1;
   private nextMoneyTokenN = 1;
   private nextMoveId = 1;
@@ -702,6 +777,20 @@ export class Room {
     // so attachPlayer can lazily restore them on reconnect (by saved playerId)
     // or hand the character off to a fresh player via takeover.
     campaign.players = campaign.players.filter((p) => p.activeCharacterId);
+    // Initialize shop stock on legacy saves that predate items.
+    if (!Array.isArray(campaign.shop)) {
+      campaign.shop = DEFAULT_SHOP_STOCK.map((s) => ({ ...s }));
+    }
+    // Backfill item fields on legacy character instances.
+    for (const ch of campaign.characters) {
+      if (!Array.isArray(ch.ownedItemIds)) ch.ownedItemIds = [];
+      if (!Array.isArray(ch.broughtItemIds)) ch.broughtItemIds = [];
+      if (!Array.isArray(ch.spentItemIds)) ch.spentItemIds = [];
+      if (!Array.isArray(ch.activeItems)) ch.activeItems = [];
+      if (typeof ch.battleGoalCheckmarks !== 'number') {
+        ch.battleGoalCheckmarks = 0;
+      }
+    }
   }
 
   private newPlayerEntry(
@@ -726,6 +815,7 @@ export class Room {
       modifierDiscard: [],
       modifierNeedsReshuffle: false,
       shortRestPending: null,
+      longRestPending: null,
     };
   }
 
@@ -853,6 +943,10 @@ export class Room {
     for (const ch of this.campaign.characters) {
       if (typeof ch.gold !== 'number') ch.gold = 0;
       if (!('loadout' in ch)) (ch as CharacterInstance).loadout = null;
+      if (!Array.isArray(ch.ownedItemIds)) ch.ownedItemIds = [];
+      if (!Array.isArray(ch.broughtItemIds)) ch.broughtItemIds = [];
+      ch.spentItemIds = [];
+      ch.activeItems = [];
     }
     let unitN = 1;
 
@@ -901,8 +995,21 @@ export class Room {
       p.activeTracked = [];
       p.activeEffects = [];
       p.selection = null;
-      // Fresh, shuffled attack-modifier deck.
-      p.modifierDeck = createStartingModifierDeck();
+      // Fresh, shuffled attack-modifier deck. Items brought into the scenario
+      // can inject extra -1 cards (e.g. Hide Armor adds two).
+      const extraMinusOnes: ModifierCardInstance[] = [];
+      for (const iid of charInst?.broughtItemIds ?? []) {
+        const count = getItem(iid)?.negativeModifierCount ?? 0;
+        for (let k = 0; k < count; k++) {
+          extraMinusOnes.push({
+            id: `item-m${extraMinusOnes.length + 1}`,
+            card: { kind: 'flat', amount: -1 },
+          });
+        }
+      }
+      p.modifierDeck = extraMinusOnes.length
+        ? reshuffleModifierDeck(createStartingModifierDeck(), extraMinusOnes)
+        : createStartingModifierDeck();
       p.modifierDiscard = [];
       p.modifierNeedsReshuffle = false;
     });
@@ -927,9 +1034,35 @@ export class Room {
       });
     });
 
+    // Deal battle goals: each ready character gets three in secret and keeps
+    // one. Reset the per-scenario log/results and the monster-type set.
+    this.battleGoalHands.clear();
+    this.battleGoalLog = [];
+    this.battleGoalResults = null;
+    this.monsterTypesSeen = new Set(
+      enemySlots
+        .map((s) => s.monsterId)
+        .filter((id): id is string => typeof id === 'string'),
+    );
+    for (const p of readyPlayers) {
+      if (!p.activeCharacterId) continue;
+      const charInst = this.campaign.characters.find(
+        (c) => c.id === p.activeCharacterId,
+      );
+      if (charInst && typeof charInst.battleGoalCheckmarks !== 'number') {
+        charInst.battleGoalCheckmarks = 0;
+      }
+      this.battleGoalHands.set(p.activeCharacterId, {
+        dealtGoalIds: dealBattleGoalIds(3),
+        chosenGoalId: null,
+      });
+    }
+
     this.campaign.scenarioId = scenario.id;
     this.phase = 'card_select';
     this.round = 1;
+    // First round begins.
+    this.battleGoalLog.push({ kind: 'round_start', round: 1 });
     void this.persist();
     this.broadcastState();
     return { ok: true };
@@ -953,14 +1086,126 @@ export class Room {
     return { ok: true };
   }
 
+  /** Effective discard for rest purposes per docs/rules/resting.md: discard
+   *  plus active-area cards whose played half doesn't have a lost-disposition
+   *  (i.e. cards that don't have a lost icon). Used both for the ≥2 gate and
+   *  for the long-rest choose-lost candidate list. */
+  private effectiveDiscardForRest(p: PlayerEntry): Card[] {
+    const eligibleActive = p.active.filter(
+      (c) => c.top.disposition !== 'lost' && c.bottom.disposition !== 'lost',
+    );
+    return [...p.discard, ...eligibleActive];
+  }
+
   longRest(playerId: string): { ok: true } | { ok: false; reason: string } {
     if (this.phase !== 'card_select') return { ok: false, reason: 'wrong_phase' };
     const p = this.players.get(playerId);
     if (!p) return { ok: false, reason: 'no_player' };
+    if (this.effectiveDiscardForRest(p).length < 2) {
+      return { ok: false, reason: 'need_two_in_discard' };
+    }
     p.selection = { kind: 'long_rest' };
     this.maybeBeginTurnResolution();
     this.broadcastState();
     return { ok: true };
+  }
+
+  longRestChooseLost(
+    playerId: string,
+    cardId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'turn_resolution') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    const pending = p.longRestPending;
+    if (!pending || pending.step !== 'choose_lost') {
+      return { ok: false, reason: 'not_choosing_lost' };
+    }
+    if (!pending.candidateCardIds.includes(cardId)) {
+      return { ok: false, reason: 'card_not_candidate' };
+    }
+    // Battle goals: the long rest resolves here. Emit the rest before its own
+    // card loss (Daredevil contract); hand size is captured before discard
+    // returns to hand below.
+    {
+      const cid = this.charIdForPlayer(playerId);
+      if (cid) {
+        this.emitBG({
+          kind: 'rest',
+          characterId: cid,
+          restKind: 'long',
+          handSizeAtRest: p.hand.length,
+        });
+      }
+    }
+    // The chosen card may be in discard OR in the active area. Active-area
+    // cards never return to hand (only discard does); the lost card is
+    // pulled from whichever pile it lives in.
+    const discardIdx = p.discard.findIndex((c) => c.id === cardId);
+    if (discardIdx >= 0) {
+      const [lost] = p.discard.splice(discardIdx, 1);
+      if (!lost) return { ok: false, reason: 'card_missing' };
+      p.lost.push(lost);
+    } else {
+      const activeIdx = p.active.findIndex((c) => c.id === cardId);
+      if (activeIdx < 0) return { ok: false, reason: 'card_missing' };
+      const [lost] = p.active.splice(activeIdx, 1);
+      if (!lost) return { ok: false, reason: 'card_missing' };
+      p.lost.push(lost);
+      // Drop any parallel tracked state for this active card.
+      p.activeTracked = p.activeTracked.filter((t) => t.cardId !== lost.id);
+      p.activeEffects = p.activeEffects.filter((e) => e.sourceCardId !== lost.id);
+    }
+    {
+      const cid = this.charIdForPlayer(playerId);
+      if (cid) this.emitBG({ kind: 'card_lost', characterId: cid, count: 1 });
+    }
+    // Remaining discard returns to hand. Active-area cards stay put.
+    p.hand.push(...p.discard);
+    p.discard = [];
+    p.longRestPending = { step: 'choose_optional', candidateCardIds: [], healUsed: false };
+    const lostCard = p.lost[p.lost.length - 1];
+    this.pushEvent(
+      `${this.playerDisplayName(p)} long rests — lost ${lostCard?.name ?? '?'}.`,
+    );
+    const recovered = this.recoverSpentItems(p);
+    if (recovered.length > 0) {
+      this.pushEvent(
+        `${this.playerDisplayName(p)} recovers ${recovered.join(', ')}.`,
+      );
+    }
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  longRestHeal(playerId: string): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'turn_resolution') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    const pending = p.longRestPending;
+    if (!pending || pending.step !== 'choose_optional') {
+      return { ok: false, reason: 'not_in_optional_step' };
+    }
+    if (pending.healUsed) return { ok: false, reason: 'heal_already_used' };
+    const unit = this.units.find((u) => u.ownerPlayerId === p.playerId);
+    if (!unit) return { ok: false, reason: 'no_unit' };
+    const restored = this.healUnit(unit, 2);
+    pending.healUsed = true;
+    if (restored > 0) {
+      this.pushEvent(`${unit.name} heals ${restored} from long rest.`);
+    }
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  longRestFinish(playerId: string): { ok: true } | { ok: false; reason: string } {
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    if (!p.longRestPending) return { ok: false, reason: 'not_resting' };
+    p.longRestPending = null;
+    // Delegate to endTurn for condition tick + auto-loot + turn advance.
+    // disposePlayerCards is a no-op since selection.kind !== 'cards'.
+    return this.endTurn(playerId);
   }
 
   private playerDisplayName(p: PlayerEntry): string {
@@ -982,6 +1227,13 @@ export class Room {
     const ch = this.campaign.characters.find((c) => c.id === p.activeCharacterId);
     if (!ch) return;
     ch.xp += amount;
+    // Battle goals: in-play experience (not the end-of-scenario bonus).
+    this.emitBG({
+      kind: 'experience_gained',
+      characterId: ch.id,
+      amount,
+      bonus: false,
+    });
     this.pushEvent(`${ch.name} gains +${amount} EXP (${reason}). Total: ${ch.xp}.`);
     // If they're now over the next-level threshold, hint at it. Actual
     // level-up application is a Downtime concern, not implemented yet.
@@ -1006,6 +1258,137 @@ export class Room {
    *   - 'attack-against-isolated-enemy', 'melee-attack-against-shielded-enemy',
    *     'attack-while-invisible': fired per landed hit via fireAttackConditionalTriggers.
    */
+  /**
+   * Consume one charge from each active `shield-on-attack` item the player has
+   * brought, returning the total Shield to add against the incoming attack.
+   * Exhausted items become spent and drop off the active list.
+   */
+  private consumeActiveItemShield(p: PlayerEntry): number {
+    const instance = this.campaign.characters.find(
+      (c) => c.id === p.activeCharacterId,
+    );
+    if (!instance || !Array.isArray(instance.activeItems)) return 0;
+    let bonus = 0;
+    for (const ai of instance.activeItems) {
+      if (ai.usesRemaining <= 0) continue;
+      const effect = getItem(ai.itemId)?.effect;
+      if (effect?.kind !== 'shield-on-attack') continue;
+      bonus += effect.amount;
+      ai.usesRemaining -= 1;
+      if (ai.usesRemaining <= 0 && !instance.spentItemIds.includes(ai.itemId)) {
+        instance.spentItemIds.push(ai.itemId);
+        this.pushEvent(`${instance.name}'s ${getItem(ai.itemId)?.name ?? ai.itemId} is spent.`);
+      }
+    }
+    instance.activeItems = instance.activeItems.filter((ai) => ai.usesRemaining > 0);
+    return bonus;
+  }
+
+  /** Apply a Heal of `amount` to `unit`, resolving condition interactions
+   *  (conditions.md): healing removes Poison and Wound. Poison additionally
+   *  prevents the heal from raising current HP (the heal is "used up" clearing
+   *  the poison). Returns the HP actually restored. */
+  private healUnit(unit: Unit, amount: number): number {
+    const hadPoison = hasCondition(unit, 'poison');
+    const hadWound = hasCondition(unit, 'wound');
+    if (hadPoison || hadWound) {
+      unit.conditions = unit.conditions.filter(
+        (c) => c.kind !== 'poison' && c.kind !== 'wound',
+      );
+      const cured = [hadPoison ? 'poison' : null, hadWound ? 'wound' : null]
+        .filter((x): x is string => x !== null)
+        .join(' and ');
+      this.pushEvent(`${unit.name} is cured of ${cured}.`);
+      // Battle goals: a heal removed negative condition(s). Attribute to the
+      // current actor (heals happen on a character's turn). targetFriendly is
+      // true when the healed figure is a player character.
+      const actor = this.currentTurn
+        ? this.units.find((u) => u.id === this.currentTurn!.unitId) ?? null
+        : null;
+      const byCharacterId = actor ? this.charIdForUnit(actor) : null;
+      const targetFriendly = unit.kind === 'player';
+      if (hadPoison) {
+        this.emitBG({ kind: 'condition_removed', byCharacterId, targetFriendly, condition: 'poison' });
+      }
+      if (hadWound) {
+        this.emitBG({ kind: 'condition_removed', byCharacterId, targetFriendly, condition: 'wound' });
+      }
+    }
+    // Poison blocks any HP gain from this heal.
+    if (hadPoison) return 0;
+    const before = unit.hp;
+    unit.hp = Math.min(unit.hpMax, unit.hp + amount);
+    const gained = unit.hp - before;
+    if (gained > 0) {
+      const cid = this.charIdForUnit(unit);
+      if (cid) {
+        this.emitBG({
+          kind: 'hp_changed',
+          characterId: cid,
+          currentHp: unit.hp,
+          maxHp: unit.hpMax,
+        });
+      }
+    }
+    return gained;
+  }
+
+  /** Long rest refreshes spent items (Gloomhaven 2E). Returns the recovered
+   *  item names so the rest narration can list them. Items with `lost` usage
+   *  are NOT recovered. Also clears any leftover active charges (e.g. a
+   *  partially-used Hide Armor) so the item can be re-activated next time. */
+  private recoverSpentItems(p: PlayerEntry): string[] {
+    const instance = this.campaign.characters.find(
+      (c) => c.id === p.activeCharacterId,
+    );
+    if (!instance) return [];
+    const recovered: string[] = [];
+    const notRecoverable = (kind: string | undefined) =>
+      kind === 'lost' || kind === 'permanently-lost';
+    instance.spentItemIds = instance.spentItemIds.filter((id) => {
+      const item = getItem(id);
+      if (item && !notRecoverable(item.usage.kind)) {
+        recovered.push(item.name);
+        return false;
+      }
+      return true;
+    });
+    if (Array.isArray(instance.activeItems)) {
+      instance.activeItems = instance.activeItems.filter((ai) =>
+        notRecoverable(getItem(ai.itemId)?.usage.kind),
+      );
+    }
+    return recovered;
+  }
+
+  /** Id of an unspent, brought `disadvantage-when-attacked` item the player
+   *  could spend in reaction to an incoming attack, or null if none. */
+  private findReactiveDisadvantageItem(p: PlayerEntry): string | null {
+    const instance = this.campaign.characters.find(
+      (c) => c.id === p.activeCharacterId,
+    );
+    if (!instance) return null;
+    for (const id of instance.broughtItemIds) {
+      if (instance.spentItemIds.includes(id)) continue;
+      if (getItem(id)?.effect.kind === 'disadvantage-when-attacked') return id;
+    }
+    return null;
+  }
+
+  /** Id of an unspent, brought `shield-when-attacked` item the player could
+   *  spend in reaction to an incoming attack, or null if none. */
+  private findReactiveShieldItem(p: PlayerEntry): string | null {
+    const instance = this.campaign.characters.find(
+      (c) => c.id === p.activeCharacterId,
+    );
+    if (!instance) return null;
+    for (const id of instance.broughtItemIds) {
+      if (instance.spentItemIds.includes(id)) continue;
+      if (getItem(id)?.effect.kind === 'shield-when-attacked') return id;
+    }
+    return null;
+  }
+
   private fireTrackedTrigger(
     p: PlayerEntry,
     kind: PersistentTrigger['kind'],
@@ -1131,10 +1514,28 @@ export class Room {
     if (!p) return { ok: false, reason: 'no_player' };
     if (p.shortRestPending) return { ok: false, reason: 'already_resting' };
     if (p.discard.length < 2) return { ok: false, reason: 'need_two_in_discard' };
+    // Battle goals: emit the rest before its own card loss (per the
+    // ordering contract Daredevil relies on). Hand size is captured before
+    // the discard pile returns to hand.
+    {
+      const cid = this.charIdForPlayer(playerId);
+      if (cid) {
+        this.emitBG({
+          kind: 'rest',
+          characterId: cid,
+          restKind: 'short',
+          handSizeAtRest: p.hand.length,
+        });
+      }
+    }
     const idx = Math.floor(Math.random() * p.discard.length);
     const [lost] = p.discard.splice(idx, 1);
     if (!lost) return { ok: false, reason: 'no_player' };
     p.lost.push(lost);
+    {
+      const cid = this.charIdForPlayer(playerId);
+      if (cid) this.emitBG({ kind: 'card_lost', characterId: cid, count: 1 });
+    }
     const returned = p.discard.slice();
     p.hand.push(...returned);
     p.discard = [];
@@ -1224,6 +1625,17 @@ export class Room {
         this.autoLootForUnit(unit);
         const removed = tickConditionsEndOfTurn(unit);
         for (const k of removed) this.pushEvent(`${unit.name} is no longer ${k}ed.`);
+        // Battle goals: snapshot the end-of-turn position.
+        const cid = this.charIdForUnit(unit);
+        if (cid) {
+          this.emitBG({
+            kind: 'turn_end_position',
+            characterId: cid,
+            adjacentCharacterCount: this.adjacentCharacterCount(unit),
+            adjacentToWallObstacleOrObjective:
+              this.isAdjacentToWallObstacleOrObjective(unit.hex),
+          });
+        }
       }
       // End-of-turn element infusion: every queued concrete element jumps to
       // the strong column. Multiple queued infusions of the same element all
@@ -1301,6 +1713,12 @@ export class Room {
       ? basicActions(slot)
       : buildActionQueue(half, this.riderSources);
 
+    // Winged Shoes (or similar) granted Jump to every move this turn — apply
+    // it to moves in this freshly-built queue too.
+    if (ct.jumpAllMoves) {
+      for (const a of actions) if (a.type === 'move') a.jump = true;
+    }
+
     target.status = 'engaged';
     target.cardId = cardId;
     target.useBasic = useBasic;
@@ -1368,6 +1786,27 @@ export class Room {
         // create-element steps. Rule: only applies when at least one ability
         // of the action was performed (gated by performedCount > 0 above).
         this.queueInfusionsFromHalf(ct, half, playerId);
+      }
+    }
+    // Battle goals: a half was performed (basic or printed). `lost` reflects a
+    // lost-icon printed half; basic actions discard. targetedAlly is not yet
+    // detected (TODO — needs action-target inspection; affects Promoter).
+    if (target.performedCount > 0) {
+      const cid = this.charIdForPlayer(playerId);
+      if (cid) {
+        let lost = false;
+        if (!target.useBasic && target.cardId) {
+          const card = guard.p.hand.find((c) => c.id === target.cardId);
+          const half = card ? (slot === 'top' ? card.top : card.bottom) : null;
+          lost = half?.disposition === 'lost';
+        }
+        this.emitBG({
+          kind: 'ability_performed',
+          characterId: cid,
+          lost,
+          basic: target.useBasic,
+          targetedAlly: false,
+        });
       }
     }
     void this.persist();
@@ -1540,6 +1979,57 @@ export class Room {
             ? [startHex, ...target.path]
             : [startHex, target.hex];
         this.lastMove = { id: this.nextMoveId++, unitId: unit.id, path: animPath };
+        // Battle goals: movement signals. `animPath` includes the start hex
+        // at [0] and the destination at the end. Pass-through detection only
+        // works when the client supplied an explicit path.
+        {
+          const cid = this.charIdForUnit(unit);
+          if (cid) {
+            this.emitBG({
+              kind: 'character_moved',
+              characterId: cid,
+              hexes: stepsTaken,
+              forced: false,
+            });
+            // Duelist: each enemy-adjacent hex the unit left.
+            for (let i = 0; i < animPath.length - 1; i++) {
+              const from = animPath[i]!;
+              if (
+                this.units.some(
+                  (u) =>
+                    u.kind === 'monster' &&
+                    u.hp > 0 &&
+                    hexDistance(u.hex, from) === 1,
+                )
+              ) {
+                this.emitBG({
+                  kind: 'exited_enemy_adjacent_hex',
+                  characterId: cid,
+                  forced: false,
+                });
+              }
+            }
+            // Pedestrian: each occupied hex the unit entered (pass-throughs).
+            for (let i = 1; i < animPath.length; i++) {
+              const h = animPath[i]!;
+              const occ = this.units.find(
+                (u) => u.id !== unit.id && u.hp > 0 && hexEqual(u.hex, h),
+              );
+              if (occ) {
+                this.emitBG({
+                  kind: 'entered_occupied_hex',
+                  characterId: cid,
+                  occupant: occ.kind === 'monster' ? 'enemy' : 'ally',
+                });
+              }
+            }
+            // Overachiever: entered a door hex (best-effort — no door
+            // open/closed state is tracked, so re-entries also emit).
+            if (this.isDoorHex(target.hex)) {
+              this.emitBG({ kind: 'door_opened', characterId: cid });
+            }
+          }
+        }
         this.fireTrackedTrigger(guard.p, 'move-ability-performed');
         action.done = true;
         break;
@@ -1579,13 +2069,51 @@ export class Room {
         // bonuses (consumed activeEffects + locked element riders) are added
         // afterward. See cards/types.ts modify-future-attack.doubleAttack.
         const printedAttack = double ? resolvedAmount * 2 : resolvedAmount;
-        const baseAmount = printedAttack + bonusAmt + action.lockedRiderAttack;
+        const baseAmount = printedAttack + bonusAmt + action.lockedRiderAttack + poisonBonus(tgt);
         // Conditional persistent triggers fire BEFORE damage applies, so the
         // "isolated"/"shielded"/"invisible" predicates see pre-attack state.
         this.fireAttackConditionalTriggers(guard.p, unit, tgt, attackKind);
-        const drawn = drawModifier(guard.p);
-        const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
-        const dmg = applyDamage(tgt, finalAmount, action.pierce + bonusPierce + action.lockedRiderPierce);
+        // Advantage sources: Simple Bow designation on this target.
+        // Disadvantage sources: a ranged attack (range > 1) on an ADJACENT
+        // target (distance 1) auto-gains Disadvantage (RAW, target-adjacent).
+        const hasAdvantage = ct.advantageCharge?.unitId === tgt.id;
+        const autoDisadvantage = action.range > 1 && dist === 1;
+        const drawMode = resolveAdvantage(hasAdvantage, autoDisadvantage);
+        // The Simple Bow charge is consumed on this attack even if it cancelled
+        // against the ranged-on-adjacent disadvantage (the item is still spent).
+        if (hasAdvantage) ct.advantageCharge = null;
+        const firstDraw = drawModifier(guard.p);
+        let drawn = firstDraw;
+        let finalAmount = applyModifierToAttack(baseAmount, firstDraw.card);
+        // Advantage/Disadvantage: draw a second modifier and keep the better
+        // (advantage) or worse (disadvantage) result. Both cards discard.
+        let advantageDraw: AdvantageDraw | undefined;
+        if (drawMode) {
+          const second = drawModifier(guard.p);
+          const secondFinal = applyModifierToAttack(baseAmount, second.card);
+          const useSecond =
+            drawMode === 'advantage' ? secondFinal > finalAmount : secondFinal < finalAmount;
+          if (useSecond) {
+            drawn = second;
+            finalAmount = secondFinal;
+          }
+          advantageDraw = {
+            mode: drawMode,
+            cards: [firstDraw.card, second.card],
+            usedIndex: useSecond ? 1 : 0,
+          };
+        }
+        let itemPierce = 0;
+        if (ct.pierceCharge && ct.pierceCharge.unitId === tgt.id) {
+          itemPierce = ct.pierceCharge.amount;
+          ct.pierceCharge = null;
+        }
+        const hpBeforeHit = tgt.hp;
+        const dmg = applyDamage(
+          tgt,
+          finalAmount,
+          action.pierce + bonusPierce + action.lockedRiderPierce + itemPierce,
+        );
         ct.lastModifierDraws.push({
           id: nextDrawId(),
           card: drawn.card,
@@ -1594,12 +2122,52 @@ export class Room {
           baseAmount,
           finalAmount,
           damageDealt: dmg,
+          ...(advantageDraw ? { advantageDraw } : {}),
         });
+        const drawTag = advantageDraw
+          ? advantageDraw.mode === 'advantage'
+            ? ' [Advantage]'
+            : ' [Disadvantage]'
+          : hasAdvantage && autoDisadvantage
+            ? ' [Advantage + Disadvantage cancel]'
+            : '';
         this.pushEvent(
-          `${unit.name} attacks ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
+          `${unit.name} attacks ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg})${itemPierce ? ` [Pierce ${itemPierce}]` : ''}${drawTag}.`,
         );
+        // Poison Dagger: apply Poison if this target was designated, the attack
+        // didn't miss, and the target survives (a kill can't be poisoned).
+        if (
+          ct.poisonCharge &&
+          ct.poisonCharge.unitId === tgt.id &&
+          drawn.card.kind !== 'null' &&
+          tgt.hp > 0 &&
+          !unitImmuneTo(tgt, 'poison')
+        ) {
+          applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
+          this.pushEvent(`${tgt.name} is Poisoned.`);
+        }
+        if (ct.poisonCharge && ct.poisonCharge.unitId === tgt.id) ct.poisonCharge = null;
+        // Battle goals: this character attacked an enemy.
+        {
+          const attackerCid = this.charIdForUnit(unit);
+          if (attackerCid) {
+            this.emitBG({
+              kind: 'attack',
+              attackerCharacterId: attackerCid,
+              targetUnitId: tgt.id,
+              targetHasActedThisRound: this.monstersActedThisRound.has(tgt.id),
+            });
+          }
+        }
         if (tgt.hp <= 0) {
-          this.dropMoneyTokenOnDeath(tgt);
+          this.recordEnemyKilled(tgt, {
+            killerCharacterId: this.charIdForUnit(unit),
+            byAttack: true,
+            finalDamage: finalAmount,
+            hpBeforeHit,
+            attackAdvantage: advantageDraw ? advantageDraw.mode : 'normal',
+            killerHex: unit.hex,
+          });
           this.units = this.units.filter((u) => u.id !== tgt.id);
           this.pushEvent(`${tgt.name} is exhausted!`);
         }
@@ -1651,13 +2219,23 @@ export class Room {
           // target branch above for the rationale). Applied per-target so a
           // future per-target doubling effect can slot in here.
           const printedAttack = double ? resolvedAmount * 2 : resolvedAmount;
-          const baseAmount = printedAttack + bonusAmt + action.lockedRiderAttack;
+          const baseAmount = printedAttack + bonusAmt + action.lockedRiderAttack + poisonBonus(tgt);
           // Per-target conditional triggers (isolated/shielded/invisible).
           // AOE attacks are treated as melee for the shielded check.
           this.fireAttackConditionalTriggers(guard.p, unit, tgt, 'melee');
           const drawn = drawModifier(guard.p);
           const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
-          const dmg = applyDamage(tgt, finalAmount, action.pierce + bonusPierce + action.lockedRiderPierce);
+          let itemPierce = 0;
+          if (ct.pierceCharge && ct.pierceCharge.unitId === tgt.id) {
+            itemPierce = ct.pierceCharge.amount;
+            ct.pierceCharge = null;
+          }
+          const hpBeforeHit = tgt.hp;
+          const dmg = applyDamage(
+            tgt,
+            finalAmount,
+            action.pierce + bonusPierce + action.lockedRiderPierce + itemPierce,
+          );
           ct.lastModifierDraws.push({
             id: nextDrawId(),
             card: drawn.card,
@@ -1668,9 +2246,38 @@ export class Room {
             damageDealt: dmg,
           });
           this.pushEvent(
-            `${unit.name} hits ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
+            `${unit.name} hits ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg})${itemPierce ? ` [Pierce ${itemPierce}]` : ''}.`,
           );
+          if (
+            ct.poisonCharge &&
+            ct.poisonCharge.unitId === tgt.id &&
+            drawn.card.kind !== 'null' &&
+            tgt.hp > 0 &&
+            !unitImmuneTo(tgt, 'poison')
+          ) {
+            applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
+            this.pushEvent(`${tgt.name} is Poisoned.`);
+          }
+          if (ct.poisonCharge && ct.poisonCharge.unitId === tgt.id) ct.poisonCharge = null;
+          {
+            const attackerCid = this.charIdForUnit(unit);
+            if (attackerCid) {
+              this.emitBG({
+                kind: 'attack',
+                attackerCharacterId: attackerCid,
+                targetUnitId: tgt.id,
+                targetHasActedThisRound: this.monstersActedThisRound.has(tgt.id),
+              });
+            }
+          }
           if (tgt.hp <= 0) {
+            this.recordEnemyKilled(tgt, {
+              killerCharacterId: this.charIdForUnit(unit),
+              byAttack: true,
+              finalDamage: finalAmount,
+              hpBeforeHit,
+              killerHex: unit.hex,
+            });
             this.units = this.units.filter((u) => u.id !== tgt.id);
             this.pushEvent(`${tgt.name} is exhausted!`);
           }
@@ -1685,9 +2292,8 @@ export class Room {
       case 'heal': {
         if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
         // Self-only for now (matches our schema). Range ignored.
-        const before = unit.hp;
-        unit.hp = Math.min(unit.hpMax, unit.hp + action.amount);
-        this.pushEvent(`${unit.name} heals ${unit.hp - before}.`);
+        const restored = this.healUnit(unit, action.amount);
+        this.pushEvent(`${unit.name} heals ${restored}.`);
         action.done = true;
         break;
       }
@@ -1729,6 +2335,20 @@ export class Room {
         if (!tgt) return { ok: false, reason: 'no_target' };
         if (tgt.kind === 'player') return { ok: false, reason: 'cannot_target_ally' };
         if (hexDistance(unit.hex, tgt.hex) > action.range) return { ok: false, reason: 'out_of_range' };
+        // Battle goals (Tormentor): capture the enemy's prior negative
+        // conditions before applying the new one.
+        {
+          const cid = this.charIdForUnit(unit);
+          if (cid) {
+            this.emitBG({
+              kind: 'condition_applied',
+              byCharacterId: cid,
+              targetIsEnemy: true,
+              condition: action.condition,
+              targetPriorNegativeConditions: tgt.conditions.map((c) => c.kind),
+            });
+          }
+        }
         applyConditionToUnit(tgt, action.condition, /*isOwnTurn*/ false);
         this.pushEvent(`${tgt.name} is ${action.condition}ed.`);
         action.done = true;
@@ -1794,6 +2414,14 @@ export class Room {
       }
     }
     if (action.type !== 'unsupported') slot.performedCount += 1;
+    // Track whether an action from a Lost-disposition half was performed this
+    // turn (gates items like Focusing Rod). The top slot plays the leading
+    // card's top half; the bottom slot plays the second card's bottom half.
+    if (action.type !== 'unsupported' && !slot.useBasic && slot.cardId) {
+      const card = guard.p.hand.find((c) => c.id === slot.cardId);
+      const half = card ? (slotKind === 'top' ? card.top : card.bottom) : null;
+      if (half?.disposition === 'lost') ct.performedLostAction = true;
+    }
     const otherSlot = slotKind === 'top' ? ct.bottomSlot : ct.topSlot;
     // Auto-finish only when the other half is still pending — leaves the
     // final half engaged so the client can show an explicit End Turn button.
@@ -2047,8 +2675,45 @@ export class Room {
     this.pendingForcedMove = null;
       return;
     }
+    // Battle goals: a new turn is starting. characterId is the acting
+    // character, or null for a monster-group turn.
+    this.emitBG({
+      kind: 'turn_start',
+      characterId:
+        cur.kind === 'player' ? this.charIdForPlayer(cur.playerId) : null,
+    });
     if (cur.kind === 'player') {
       const unit = this.units.find((u) => u.id === cur.unitId);
+      // Long rest takes over the whole turn (Card Selection step, init 99).
+      // No currentTurn slots — the player walks through choose-lost +
+      // optional heal/items via longRestPending instead.
+      const p = this.players.get(cur.playerId);
+      if (p && p.selection?.kind === 'long_rest') {
+        if (unit && hasCondition(unit, 'stun')) {
+          this.pushEvent(`${unit.name} is stunned — long rest fails.`);
+          const removed = tickConditionsEndOfTurn(unit);
+          for (const k of removed) this.pushEvent(`${unit.name} is no longer ${k}ed.`);
+          cur.done = true;
+          this.currentTurn = null;
+          this.pendingForcedMove = null;
+          if (this.activeTurnIndex + 1 < this.turnOrder.length) {
+            this.activeTurnIndex += 1;
+            this.openTurn();
+          } else {
+            this.advanceToNextRound();
+          }
+          return;
+        }
+        const candidates = this.effectiveDiscardForRest(p).map((c) => c.id);
+        p.longRestPending = {
+          step: 'choose_lost',
+          candidateCardIds: candidates,
+          healUsed: false,
+        };
+        this.currentTurn = null;
+        this.pendingForcedMove = null;
+        return;
+      }
       // Stunned players cannot perform any abilities — auto-skip their turn.
       if (unit && hasCondition(unit, 'stun')) {
         this.pushEvent(`${unit.name} is stunned and skips their turn.`);
@@ -2083,6 +2748,11 @@ export class Room {
         turnStartElementBoard: { ...this.elementBoard },
         pendingInfusions: [],
         consumedThisTurn: [],
+        jumpAllMoves: false,
+        pierceCharge: null,
+        poisonCharge: null,
+        advantageCharge: null,
+        performedLostAction: false,
       };
       // New turn → fresh rider-source map (the previous turn's are stale).
       this.riderSources = new Map();
@@ -2109,12 +2779,18 @@ export class Room {
     this.advanceMonsterAnim();
   }
 
-  private advanceMonsterAnim(): void {
+  private advanceMonsterAnim(resume?: unknown): void {
     const gen = this.monsterAnimGen;
     if (!gen) return;
-    const result = gen.next();
+    const result = gen.next(resume);
     if (result.done) {
       this.finishMonsterGroupAnim();
+      return;
+    }
+    // A reactive-item prompt suspends the animation: broadcast the pending
+    // prompt and stop the timer. respondReactiveItem() resumes the generator.
+    if (result.value === 'await-prompt') {
+      this.broadcastState();
       return;
     }
     this.broadcastState();
@@ -2122,6 +2798,17 @@ export class Room {
       this.monsterAnimTimer = null;
       this.advanceMonsterAnim();
     }, MONSTER_ANIM_STEP_MS);
+  }
+
+  /** Answer a pending reactive-item prompt and resume the monster animation. */
+  respondReactiveItem(playerId: string, spend: boolean): void {
+    const pending = this.pendingReactiveItem;
+    if (!pending || pending.playerId !== playerId) return;
+    if (!this.monsterAnimGen) {
+      this.pendingReactiveItem = null;
+      return;
+    }
+    this.advanceMonsterAnim(spend);
   }
 
   /** Host-driven fast-forward: drain any remaining yields synchronously,
@@ -2151,8 +2838,17 @@ export class Room {
       this.monsterAnimTimer = null;
     }
     this.monsterTurnAnim = null;
+    this.pendingReactiveItem = null;
     const cur = this.turnOrder[this.activeTurnIndex];
     if (cur) cur.done = true;
+    // Battle goals: this group has now acted this round.
+    if (cur && cur.kind === 'monster-group') {
+      for (const u of this.units) {
+        if (u.kind === 'monster' && monsterDefMatchesSet(u.defId, cur.setId)) {
+          this.monstersActedThisRound.add(u.id);
+        }
+      }
+    }
     // Retaliate during the monster group's turn may have cleared the last
     // monster — wrap up before advancing.
     this.checkScenarioEnd();
@@ -2169,6 +2865,275 @@ export class Room {
     this.broadcastState();
   }
 
+  /**
+   * Pick the targets a monster attack hits from a standing hex: its focus
+   * first (required — fixed by the focus step), then the nearest other enemies
+   * within range and line-of-sight, up to the card's Target count. Returns []
+   * if the focus itself can't be reached from `from`.
+   */
+  private selectAttackTargets(
+    from: Hex,
+    focusId: string,
+    range: number,
+    maxTargets: number,
+  ): Unit[] {
+    const inRange = (u: Unit): boolean => {
+      if (u.kind !== 'player') return false;
+      const d = hexDistance(from, u.hex);
+      if (d < 1 || d > range) return false;
+      if (range > 1 && !this.hasLOS(from, u.hex)) return false;
+      return true;
+    };
+    const focusU = this.units.find((u) => u.id === focusId && inRange(u));
+    if (!focusU) return [];
+    const others = this.units
+      .filter((u) => u.id !== focusId && inRange(u))
+      .sort((a, b) => hexDistance(from, a.hex) - hexDistance(from, b.hex));
+    return [focusU, ...others.slice(0, Math.max(0, maxTargets - 1))];
+  }
+
+  /**
+   * Resolve a single monster attack against one target — draw (with
+   * Disadvantage where it applies), reactive items, damage, condition riders,
+   * and retaliate. A generator so the caller can `yield*` it per target; it
+   * yields animation beats and `'await-prompt'` for reactive-item prompts.
+   */
+  private *resolveMonsterAttackOnTarget(
+    m: Unit,
+    tgtUnit: Unit,
+    attack: { damage: number; effects: readonly MonsterAttackEffect[] },
+    range: number,
+    setId: string,
+    abilityCardName: string,
+  ): Generator<unknown, void, unknown> {
+    // Persistent-tracked: a monster attack targeting a player fires
+    // 'attack-targets-self' on that player's active cards BEFORE the draw.
+    const targetPlayerEntry = tgtUnit.ownerPlayerId
+      ? this.players.get(tgtUnit.ownerPlayerId)
+      : null;
+    if (targetPlayerEntry) this.fireTrackedTrigger(targetPlayerEntry, 'attack-targets-self');
+
+    // Reactive item: before drawing, offer the target a chance to spend a
+    // disadvantage-when-attacked item (e.g. Leather Armor).
+    let disadvantage = false;
+    if (targetPlayerEntry) {
+      const reactiveId = this.findReactiveDisadvantageItem(targetPlayerEntry);
+      if (reactiveId) {
+        const reactiveItem = getItem(reactiveId)!;
+        this.pendingReactiveItem = {
+          playerId: targetPlayerEntry.playerId,
+          itemId: reactiveId,
+          attackerName: m.name,
+          targetUnitId: tgtUnit.id,
+          prompt: `${m.name} is attacking ${tgtUnit.name}. Spend ${reactiveItem.name} to give the attacker Disadvantage?`,
+        };
+        const spend = yield 'await-prompt';
+        this.pendingReactiveItem = null;
+        if (spend) {
+          disadvantage = true;
+          const inst = this.campaign.characters.find(
+            (c) => c.id === targetPlayerEntry.activeCharacterId,
+          );
+          if (inst && !inst.spentItemIds.includes(reactiveId)) {
+            inst.spentItemIds.push(reactiveId);
+          }
+          this.pushEvent(
+            `${tgtUnit.name} spends ${reactiveItem.name}: ${m.name} attacks with Disadvantage.`,
+          );
+        }
+      }
+    }
+
+    // RAW: a ranged attack (range > 1) on an ADJACENT target (distance 1)
+    // auto-gains Disadvantage. Does not stack with Leather Armor's.
+    const rangedOnAdjacent = range > 1 && hexDistance(m.hex, tgtUnit.hex) === 1;
+    if (rangedOnAdjacent && !disadvantage) {
+      this.pushEvent(`${m.name} fires at adjacent ${tgtUnit.name}: Disadvantage.`);
+    }
+    disadvantage = disadvantage || rangedOnAdjacent;
+
+    // Roll the shared monster attack-modifier deck. Disadvantage draws two
+    // cards and uses the worse (lower-damage) result.
+    const firstDraw = this.drawMonsterModifier();
+    let drawn = firstDraw;
+    const baseAmount = attack.damage + poisonBonus(tgtUnit);
+    let finalAmount = applyModifierToAttack(baseAmount, firstDraw.card);
+    let advantageDraw: AdvantageDraw | undefined;
+    if (disadvantage) {
+      const second = this.drawMonsterModifier();
+      const secondFinal = applyModifierToAttack(baseAmount, second.card);
+      const useSecond = secondFinal < finalAmount;
+      if (useSecond) {
+        drawn = second;
+        finalAmount = secondFinal;
+      }
+      advantageDraw = {
+        mode: 'disadvantage',
+        cards: [firstDraw.card, second.card],
+        usedIndex: useSecond ? 1 : 0,
+      };
+    }
+
+    // Step 3 — modifier draw reveal.
+    this.monsterTurnAnim = {
+      setId,
+      abilityCardName,
+      activeMonsterId: m.id,
+      targetUnitId: tgtUnit.id,
+      phase: 'modifier-draw',
+      modifierDraw: {
+        card: drawn.card,
+        baseAmount,
+        finalAmount,
+        damageDealt: null,
+        targetUnitId: tgtUnit.id,
+        targetName: tgtUnit.name,
+        ...(advantageDraw ? { advantageDraw } : {}),
+      },
+    };
+    yield;
+
+    // Compute damage (shield/pierce) without applying hp yet, so a
+    // damage-suffered trigger (Juggernaut → negate-damage) can interpose.
+    let effShield = Math.max(0, tgtUnit.shield);
+    if (finalAmount > 0 && targetPlayerEntry) {
+      effShield += this.consumeActiveItemShield(targetPlayerEntry);
+    }
+    // Reactive item: Heater Shield. Offer only if damage would still get
+    // through existing shields.
+    if (finalAmount - effShield > 0 && targetPlayerEntry) {
+      const shieldId = this.findReactiveShieldItem(targetPlayerEntry);
+      if (shieldId) {
+        const shieldItem = getItem(shieldId)!;
+        const amt =
+          shieldItem.effect.kind === 'shield-when-attacked' ? shieldItem.effect.amount : 0;
+        this.pendingReactiveItem = {
+          playerId: targetPlayerEntry.playerId,
+          itemId: shieldId,
+          attackerName: m.name,
+          targetUnitId: tgtUnit.id,
+          prompt: `${m.name} hits ${tgtUnit.name} for ${finalAmount}. Spend ${shieldItem.name} to gain Shield ${amt} for this attack?`,
+        };
+        const spend = yield 'await-prompt';
+        this.pendingReactiveItem = null;
+        if (spend) {
+          effShield += amt;
+          const inst = this.campaign.characters.find(
+            (c) => c.id === targetPlayerEntry.activeCharacterId,
+          );
+          if (inst && !inst.spentItemIds.includes(shieldId)) {
+            inst.spentItemIds.push(shieldId);
+          }
+          this.pushEvent(
+            `${tgtUnit.name} spends ${shieldItem.name}: Shield ${amt} for this attack.`,
+          );
+        }
+      }
+    }
+    // Battle goals: this enemy attack targets a character (hit or not).
+    {
+      const targetCid = this.charIdForUnit(tgtUnit);
+      if (targetCid) {
+        this.emitBG({
+          kind: 'targeted_by_enemy_attack',
+          targetCharacterId: targetCid,
+          enemyUnitId: m.id,
+        });
+      }
+    }
+    let dmg = Math.max(0, finalAmount - effShield);
+    if (dmg > 0 && targetPlayerEntry) {
+      const result = this.fireTrackedTrigger(targetPlayerEntry, 'damage-suffered');
+      if (result.damageNegated) dmg = 0;
+    }
+    tgtUnit.hp -= dmg;
+    // Battle goals: the character actually suffered attack damage.
+    if (dmg > 0) {
+      const targetCid = this.charIdForUnit(tgtUnit);
+      if (targetCid) {
+        this.emitBG({
+          kind: 'damage_suffered',
+          characterId: targetCid,
+          amount: dmg,
+          fromAttack: true,
+        });
+        this.emitBG({
+          kind: 'hp_changed',
+          characterId: targetCid,
+          currentHp: Math.max(0, tgtUnit.hp),
+          maxHp: tgtUnit.hpMax,
+        });
+      }
+    }
+    this.pushEvent(
+      `${m.name} attacks ${tgtUnit.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
+    );
+
+    // Step 4 — damage applied.
+    this.monsterTurnAnim = {
+      setId,
+      abilityCardName,
+      activeMonsterId: m.id,
+      targetUnitId: tgtUnit.id,
+      phase: 'damage',
+      modifierDraw: {
+        card: drawn.card,
+        baseAmount,
+        finalAmount,
+        damageDealt: dmg,
+        targetUnitId: tgtUnit.id,
+        targetName: tgtUnit.name,
+        ...(advantageDraw ? { advantageDraw } : {}),
+      },
+    };
+    yield;
+
+    if (tgtUnit.hp <= 0) {
+      const exhaustedCid = this.charIdForUnit(tgtUnit);
+      if (exhaustedCid) {
+        this.emitBG({
+          kind: 'character_exhausted',
+          characterId: exhaustedCid,
+          cause: 'hp',
+        });
+      }
+      this.units = this.units.filter((u) => u.id !== tgtUnit.id);
+      this.pushEvent(`${tgtUnit.name} is exhausted!`);
+    } else {
+      // Condition riders (e.g. Poison, Muddle) apply to the surviving target
+      // when the attack didn't miss and the target isn't immune.
+      if (drawn.card.kind !== 'null') {
+        for (const eff of attack.effects) {
+          if (eff.kind !== 'apply-condition') continue;
+          if (!SUPPORTED_CONDITIONS.has(eff.condition)) continue;
+          if (unitImmuneTo(tgtUnit, eff.condition)) continue;
+          applyConditionToUnit(tgtUnit, eff.condition, /*isOwnTurn*/ false);
+          this.pushEvent(`${tgtUnit.name} is ${eff.condition}ed.`);
+        }
+      }
+      // Retaliate: if the player target has retaliate active and the monster
+      // is within retaliate range, deal back damage to the monster.
+      const targetPlayer = tgtUnit.ownerPlayerId ? this.players.get(tgtUnit.ownerPlayerId) : null;
+      if (targetPlayer) {
+        const ret = retaliateAgainst(targetPlayer, hexDistance(m.hex, tgtUnit.hex));
+        if (ret) {
+          const back = applyDamage(m, ret.amount, 0);
+          this.pushEvent(`${tgtUnit.name} retaliates ${m.name} for ${back}.`);
+          if (m.hp <= 0) {
+            // Retaliate is not an attack — byAttack: false.
+            this.recordEnemyKilled(m, {
+              killerCharacterId: this.charIdForUnit(tgtUnit),
+              byAttack: false,
+              killerHex: tgtUnit.hex,
+            });
+            this.units = this.units.filter((u) => u.id !== m.id);
+            this.pushEvent(`${m.name} is exhausted!`);
+          }
+        }
+      }
+    }
+  }
+
   /** Step-paced monster group turn resolver.
    *
    *  Each `yield` is a visible beat for clients (focus, move, modifier flip,
@@ -2179,7 +3144,7 @@ export class Room {
    *
    *  Semantically identical to the previous sync resolver: same focus AI,
    *  same modifier draw timing, same retaliate / death / infusion handling. */
-  private *runMonsterGroupAnim(): Generator<void, void, void> {
+  private *runMonsterGroupAnim(): Generator<unknown, void, unknown> {
     const cur = this.turnOrder[this.activeTurnIndex];
     if (!cur || cur.kind !== 'monster-group') return;
     const def = MONSTER_DEF_BY_SETID[cur.setId];
@@ -2241,6 +3206,8 @@ export class Room {
       ? {
           range: baseAbility.attack.range + consumedRangeBonus,
           damage: baseAbility.attack.damage + consumedAttackBonus,
+          targets: baseAbility.attack.targets,
+          effects: baseAbility.attack.effects,
         }
       : null;
     const range = attack?.range ?? 1;
@@ -2310,20 +3277,33 @@ export class Room {
       // along the path (the existing useMoveAnim hook handles the slide).
       if (canMove && move) {
         const startHex = m.hex;
-        const dest = walkPath(m.hex, focus.path, move.budget, range, focus.enemy.hex);
-        if (!hexEqual(dest, m.hex)) {
-          // Build the slide animation path: [start, step1, step2, ..., dest].
-          // dest is one of the entries in focus.path (walkPath truncates the
-          // planned path to the move budget), so take the prefix up to and
-          // including dest. Fallback to a direct [start, dest] if for some
-          // reason dest isn't on the path.
-          const destIdx = focus.path.findIndex((h) => hexEqual(h, dest));
-          const walked = destIdx >= 0 ? focus.path.slice(0, destIdx + 1) : [dest];
-          const animPath: Hex[] = [startHex, ...walked];
+        const maxTargets = attack?.targets ?? 1;
+        // What an attack achieves from a candidate hex: how many targets it
+        // lands (focus + nearest others within range/LOS, capped at the card's
+        // Target count) and how many of those are ranged-on-adjacent
+        // (Disadvantage). determineMovement uses this to pick a hex that
+        // maximizes attacks while minimizing disadvantage.
+        const evaluateFrom = (from: Hex): DestinationEval => {
+          const set = this.selectAttackTargets(from, focus.enemy.id, range, maxTargets);
+          const disadvantaged =
+            range > 1 ? set.filter((u) => hexDistance(from, u.hex) === 1).length : 0;
+          return { canHitFocus: set.length > 0, attacks: set.length, disadvantaged };
+        };
+        const plan = determineMovement(
+          m,
+          focus,
+          range,
+          move.budget,
+          { tiles: this.scenarioTiles(), units: this.units },
+          evaluateFrom,
+        );
+        if (!hexEqual(plan.destination, m.hex)) {
+          const animPath: Hex[] =
+            plan.path.length > 0 ? plan.path : [startHex, plan.destination];
           this.pushEvent(
-            `${m.name} moves to (${dest.q},${dest.r}) toward ${focus.enemy.name}.`,
+            `${m.name} moves to (${plan.destination.q},${plan.destination.r}) toward ${focus.enemy.name}.`,
           );
-          m.hex = dest;
+          m.hex = plan.destination;
           this.lastMove = { id: this.nextMoveId++, unitId: m.id, path: animPath };
           anyMemberActed = true;
           this.monsterTurnAnim = {
@@ -2340,99 +3320,32 @@ export class Room {
 
       // Attack — re-check range from final position; focus may be dead from a prior monster.
       const focusUnit = this.units.find((u) => u.id === focus.enemy.id);
-      const losOk = focusUnit
-        ? range <= 1 || this.hasLOS(m.hex, focusUnit.hex)
-        : false;
-      if (canAttack && attack && focusUnit && hexDistance(m.hex, focusUnit.hex) <= range && losOk) {
+      // Build the attack's target set from the monster's final position: focus
+      // first, then the nearest other enemies in range/LOS, capped at the
+      // card's Target count. Each is resolved as its own attack (own draw,
+      // reactive prompts, damage, conditions, retaliate).
+      const targetSet =
+        canAttack && attack && focusUnit
+          ? this.selectAttackTargets(m.hex, focusUnit.id, range, attack.targets)
+          : [];
+      if (attack && targetSet.length > 0) {
         anyMemberActed = true;
-        // Persistent-tracked: a monster attack targeting a player fires
-        // 'attack-targets-self' on that player's active cards, BEFORE the
-        // damage is rolled (matches rulebook timing: the bonus reacts to the
-        // attack, then the attack resolves).
-        const targetPlayerEntry = focusUnit.ownerPlayerId
-          ? this.players.get(focusUnit.ownerPlayerId)
-          : null;
-        if (targetPlayerEntry) this.fireTrackedTrigger(targetPlayerEntry, 'attack-targets-self');
-        // Roll the shared monster attack-modifier deck. Null zeroes the
-        // attack; ×2 doubles; flat ±N adjusts. Result is clamped at 0
-        // before Shield reduces further.
-        const drawn = this.drawMonsterModifier();
-        const baseAmount = attack.damage;
-        const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
-
-        // Step 3 — modifier draw reveal. Show the card face-up before any
-        // hp changes so the party can read the result.
-        this.monsterTurnAnim = {
-          setId,
-          abilityCardName,
-          activeMonsterId: m.id,
-          targetUnitId: focusUnit.id,
-          phase: 'modifier-draw',
-          modifierDraw: {
-            card: drawn.card,
-            baseAmount,
-            finalAmount,
-            damageDealt: null,
-            targetUnitId: focusUnit.id,
-            targetName: focusUnit.name,
-          },
-        };
-        yield;
-
-        // Compute damage (shield/pierce) without applying hp yet, so a
-        // damage-suffered trigger (Juggernaut → negate-damage) can interpose.
-        const effShield = Math.max(0, focusUnit.shield);
-        let dmg = Math.max(0, finalAmount - effShield);
-        if (dmg > 0 && targetPlayerEntry) {
-          const result = this.fireTrackedTrigger(targetPlayerEntry, 'damage-suffered');
-          if (result.damageNegated) dmg = 0;
-        }
-        focusUnit.hp -= dmg;
-        this.pushEvent(
-          `${m.name} attacks ${focusUnit.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg}).`,
-        );
-
-        // Step 4 — damage applied. Keep the card visible while hp ticks
-        // down so the cause/effect reads clearly.
-        this.monsterTurnAnim = {
-          setId,
-          abilityCardName,
-          activeMonsterId: m.id,
-          targetUnitId: focusUnit.id,
-          phase: 'damage',
-          modifierDraw: {
-            card: drawn.card,
-            baseAmount,
-            finalAmount,
-            damageDealt: dmg,
-            targetUnitId: focusUnit.id,
-            targetName: focusUnit.name,
-          },
-        };
-        yield;
-
-        if (focusUnit.hp <= 0) {
-          this.units = this.units.filter((u) => u.id !== focusUnit.id);
-          this.pushEvent(`${focusUnit.name} is exhausted!`);
-        } else {
-          // Retaliate: if the player target has retaliate active and the monster
-          // is within retaliate range, deal back damage to the monster.
-          const targetPlayer = focusUnit.ownerPlayerId ? this.players.get(focusUnit.ownerPlayerId) : null;
-          if (targetPlayer) {
-            const ret = retaliateAgainst(targetPlayer, hexDistance(m.hex, focusUnit.hex));
-            if (ret) {
-              const back = applyDamage(m, ret.amount, 0);
-              this.pushEvent(`${focusUnit.name} retaliates ${m.name} for ${back}.`);
-              if (m.hp <= 0) {
-                this.dropMoneyTokenOnDeath(m);
-                this.units = this.units.filter((u) => u.id !== m.id);
-                this.pushEvent(`${m.name} is exhausted!`);
-              }
-            }
-          }
+        for (const tgtUnit of targetSet) {
+          // A target may have been removed earlier in this volley (or by
+          // retaliate); skip anything no longer on the board.
+          if (!this.units.some((u) => u.id === tgtUnit.id)) continue;
+          yield* this.resolveMonsterAttackOnTarget(
+            m,
+            tgtUnit,
+            attack,
+            range,
+            setId,
+            abilityCardName,
+          );
+          if (m.hp <= 0) break; // monster died to retaliate — stop attacking
         }
       } else if (canAttack && attack && focusUnit) {
-        if (!losOk) {
+        if (range > 1 && !this.hasLOS(m.hex, focusUnit.hex)) {
           this.pushEvent(`${m.name} has no line-of-sight to ${focusUnit.name}.`);
         } else {
           this.pushEvent(`${m.name} cannot reach ${focusUnit.name}.`);
@@ -2519,7 +3432,21 @@ export class Room {
    *  every actor in the current round has resolved their turn. Does NOT
    *  broadcast — callers do that after their own state changes. */
   private advanceToNextRound(): void {
+    // Battle goals: snapshot each living character's end-of-round position
+    // before the round closes, then mark the next round's start.
+    for (const u of this.units) {
+      const cid = this.charIdForUnit(u);
+      if (!cid) continue;
+      this.emitBG({
+        kind: 'round_end_position',
+        characterId: cid,
+        onDoorHex: this.isDoorHex(u.hex),
+        adjacentEnemyCount: this.adjacentEnemyCount(u),
+      });
+    }
     this.round += 1;
+    this.monstersActedThisRound.clear();
+    this.emitBG({ kind: 'round_start', round: this.round });
     this.turnOrder = [];
     this.activeTurnIndex = 0;
     for (const p of this.players.values()) p.selection = null;
@@ -2577,6 +3504,19 @@ export class Room {
         });
       } else {
         const leadingCard = p.hand.find((c) => c.id === sel.leadingId);
+        const secondCard = p.hand.find((c) => c.id === sel.secondId);
+        // Battle goals (Dawdler): did the player use the lower-initiative
+        // (slower) of their two played cards? Equal counts as "lowest".
+        const cid = this.charIdForPlayer(p.playerId);
+        if (cid) {
+          const li = leadingCard?.initiative ?? 99;
+          const si = secondCard?.initiative ?? 99;
+          this.emitBG({
+            kind: 'initiative_chosen',
+            characterId: cid,
+            usedLowestOfPlayed: li <= si,
+          });
+        }
         order.push({
           kind: 'player',
           playerId: p.playerId,
@@ -2646,6 +3586,11 @@ export class Room {
       claimedByPlayerId: playerId,
       gold: 0,
       loadout: null,
+      ownedItemIds: [],
+      broughtItemIds: [],
+      spentItemIds: [],
+      activeItems: [],
+      battleGoalCheckmarks: 0,
     };
 
     this.campaign.characters.push(instance);
@@ -2731,6 +3676,289 @@ export class Room {
     }
     instance.loadout = [...cardIds];
     void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  buyItem(
+    playerId: string,
+    itemId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (instance.claimedByPlayerId !== playerId) {
+      return { ok: false, reason: 'not_your_character' };
+    }
+    if (this.phase !== 'lobby') {
+      return { ok: false, reason: 'can_only_buy_in_lobby' };
+    }
+    const item = getItem(itemId);
+    if (!item) return { ok: false, reason: 'unknown_item' };
+    if (instance.ownedItemIds.includes(itemId)) {
+      return { ok: false, reason: 'already_owned' };
+    }
+    if (instance.gold < item.cost) {
+      return { ok: false, reason: 'not_enough_gold' };
+    }
+    const shop = this.campaign.shop ?? [];
+    const stock = shop.find((s) => s.itemId === itemId);
+    if (!stock || stock.remaining <= 0) {
+      return { ok: false, reason: 'out_of_stock' };
+    }
+    stock.remaining -= 1;
+    instance.gold -= item.cost;
+    instance.ownedItemIds.push(itemId);
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  setItemLoadout(
+    playerId: string,
+    itemIds: string[],
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (instance.claimedByPlayerId !== playerId) {
+      return { ok: false, reason: 'not_your_character' };
+    }
+    if (this.phase !== 'lobby') {
+      return { ok: false, reason: 'can_only_set_in_lobby' };
+    }
+    const validation = validateItemLoadout(
+      instance.level,
+      instance.ownedItemIds,
+      itemIds,
+    );
+    if (!validation.ok) return { ok: false, reason: validation.reason };
+    instance.broughtItemIds = [...itemIds];
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  useItem(
+    playerId: string,
+    itemId: string,
+    slot: 'top' | 'bottom' | undefined,
+    actionId: string | undefined,
+    targetUnitId?: string,
+    targetCardId?: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (!instance.broughtItemIds.includes(itemId)) {
+      return { ok: false, reason: 'item_not_brought' };
+    }
+    if (instance.spentItemIds.includes(itemId)) {
+      return { ok: false, reason: 'item_already_spent' };
+    }
+    const item = getItem(itemId);
+    if (!item) return { ok: false, reason: 'unknown_item' };
+    const ct = this.currentTurn;
+    if (!ct) return { ok: false, reason: 'no_active_turn' };
+    const unit = this.units.find((u) => u.id === ct.unitId);
+    if (!unit || unit.ownerPlayerId !== playerId) {
+      return { ok: false, reason: 'not_your_turn' };
+    }
+
+    if (item.effect.kind === 'move-bonus') {
+      if (slot === undefined || actionId === undefined) {
+        return { ok: false, reason: 'item_needs_action_context' };
+      }
+      const halfSlot = slot === 'top' ? ct.topSlot : ct.bottomSlot;
+      const action = halfSlot.actions.find((a) => a.id === actionId);
+      if (!action || action.done) return { ok: false, reason: 'action_unavailable' };
+      if (action.type !== 'move') {
+        return { ok: false, reason: 'item_only_usable_during_move' };
+      }
+      action.amount += item.effect.amount;
+    } else if (item.effect.kind === 'jump-this-turn') {
+      // Turn-scoped: every move this turn gains Jump. Flag future move queues
+      // (set in engageHalf) and patch any moves already queued.
+      ct.jumpAllMoves = true;
+      for (const halfSlot of [ct.topSlot, ct.bottomSlot]) {
+        for (const a of halfSlot.actions) if (a.type === 'move') a.jump = true;
+      }
+    } else if (item.effect.kind === 'shield-on-attack') {
+      // Activate into the active area. Uses are consumed automatically by
+      // incoming attacks; the item becomes spent once they run out.
+      if (instance.activeItems.some((ai) => ai.itemId === itemId)) {
+        return { ok: false, reason: 'item_already_active' };
+      }
+      instance.activeItems.push({ itemId, usesRemaining: item.effect.uses });
+      this.pushEvent(`${instance.name} activates ${item.name}.`);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'heal-self') {
+      // Turn-scoped self-heal. Reject only when it would do nothing — at full HP
+      // with no Poison/Wound to clear — so the single-use item isn't wasted.
+      const canCure = hasCondition(unit, 'poison') || hasCondition(unit, 'wound');
+      if (unit.hp >= unit.hpMax && !canCure) {
+        return { ok: false, reason: 'already_full_hp' };
+      }
+      const restored = this.healUnit(unit, item.effect.amount);
+      this.pushEvent(`${instance.name} uses ${item.name}: heals ${restored}.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'pierce-one-attack') {
+      // Designate one target. The next attack against it this turn ignores
+      // `amount` of its shield. Requires an attack ability to be available.
+      if (targetUnitId === undefined) {
+        return { ok: false, reason: 'item_needs_target' };
+      }
+      const hasAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
+        hs.actions.some(
+          (a) => !a.done && (a.type === 'attack' || a.type === 'attack-aoe'),
+        ),
+      );
+      if (!hasAttack) return { ok: false, reason: 'item_only_usable_during_attack' };
+      const tgt = this.units.find((u) => u.id === targetUnitId);
+      if (!tgt || tgt.kind !== 'monster' || tgt.hp <= 0) {
+        return { ok: false, reason: 'invalid_target' };
+      }
+      ct.pierceCharge = { unitId: targetUnitId, amount: item.effect.amount };
+      this.pushEvent(
+        `${instance.name} uses ${item.name}: Pierce ${item.effect.amount} on ${tgt.name}.`,
+      );
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'poison-one-attack') {
+      // Designate one enemy. The next MELEE attack against it this turn also
+      // applies Poison. Requires a melee attack ability to be available.
+      if (targetUnitId === undefined) {
+        return { ok: false, reason: 'item_needs_target' };
+      }
+      const hasMeleeAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
+        hs.actions.some(
+          (a) =>
+            !a.done &&
+            (a.type === 'attack-aoe' || (a.type === 'attack' && a.range <= 1)),
+        ),
+      );
+      if (!hasMeleeAttack) {
+        return { ok: false, reason: 'item_only_usable_during_melee_attack' };
+      }
+      const tgt = this.units.find((u) => u.id === targetUnitId);
+      if (!tgt || tgt.kind !== 'monster' || tgt.hp <= 0) {
+        return { ok: false, reason: 'invalid_target' };
+      }
+      if (unitImmuneTo(tgt, 'poison')) return { ok: false, reason: 'target_immune' };
+      ct.poisonCharge = { unitId: targetUnitId };
+      this.pushEvent(`${instance.name} uses ${item.name}: Poison on ${tgt.name}.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'advantage-one-attack') {
+      // Designate one target. The next RANGED attack against it this turn draws
+      // with Advantage. Requires a ranged attack ability to be available.
+      if (targetUnitId === undefined) {
+        return { ok: false, reason: 'item_needs_target' };
+      }
+      const hasRangedAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
+        hs.actions.some((a) => !a.done && a.type === 'attack' && a.range > 1),
+      );
+      if (!hasRangedAttack) {
+        return { ok: false, reason: 'item_only_usable_during_ranged_attack' };
+      }
+      const tgt = this.units.find((u) => u.id === targetUnitId);
+      if (!tgt || tgt.kind !== 'monster' || tgt.hp <= 0) {
+        return { ok: false, reason: 'invalid_target' };
+      }
+      ct.advantageCharge = { unitId: targetUnitId };
+      this.pushEvent(`${instance.name} uses ${item.name}: Advantage on ${tgt.name}.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'heal-after-lost') {
+      // Gated: only after performing an action from a Lost-disposition card
+      // this turn. Heals one figure (self or ally) within range.
+      if (!ct.performedLostAction) {
+        return { ok: false, reason: 'no_lost_action_yet' };
+      }
+      if (targetUnitId === undefined) {
+        return { ok: false, reason: 'item_needs_target' };
+      }
+      const tgt = this.units.find((u) => u.id === targetUnitId);
+      if (!tgt || tgt.kind !== 'player') {
+        return { ok: false, reason: 'invalid_target' };
+      }
+      if (hexDistance(unit.hex, tgt.hex) > item.effect.range) {
+        return { ok: false, reason: 'target_out_of_range' };
+      }
+      // Reject only when it would do nothing — full HP with no Poison/Wound to
+      // clear — so the single-use item isn't wasted.
+      const canCure = hasCondition(tgt, 'poison') || hasCondition(tgt, 'wound');
+      if (tgt.hp >= tgt.hpMax && !canCure) {
+        return { ok: false, reason: 'target_full_hp' };
+      }
+      const restored = this.healUnit(tgt, item.effect.amount);
+      this.pushEvent(`${instance.name} uses ${item.name}: heals ${tgt.name} ${restored}.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'retrieve-discarded-card') {
+      // Return one printed-level-N card from the discard pile to hand.
+      if (targetCardId === undefined) {
+        return { ok: false, reason: 'item_needs_card_target' };
+      }
+      const wantLevel = item.effect.cardLevel;
+      const idx = entry.discard.findIndex(
+        (c) => c.id === targetCardId && cardMatchesLevel(c.level, wantLevel),
+      );
+      if (idx === -1) {
+        return { ok: false, reason: 'card_not_in_discard' };
+      }
+      const [card] = entry.discard.splice(idx, 1);
+      if (!card) return { ok: false, reason: 'card_not_in_discard' };
+      entry.hand.push(card);
+      this.pushEvent(`${instance.name} uses ${item.name}: retrieves ${card.name} from the discard pile.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'infuse-element') {
+      // Reuse the element-choice flow: prompt the player to pick any element,
+      // then queue it as a pending infusion (becomes Strong at end of turn).
+      if (this.pendingElementChoice) {
+        return { ok: false, reason: 'resolve_pending_choice_first' };
+      }
+      this.pendingElementChoice = {
+        id: `c${this.nextChoiceN++}`,
+        context: { kind: 'create-element', playerId },
+        options: ALL_ELEMENTS,
+        prompt: `${item.name}: pick an element to infuse`,
+      };
+      this.pendingChoiceFollowup = (picked) => {
+        if (this.currentTurn) {
+          this.currentTurn.pendingInfusions = [...this.currentTurn.pendingInfusions, picked];
+        }
+        this.pendingElementChoice = null;
+        this.pendingChoiceFollowup = null;
+        this.pushEvent(`${instance.name} uses ${item.name}: infuses ${picked}.`);
+      };
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else {
+      return { ok: false, reason: 'effect_not_implemented' };
+    }
+
+    instance.spentItemIds.push(itemId);
+    this.pushEvent(`${instance.name} uses ${item.name}.`);
     this.broadcastState();
     return { ok: true };
   }
@@ -3023,7 +4251,9 @@ export class Room {
       monsterModifierDiscard: this.monsterModifierDiscard,
       monsterModifierNeedsReshuffle: this.monsterModifierNeedsReshuffle,
       monsterTurnAnim: this.monsterTurnAnim,
+      battleGoalResults: this.battleGoalResults,
       pendingElementChoice: this.pendingElementChoice,
+      pendingReactiveItem: this.pendingReactiveItem,
       currentTurn: this.currentTurn,
       events: this.events,
       lastMove: this.lastMove,
@@ -3035,6 +4265,7 @@ export class Room {
         connected: p.socket !== null,
         submitted: p.selection !== null,
       })),
+      shop: this.campaign.shop ?? [],
     };
   }
 
@@ -3045,14 +4276,13 @@ export class Room {
    * exception is a no-op for now — but we still guard against `kind !== 'monster'`.
    * Rule: monster-damage-and-death.md.
    */
-  private dropMoneyTokenOnDeath(dead: Unit): void {
-    if (dead.kind !== 'monster') return;
-    if (this.moneyTokensPlaced >= MONEY_TOKEN_CAP) return;
-    this.moneyTokens.push({
-      id: `m${this.nextMoneyTokenN++}`,
-      hex: { q: dead.hex.q, r: dead.hex.r },
-    });
+  private dropMoneyTokenOnDeath(dead: Unit): string | null {
+    if (dead.kind !== 'monster') return null;
+    if (this.moneyTokensPlaced >= MONEY_TOKEN_CAP) return null;
+    const id = `m${this.nextMoneyTokenN++}`;
+    this.moneyTokens.push({ id, hex: { q: dead.hex.q, r: dead.hex.r } });
     this.moneyTokensPlaced += 1;
+    return id;
   }
 
   /**
@@ -3070,9 +4300,225 @@ export class Room {
     if (here.length === 0) return;
     this.moneyTokens = rest;
     unit.moneyTokensHeld = (unit.moneyTokensHeld ?? 0) + here.length;
+    // Battle goals: mandatory end-of-turn loot.
+    {
+      const cid = this.charIdForUnit(unit);
+      if (cid) {
+        this.emitBG({
+          kind: 'loot_collected',
+          characterId: cid,
+          tokenIds: here.map((t) => t.id),
+          source: 'end-of-turn',
+          adjacentToEnemy: this.adjacentEnemyCount(unit) > 0,
+        });
+      }
+    }
     this.pushEvent(
       `${unit.name} loots ${here.length} money token${here.length === 1 ? '' : 's'} (holding ${unit.moneyTokensHeld}).`,
     );
+  }
+
+  // ---- Battle goals ------------------------------------------------------
+
+  /** characterId (CharacterInstance id) controlling a player unit, or null. */
+  private charIdForUnit(unit: Unit): string | null {
+    if (unit.kind !== 'player' || !unit.ownerPlayerId) return null;
+    return this.players.get(unit.ownerPlayerId)?.activeCharacterId ?? null;
+  }
+
+  private charIdForPlayer(playerId: string): string | null {
+    return this.players.get(playerId)?.activeCharacterId ?? null;
+  }
+
+  /** Number of living enemy (monster) figures adjacent to a unit. */
+  private adjacentEnemyCount(unit: Unit): number {
+    return this.units.filter(
+      (u) => u.kind === 'monster' && u.hp > 0 && hexDistance(u.hex, unit.hex) === 1,
+    ).length;
+  }
+
+  /** Number of OTHER living player characters adjacent to a unit. */
+  private adjacentCharacterCount(unit: Unit): number {
+    return this.units.filter(
+      (u) =>
+        u.kind === 'player' &&
+        u.id !== unit.id &&
+        u.hp > 0 &&
+        hexDistance(u.hex, unit.hex) === 1,
+    ).length;
+  }
+
+  /** Whether a hex carries a door tile. */
+  private isDoorHex(hex: Hex): boolean {
+    return this.scenarioTiles().some(
+      (t) => t.q === hex.q && t.r === hex.r && t.kind === 'door',
+    );
+  }
+
+  /** Whether a hex is adjacent to a wall tile. Obstacles and objectives are
+   *  not yet modeled as distinct tiles, so only walls are detected here
+   *  (Wallflower under-counts until overlay obstacles/objectives exist). */
+  private isAdjacentToWallObstacleOrObjective(hex: Hex): boolean {
+    return this.scenarioTiles().some(
+      (t) => t.kind === 'wall' && hexDistance({ q: t.q, r: t.r }, hex) === 1,
+    );
+  }
+
+  private countStrongOrWaningElements(): number {
+    return ALL_ELEMENTS.filter(
+      (e) => this.elementBoard[e] === 'strong' || this.elementBoard[e] === 'waning',
+    ).length;
+  }
+
+  /** Drop the death loot token and emit the rich `enemy_killed` event. Call at
+   *  every monster death (this performs the loot drop, so death sites must no
+   *  longer call dropMoneyTokenOnDeath themselves). Must run before the unit is
+   *  removed from `this.units`. */
+  private recordEnemyKilled(
+    dead: Unit,
+    opts: {
+      killerCharacterId: string | null;
+      byAttack: boolean;
+      /** Damage the killing blow would have caused (pre-shield), for overkill. */
+      finalDamage?: number;
+      /** Target HP just before the killing blow, for overkill / undamaged. */
+      hpBeforeHit?: number;
+      attackAdvantage?: 'advantage' | 'disadvantage' | 'normal' | null;
+      /** Killer's hex, for adjacency facts. Null for non-character kills. */
+      killerHex?: Hex | null;
+    },
+  ): void {
+    const droppedLootTokenId = this.dropMoneyTokenOnDeath(dead);
+    this.monsterTypesSeen.add(dead.defId);
+    const hpBefore = opts.hpBeforeHit ?? dead.hpMax;
+    const wouldCause = opts.finalDamage ?? 0;
+    const killerHex = opts.killerHex ?? null;
+    this.emitBG({
+      kind: 'enemy_killed',
+      killerCharacterId: opts.killerCharacterId,
+      targetUnitId: dead.id,
+      targetNegativeConditions: dead.conditions.map((c) => c.kind),
+      byAttack: opts.byAttack,
+      overkill: opts.byAttack ? Math.max(0, wouldCause - hpBefore) : 0,
+      targetWasUndamaged: hpBefore >= dead.hpMax,
+      attackAdvantage: opts.attackAdvantage ?? (opts.byAttack ? 'normal' : null),
+      // TODO: units don't carry rank yet (only normal monsters spawn); wire
+      // elite/named/boss when rank lands on Unit. Affects Hunter/Plebeian.
+      targetRank: 'normal',
+      targetDefId: dead.defId,
+      droppedLootTokenId,
+      elementsStrongOrWaning: this.countStrongOrWaningElements(),
+      targetAdjacentToKiller: killerHex
+        ? hexDistance(killerHex, dead.hex) === 1
+        : false,
+      killerAdjacentToOtherEnemy: killerHex
+        ? this.units.some(
+            (u) =>
+              u.kind === 'monster' &&
+              u.id !== dead.id &&
+              u.hp > 0 &&
+              hexDistance(u.hex, killerHex) === 1,
+          )
+        : false,
+      targetHadTakenTurn: this.monstersActedThisRound.has(dead.id),
+    });
+  }
+
+  /** Append a battle-goal event to the scenario log. No-op outside a scenario
+   *  (or before any goals were dealt). */
+  private emitBG(event: BattleGoalEvent): void {
+    if (this.battleGoalHands.size === 0) return;
+    if (this.phase === 'victory' || this.phase === 'defeat') return;
+    this.battleGoalLog.push(event);
+  }
+
+  /** Keep one of the three dealt battle goals for the current scenario. */
+  chooseBattleGoal(
+    playerId: string,
+    goalId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const charId = this.charIdForPlayer(playerId);
+    if (!charId) return { ok: false, reason: 'no_character' };
+    const hand = this.battleGoalHands.get(charId);
+    if (!hand) return { ok: false, reason: 'no_battle_goal_dealt' };
+    if (!hand.dealtGoalIds.includes(goalId)) {
+      return { ok: false, reason: 'goal_not_dealt' };
+    }
+    hand.chosenGoalId = goalId;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** The owning player's secret battle-goal hand, for PrivatePlayerState. */
+  private battleGoalHandForPlayer(playerId: string): BattleGoalHand | null {
+    const charId = this.charIdForPlayer(playerId);
+    if (!charId) return null;
+    return this.battleGoalHands.get(charId) ?? null;
+  }
+
+  /** Fold the scenario's event log through each character's chosen goal and
+   *  award checkmarks. Checkmarks are granted only on victory (a lost scenario
+   *  grants nothing, per the rules), but results are revealed either way. */
+  private evaluateBattleGoals(outcome: 'victory' | 'defeat'): void {
+    const allCharacterIds = [...this.battleGoalHands.keys()];
+    // Capture loot counts now, before endScenario converts tokens to gold.
+    const lootByCharacter: Record<string, number> = {};
+    for (const cid of allCharacterIds) lootByCharacter[cid] = 0;
+    for (const u of this.units) {
+      const cid = this.charIdForUnit(u);
+      if (cid) lootByCharacter[cid] = u.moneyTokensHeld ?? 0;
+    }
+    const monsterTypesInScenario = [...this.monsterTypesSeen];
+
+    // Emit per-character end-of-scenario pile snapshots before folding.
+    for (const cid of allCharacterIds) {
+      const p = [...this.players.values()].find(
+        (pl) => pl.activeCharacterId === cid,
+      );
+      this.battleGoalLog.push({
+        kind: 'scenario_end_piles',
+        characterId: cid,
+        handCount: p?.hand.length ?? 0,
+        discardCount: p?.discard.length ?? 0,
+      });
+    }
+
+    const results: BattleGoalScenarioResult[] = [];
+    for (const [characterId, hand] of this.battleGoalHands) {
+      if (!hand.chosenGoalId) continue;
+      const goal = getBattleGoal(hand.chosenGoalId);
+      if (!goal) continue;
+      const res = evaluateBattleGoal(hand.chosenGoalId, this.battleGoalLog, {
+        characterId,
+        allCharacterIds,
+        lootByCharacter,
+        monsterTypesInScenario,
+      });
+      const checkmarks = outcome === 'victory' ? res.checkmarks : 0;
+      results.push({
+        characterId,
+        goalId: goal.id,
+        title: goal.title,
+        description: goal.description,
+        achieved: res.achieved,
+        checkmarks,
+      });
+      if (checkmarks > 0) {
+        const charInst = this.campaign.characters.find(
+          (c) => c.id === characterId,
+        );
+        if (charInst) {
+          if (typeof charInst.battleGoalCheckmarks !== 'number') {
+            charInst.battleGoalCheckmarks = 0;
+          }
+          charInst.battleGoalCheckmarks += checkmarks;
+          this.pushEvent(
+            `${charInst.name} achieved battle goal "${goal.title}" (+${checkmarks} checkmark${checkmarks === 1 ? '' : 's'}, total ${charInst.battleGoalCheckmarks}).`,
+          );
+        }
+      }
+    }
+    this.battleGoalResults = results;
   }
 
   /**
@@ -3090,6 +4536,9 @@ export class Room {
   }
 
   private endScenario(outcome: 'victory' | 'defeat'): void {
+    // Evaluate battle goals first — this reads per-character loot counts,
+    // which the gold-conversion loop below zeroes out.
+    this.evaluateBattleGoals(outcome);
     const rate = goldConversionFor(this.scenarioLevel);
     for (const unit of this.units) {
       if (unit.kind !== 'player' || !unit.ownerPlayerId) continue;
@@ -3139,6 +4588,8 @@ export class Room {
           modifierDiscard: p.modifierDiscard,
           modifierNeedsReshuffle: p.modifierNeedsReshuffle,
           shortRestPending: p.shortRestPending,
+          longRestPending: p.longRestPending,
+          battleGoal: this.battleGoalHandForPlayer(p.playerId),
         },
       });
     }

@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { CharacterInstance, CampaignSummary } from '@gloomfolk/shared';
+import type { CharacterInstance, CampaignSummary, ShopEntry } from '@gloomfolk/shared';
 
 const SAVE_DIR = path.resolve(process.cwd(), 'saves');
 
@@ -16,6 +16,9 @@ export interface CampaignSave {
     name: string;
     activeCharacterId: string | null;
   }>;
+  /** Campaign-wide shop stock. Undefined on legacy saves; restored to
+   *  DEFAULT_SHOP_STOCK on load. */
+  shop?: ShopEntry[];
 }
 
 async function ensureDir(): Promise<void> {
