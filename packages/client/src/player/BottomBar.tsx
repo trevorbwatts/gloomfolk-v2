@@ -2,6 +2,7 @@ import { type CSSProperties, type ReactNode, useState } from 'react';
 import type {
   CharacterClass,
   CharacterInstance,
+  Item,
   ModifierCard,
   ModifierCardInstance,
   MonsterStatCard,
@@ -10,6 +11,7 @@ import type {
   Unit,
 } from '@gloomfolk/shared';
 import {
+  ALL_ITEMS,
   banditArcher,
   banditScout,
   getBattleGoal,
@@ -96,10 +98,14 @@ export function PlayerHeader({
   character,
   unit,
   title,
+  gold,
 }: {
   character: CharacterInstance | null;
   unit?: Unit | null;
   title?: string;
+  /** When set, show the character's gold on the right of the bar (used during
+   *  the pre-scenario shopping step). */
+  gold?: number;
 }) {
   const showStats = !title && !!character;
   return (
@@ -129,6 +135,14 @@ export function PlayerHeader({
         {title ?? character?.name ?? ''}
       </h1>
       {showStats && unit && <UnitStatusStrip unit={unit} />}
+      {gold != null && (
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+          <span style={{ fontSize: 18, fontFamily: theme.headingFont, color: '#d9a441', fontWeight: 600 }}>
+            {gold}
+          </span>
+          <span style={{ fontSize: 12, color: '#d9a441', fontWeight: 600 }}>G</span>
+        </div>
+      )}
     </header>
   );
 }
@@ -164,12 +178,17 @@ function UnitStatusStrip({ unit }: { unit: Unit }) {
           <span>{unit.shield}</span>
         </StatusChip>
       )}
-      {unit.retaliate > 0 && (
-        <StatusChip>
+      {unit.retaliate.map((band) => (
+        <StatusChip key={band.range}>
           <GameIcon kind="retaliate" size={14} />
-          <span>{unit.retaliate}</span>
+          <span>
+            {band.amount}
+            {band.range > 1 && (
+              <span style={{ color: theme.muted }}> r{band.range}</span>
+            )}
+          </span>
         </StatusChip>
-      )}
+      ))}
       {unit.invisible && (
         <StatusChip>
           <GameIcon kind="invisible" size={14} />
@@ -325,7 +344,12 @@ export function CharacterPanel({
         ) : (
           <EmptyHint text="No character yet." />
         ))}
-      {sub === 'items' && <ItemsPanel />}
+      {sub === 'items' &&
+        (character ? (
+          <ItemsPanel character={character} />
+        ) : (
+          <EmptyHint text="No character yet." />
+        ))}
       {sub === 'cards' &&
         (you ? <CardsOverview you={you} /> : <EmptyHint text="No hand yet." />)}
       {sub === 'modifiers' &&
@@ -379,6 +403,7 @@ function SheetPanel({
       <div style={{ height: 32 }} />
       <SectionTitle>Perks</SectionTitle>
       <PerksList character={character} characterClass={characterClass} />
+      <BattleGoalCheckmarks count={character.battleGoalCheckmarks} />
 
       <div style={{ marginTop: 32, paddingTop: 20, borderTop: `1px solid ${theme.border}` }}>
         {confirmLeave ? (
@@ -530,6 +555,61 @@ function PerksList({
   );
 }
 
+/** Lifetime battle-goal checkmark tracker: 18 boxes in six groups of three.
+ *  Every completed group of three grants one extra perk mark (capped at +6). */
+function BattleGoalCheckmarks({ count }: { count: number }) {
+  const TOTAL = 18;
+  const GROUP = 3;
+  const filled = Math.min(count, TOTAL);
+  const perkMarks = Math.floor(filled / GROUP);
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div
+        style={{
+          color: theme.muted,
+          fontSize: 10,
+          letterSpacing: 1.5,
+          textTransform: 'uppercase',
+          marginBottom: 8,
+        }}
+      >
+        Battle Goals — {perkMarks} perk {perkMarks === 1 ? 'mark' : 'marks'}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+        {Array.from({ length: TOTAL / GROUP }).map((_, g) => (
+          <div key={g} style={{ display: 'flex', gap: 4 }}>
+            {Array.from({ length: GROUP }).map((_, b) => {
+              const idx = g * GROUP + b;
+              const checked = idx < filled;
+              return (
+                <span
+                  key={b}
+                  aria-label={checked ? 'checked' : 'unchecked'}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 16,
+                    height: 16,
+                    border: `1px solid ${checked ? theme.accent : theme.border}`,
+                    background: checked ? theme.accent : 'transparent',
+                    borderRadius: 3,
+                    color: '#0e1612',
+                    fontSize: 11,
+                    lineHeight: 1,
+                  }}
+                >
+                  {checked ? '✓' : ''}
+                </span>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ScenarioPanel({
   gameState,
   you,
@@ -563,13 +643,16 @@ export function ScenarioPanel({
       <div style={{ height: 24 }} />
       <SectionTitle>Your battle goal</SectionTitle>
       {chosenGoal ? (
-        <div>
-          <p style={{ color: theme.accent, fontSize: 14, margin: '0 0 2px', fontFamily: theme.headingFont, letterSpacing: 0.5 }}>
-            {chosenGoal.title}
-          </p>
-          <p style={{ color: theme.text, fontSize: 13, margin: 0, lineHeight: 1.4 }}>
-            {chosenGoal.description}
-          </p>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+          <GoalStatusBox status={you?.battleGoal?.chosenGoalStatus ?? 'pending'} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <p style={{ color: theme.accent, fontSize: 14, margin: '0 0 2px', fontFamily: theme.headingFont, letterSpacing: 0.5 }}>
+              {chosenGoal.title}
+            </p>
+            <p style={{ color: theme.text, fontSize: 13, margin: 0, lineHeight: 1.4 }}>
+              {chosenGoal.description}
+            </p>
+          </div>
         </div>
       ) : (
         <p style={{ color: theme.muted, fontSize: 13, margin: 0, lineHeight: 1.4 }}>
@@ -586,13 +669,18 @@ export function ScenarioPanel({
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {results.map((r) => (
               <div key={r.characterId} style={cardStyle()}>
-                <p style={{ margin: '0 0 2px', fontSize: 13, color: r.achieved ? theme.good : theme.muted }}>
-                  {r.achieved ? '✓' : '✗'} {r.title}
-                  {r.checkmarks > 0 ? ` (+${r.checkmarks})` : ''}
-                </p>
-                <p style={{ margin: 0, fontSize: 12, color: theme.muted, lineHeight: 1.4 }}>
-                  {r.description}
-                </p>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <GoalStatusBox status={r.achieved ? 'achieved' : 'failed'} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ margin: '0 0 2px', fontSize: 13, color: r.achieved ? theme.good : theme.text }}>
+                      {r.title}
+                      {r.checkmarks > 0 ? ` (+${r.checkmarks})` : ''}
+                    </p>
+                    <p style={{ margin: 0, fontSize: 12, color: theme.muted, lineHeight: 1.4 }}>
+                      {r.description}
+                    </p>
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -611,6 +699,46 @@ export function ScenarioPanel({
         </div>
       )}
     </div>
+  );
+}
+
+type GoalStatus = 'achieved' | 'failed' | 'pending';
+
+/** A small checkbox showing a battle-goal status: a green box with a checkmark
+ *  when achieved, a red box with an X when failed, or an empty box while still
+ *  pending (not yet met but still possible). */
+function GoalStatusBox({ status }: { status: GoalStatus }) {
+  const color =
+    status === 'achieved' ? theme.good : status === 'failed' ? theme.bad : theme.border;
+  const symbol = status === 'achieved' ? '✓' : status === 'failed' ? '✗' : '';
+  const label =
+    status === 'achieved'
+      ? 'Battle goal achieved'
+      : status === 'failed'
+        ? 'Battle goal failed'
+        : 'Battle goal in progress';
+  return (
+    <span
+      aria-label={label}
+      title={label}
+      style={{
+        flexShrink: 0,
+        width: 22,
+        height: 22,
+        borderRadius: 4,
+        border: `2px solid ${color}`,
+        background: status === 'pending' ? 'transparent' : `${color}22`,
+        color,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 14,
+        fontWeight: 700,
+        lineHeight: 1,
+      }}
+    >
+      {symbol}
+    </span>
   );
 }
 
@@ -807,12 +935,103 @@ function ModifierCardFace({
   );
 }
 
-function ItemsPanel() {
+const ITEM_SLOT_LABELS: Record<string, string> = {
+  head: 'Head',
+  body: 'Body',
+  feet: 'Feet',
+  'one-hand': 'One Hand',
+  'two-hands': 'Two Hands',
+  small: 'Small Item',
+};
+
+function ItemsPanel({ character }: { character: CharacterInstance }) {
+  const items = character.ownedItemIds
+    .map((id) => ALL_ITEMS[id])
+    .filter((item): item is NonNullable<typeof item> => item != null);
+
+  if (items.length === 0) {
+    return (
+      <div style={{ padding: '24px 8px', textAlign: 'center' }}>
+        <p style={{ color: theme.text, fontSize: 14, margin: '0 0 8px' }}>No items.</p>
+        <p style={{ color: theme.muted, fontSize: 12, margin: 0 }}>
+          This character doesn't own any items yet.
+        </p>
+      </div>
+    );
+  }
+
+  const brought = items.filter((item) => character.broughtItemIds.includes(item.id));
+  const didntBring = items.filter((item) => !character.broughtItemIds.includes(item.id));
+
+  // Only split into labeled sections when there's something in "Didn't Bring".
+  // Otherwise show a single flat list with no headings.
+  if (didntBring.length === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {brought.map((item) => (
+          <ItemRow key={item.id} item={item} />
+        ))}
+      </div>
+    );
+  }
+
   return (
-    <div style={{ padding: '24px 8px', textAlign: 'center' }}>
-      <p style={{ color: theme.text, fontSize: 14, margin: '0 0 8px' }}>No items.</p>
-      <p style={{ color: theme.muted, fontSize: 12, margin: 0 }}>
-        Items aren't implemented yet.
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <ItemGroup heading="Brought" items={brought} />
+      <ItemGroup heading="Didn't Bring" items={didntBring} />
+    </div>
+  );
+}
+
+function ItemGroup({
+  heading,
+  items,
+}: {
+  heading: string;
+  items: Item[];
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <h3
+        style={{
+          margin: '0 0 8px',
+          fontSize: 11,
+          color: theme.muted,
+          textTransform: 'uppercase',
+          letterSpacing: 1.5,
+          fontFamily: theme.headingFont,
+        }}
+      >
+        {heading}
+      </h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {items.map((item) => (
+          <ItemRow key={item.id} item={item} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ItemRow({ item }: { item: Item }) {
+  return (
+    <div
+      style={{
+        padding: 10,
+        background: theme.panel,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 6,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <strong style={{ fontSize: 13, flex: 1, minWidth: 0 }}>{item.name}</strong>
+        <span style={{ fontSize: 10, color: theme.muted, textTransform: 'uppercase', letterSpacing: 1 }}>
+          {ITEM_SLOT_LABELS[item.slot] ?? item.slot}
+        </span>
+      </div>
+      <p style={{ margin: '4px 0 0', fontSize: 11, color: theme.muted }}>
+        {item.description}
       </p>
     </div>
   );

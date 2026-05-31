@@ -7,7 +7,10 @@ import type {
   ElementSelector,
   NegativeCondition,
   PersistentTrigger,
+  TargetCondition,
+  TargetConditionalBonus,
 } from './cards/types.js';
+import type { MonsterRank } from './monsters/types.js';
 import type { Hex } from './hex.js';
 import type { ModifierCard, ModifierCardInstance } from './modifiers/index.js';
 import type { Tile } from './scenarios/types.js';
@@ -23,6 +26,14 @@ export interface ConditionInstance {
   appliedThisTurn: boolean;
 }
 
+/** One Retaliate band on a Unit: total retaliate `amount` that reaches an
+ *  attacker within `range` hexes. Sources sharing a range are summed into one
+ *  band. */
+export interface RetaliateBand {
+  amount: number;
+  range: number;
+}
+
 export interface Unit {
   id: string;
   kind: UnitKind;
@@ -34,11 +45,13 @@ export interface Unit {
   hex: Hex;
   /** Active Shield value, soaks incoming attack damage. Cleared at round end. */
   shield: number;
-  /** Aggregate Retaliate amount currently active on this figure (sum across
-   *  all retaliate sources). Range and per-source detail are tracked on the
-   *  server's PlayerEntry.activeEffects; this field is a denormalized view
-   *  for UI display. 0 when no retaliate is active. */
-  retaliate: number;
+  /** Active Retaliate, aggregated into bands by range: amounts that share a
+   *  range are summed, and bands are sorted by ascending range. Empty when no
+   *  retaliate is active. This is a denormalized view for UI display (status
+   *  chips); the source of truth and resolution live on the server's
+   *  PlayerEntry.activeEffects. Most retaliate is range 1, so this is usually a
+   *  single band, but the shape supports mixed-range sources. */
+  retaliate: RetaliateBand[];
   /** Active negative conditions (stun/immobilize/disarm/muddle/etc.). */
   conditions: ConditionInstance[];
   /** Invisible (positive condition). When true, the figure cannot be targeted
@@ -46,6 +59,15 @@ export interface Unit {
    *  (mirrors negative-condition ticking via `invisibleAppliedThisTurn`). */
   invisible?: boolean;
   invisibleAppliedThisTurn?: boolean;
+  /** For monsters: the standee number (1..type's standeeCount), drawn at random
+   *  on placement and unique per type this scenario. Identifies the figure and
+   *  breaks acting-order ties within a rank. Undefined for players and when a
+   *  type's standee pool was exhausted at placement. */
+  standeeNumber?: number;
+  /** For monsters: normal / elite / named. Drives stat block, acting order
+   *  (named → elite → normal), and rank-targeting predicates. Undefined for
+   *  players. */
+  rank?: MonsterRank;
   /** For player units: links to the controlling player. */
   ownerPlayerId?: string;
   /** For player units: money tokens looted during this scenario.
@@ -75,11 +97,22 @@ export interface CharacterInstance {
    *  player is taking into the next scenario. Null until the player locks
    *  one in; the server falls back to the class's default loadout. */
   loadout: string[] | null;
+  /** True once the player has finished their pre-scenario shopping trip and
+   *  tapped "Done shopping" to ready up. The host can't start the scenario
+   *  until every claimed character is both loadout-locked and shoppingDone.
+   *  A brand-new character starts false; returning characters keep their
+   *  prior value (like `loadout`, this persists across scenarios). */
+  shoppingDone: boolean;
   /** Items the character owns (purchased or looted). Persistent across scenarios. */
   ownedItemIds: string[];
   /** Items the character is bringing into the next scenario. Subset of
    *  ownedItemIds; must satisfy slot limits. Persistent across scenarios. */
   broughtItemIds: string[];
+  /** Items bought during the current pre-scenario shopping session. Purchases
+   *  here can be undone (refund gold, restock) until the scenario starts, at
+   *  which point this clears — items bought on a previous shopping trip are no
+   *  longer undoable. */
+  sessionPurchasedItemIds: string[];
   /** Items that have been used this scenario. Cleared when a new scenario
    *  starts. Long-rest recovery not yet implemented. */
   spentItemIds: string[];
@@ -113,6 +146,14 @@ export interface CampaignSummary {
 export interface BattleGoalHand {
   dealtGoalIds: string[];
   chosenGoalId: string | null;
+  /** Live status of the chosen goal, recomputed from the in-progress event log
+   *  each broadcast (null until one is chosen):
+   *   - 'achieved' — currently satisfied (would score if the scenario ended now)
+   *   - 'failed'   — was satisfiable at the start but has been broken (a "never…"
+   *                  goal you've violated); can no longer be met
+   *   - 'pending'  — not yet met but still achievable
+   *  Server-derived; not persisted. */
+  chosenGoalStatus?: 'achieved' | 'failed' | 'pending' | null;
 }
 
 /** A revealed battle-goal outcome at scenario end. Public (goals are no longer
@@ -392,6 +433,14 @@ export type PendingAction =
       lockedRiderAttack: number;
       lockedRiderPierce: number;
       consumesLocked: boolean;
+      /** Negative conditions printed below this attack with no target of their
+       *  own ("ride on the prior attack"). Applied automatically to each enemy
+       *  the attack hits — no separate targeting step. */
+      riderConditions?: readonly NegativeCondition[];
+      /** Printed per-target bonuses gated on a condition of the enemy hit
+       *  (isolated / undamaged / adjacent-to-your-ally). Evaluated per target at
+       *  resolution; non-matching targets get nothing. */
+      targetConditionalBonuses?: readonly TargetConditionalBonus[];
       done: boolean;
     }
   | {
@@ -410,10 +459,23 @@ export type PendingAction =
       lockedRiderAttack: number;
       lockedRiderPierce: number;
       consumesLocked: boolean;
+      /** See PendingAction.attack.riderConditions. Applied to every enemy the
+       *  AOE hits. */
+      riderConditions?: readonly NegativeCondition[];
+      /** See PendingAction.attack.targetConditionalBonuses. Evaluated per enemy
+       *  the AOE hits. */
+      targetConditionalBonuses?: readonly TargetConditionalBonus[];
       done: boolean;
     }
   | { id: string; type: 'heal'; amount: number; range: number; selfOnly: boolean; done: boolean }
   | { id: string; type: 'shield'; amount: number; done: boolean }
+  | {
+      id: string;
+      type: 'loot';
+      /** Pick up money tokens in your hex and all hexes within `range`. */
+      range: number;
+      done: boolean;
+    }
   | { id: string; type: 'push'; amount: number; range: number; done: boolean }
   | { id: string; type: 'pull'; amount: number; range: number; done: boolean }
   | {
@@ -441,6 +503,9 @@ export type PendingAction =
       doubleAttack?: boolean;
       expires: 'next-attack' | 'end-round' | 'end-scenario';
       attackKind?: 'melee' | 'ranged';
+      /** When set, the bonus only applies to attacks against an enemy that
+       *  satisfies this condition (e.g. Single Out's +3 vs isolated targets). */
+      targetCondition?: TargetCondition;
       done: boolean;
     }
   | {
@@ -474,6 +539,10 @@ export type ActiveEffect =
       doubleAttack?: boolean;
       expires: 'next-attack' | 'end-round' | 'end-scenario';
       attackKind?: 'melee' | 'ranged';
+      /** When set, the bonus only applies to attacks against an enemy that
+       *  satisfies this condition. Evaluated per target at attack time; the
+       *  effect is not consumed by attacks against non-matching targets. */
+      targetCondition?: TargetCondition;
     }
   | {
       id: string;
@@ -650,7 +719,14 @@ export type ClientToServer =
   | { type: 'player_unclaim_character' }
   | { type: 'player_set_loadout'; cardIds: string[] }
   | { type: 'player_buy_item'; itemId: string }
+  /** Undo a purchase made during the current shopping session (refund + restock). */
+  | { type: 'player_undo_buy_item'; itemId: string }
   | { type: 'player_set_item_loadout'; itemIds: string[] }
+  /** Finish the pre-scenario shopping trip and ready up. Requires a locked
+   *  loadout. */
+  | { type: 'player_finish_shopping' }
+  /** Re-open the shop after readying up (un-ready, back to shopping). */
+  | { type: 'player_reopen_shopping' }
   | {
       type: 'player_use_item';
       itemId: string;
@@ -696,6 +772,10 @@ export type ClientToServer =
     }
   | { type: 'player_resolve_element_choice'; choiceId: string; element: Element }
   | { type: 'player_engage_half'; slot: 'top' | 'bottom'; cardId: string; useBasic: boolean }
+  /** Reverse an engaged half before anything has been performed — refunds any
+   *  required element cost and returns the slot to unlocked so the player can
+   *  pick the other half/card. */
+  | { type: 'player_unengage_half'; slot: 'top' | 'bottom' }
   | { type: 'player_skip_half'; slot: 'top' | 'bottom'; cardId: string }
   | { type: 'player_finish_half'; slot: 'top' | 'bottom' }
   /** Confirm a persistent (round/tracked/scenario) half whose engage queue is
@@ -713,7 +793,10 @@ export type ClientToServer =
   | { type: 'ping' };
 
 export type ServerToClient =
-  | { type: 'hello'; serverVersion: string }
+  /** `lanHost` is the server's best-guess LAN IPv4 (e.g. "192.168.1.42"), so the
+   *  host screen can show a join URL phones on the same network can reach.
+   *  Absent when the server couldn't determine one. */
+  | { type: 'hello'; serverVersion: string; lanHost?: string }
   | { type: 'campaign_list'; campaigns: CampaignSummary[] }
   | { type: 'joined'; role: Role; playerId: string; campaignId: string }
   | { type: 'state'; state: PublicGameState; you?: PrivatePlayerState }

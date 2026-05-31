@@ -6,6 +6,7 @@ import {
   BowArrow,
   ChevronsRight,
   CircleDashed,
+  Coins,
   Cross,
   Droplet,
   Feather,
@@ -38,7 +39,8 @@ export type IconKey =
   | 'pierce'
   | 'push'
   | 'pull'
-  | 'range';
+  | 'range'
+  | 'loot';
 
 const ICONS: Record<IconKey, LucideIcon> = {
   wound: Droplet,
@@ -55,6 +57,7 @@ const ICONS: Record<IconKey, LucideIcon> = {
   push: ArrowRightToLine,
   pull: ArrowLeftFromLine,
   range: BowArrow,
+  loot: Coins,
   safeguard: ShieldCog,
   ward: ShieldHalf,
   invisible: CircleDashed,

@@ -28,6 +28,7 @@ import type {
   MoneyToken,
   MonsterAttackEffect,
   MonsterConsumeEffect,
+  MonsterRank,
   MonsterStatCard,
   MonsterTurnAnim,
   MoveAnimation,
@@ -39,6 +40,8 @@ import type {
   PersistentTrigger,
   PublicGameState,
   ServerToClient,
+  TargetCondition,
+  TargetConditionalBonus,
   TrackedHalfState,
   TurnOrderEntry,
   Unit,
@@ -239,6 +242,12 @@ export function consumeAttackBonus(
       keep.push(e);
       continue;
     }
+    // Target-gated bonuses (e.g. Single Out's +3 vs isolated) are applied
+    // per-target by targetConditionalActiveBonus — never consumed here.
+    if (e.targetCondition) {
+      keep.push(e);
+      continue;
+    }
     amount += e.amount;
     pierce += e.pierceBonus;
     if (e.doubleAttack) double = true;
@@ -248,12 +257,26 @@ export function consumeAttackBonus(
   return { amount, pierce, double };
 }
 
-/** Find an active retaliate effect on `unit` that can hit at distance `dist`. */
+/** Total active retaliate that can hit at distance `dist`. Multiple retaliate
+ *  effects stack (their amounts add), each only counting if the attacker is
+ *  within that effect's range. Returns null when nothing applies. This matches
+ *  the summed value shown by `syncUnitRetaliate` on the status chip. */
+/** Acting-order rank weight: a monster set acts named → elite → normal, ties
+ *  broken by ascending standee number (revealing-spawning-and-named-monsters.md).
+ *  Bosses act first if ever mixed into a set. */
+const RANK_ACT_ORDER: Record<MonsterRank, number> = { boss: 0, named: 1, elite: 2, normal: 3 };
+export function monsterActOrder(a: Unit, b: Unit): number {
+  const byRank = RANK_ACT_ORDER[a.rank ?? 'normal'] - RANK_ACT_ORDER[b.rank ?? 'normal'];
+  if (byRank !== 0) return byRank;
+  return (a.standeeNumber ?? 0) - (b.standeeNumber ?? 0);
+}
+
 function retaliateAgainst(p: PlayerEntry, dist: number): { amount: number } | null {
+  let amount = 0;
   for (const e of p.activeEffects) {
-    if (e.kind === 'retaliate' && dist <= e.range) return { amount: e.amount };
+    if (e.kind === 'retaliate' && dist <= e.range) amount += e.amount;
   }
-  return null;
+  return amount > 0 ? { amount } : null;
 }
 
 /**
@@ -513,6 +536,9 @@ function buildActionQueue(
               lockedRiderAttack: 0,
               lockedRiderPierce: 0,
               consumesLocked: false,
+              ...(step.modifiers?.targetConditionalBonuses
+                ? { targetConditionalBonuses: step.modifiers.targetConditionalBonuses }
+                : {}),
               done: false,
             });
           } else {
@@ -538,6 +564,9 @@ function buildActionQueue(
               lockedRiderAttack: 0,
               lockedRiderPierce: 0,
               consumesLocked: false,
+              ...(step.modifiers?.targetConditionalBonuses
+                ? { targetConditionalBonuses: step.modifiers.targetConditionalBonuses }
+                : {}),
               done: false,
             });
           }
@@ -600,6 +629,7 @@ function buildActionQueue(
           expires,
           ...(step.attackKind ? { attackKind: step.attackKind } : {}),
           ...(step.doubleAttack ? { doubleAttack: true as const } : {}),
+          ...(step.targetCondition ? { targetCondition: step.targetCondition } : {}),
           done: false,
         });
       } else if (step.type === 'retaliate') {
@@ -613,21 +643,36 @@ function buildActionQueue(
         });
       } else if (step.type === 'apply-condition' && SUPPORTED_CONDITIONS.has(step.condition)) {
         const tgt = step.target;
-        const range =
-          tgt && tgt.kind === 'ranged' && typeof tgt.range === 'number' ? tgt.range : 1;
-        out.push({
-          id: nextId(),
-          type: 'apply-condition',
-          condition: step.condition as NegativeCondition,
-          range,
-          done: false,
-        });
+        const condition = step.condition as NegativeCondition;
+        // A condition with no target of its own "rides on the prior attack"
+        // (see cards/types.ts apply-condition.target). Attach it to the most
+        // recent attack so it auto-applies to whatever that attack hits, rather
+        // than prompting for a separate target.
+        const host =
+          tgt === undefined
+            ? [...out].reverse().find((a) => a.type === 'attack' || a.type === 'attack-aoe')
+            : undefined;
+        if (host && (host.type === 'attack' || host.type === 'attack-aoe')) {
+          host.riderConditions = [...(host.riderConditions ?? []), condition];
+        } else {
+          const range =
+            tgt && tgt.kind === 'ranged' && typeof tgt.range === 'number' ? tgt.range : 1;
+          out.push({
+            id: nextId(),
+            type: 'apply-condition',
+            condition,
+            range,
+            done: false,
+          });
+        }
       } else if (
         step.type === 'apply-condition' &&
         step.condition === 'invisible' &&
         step.target?.kind === 'self'
       ) {
         out.push({ id: nextId(), type: 'become-invisible', done: false });
+      } else if (step.type === 'loot') {
+        out.push({ id: nextId(), type: 'loot', range: step.range, done: false });
       } else if (step.type === 'gain-exp' || step.type === 'when') {
         // Auto-resolved at half-finish (see Room.awardHalfXp); skip emitting
         // a PendingAction so they don't appear in the user-facing queue.
@@ -690,6 +735,10 @@ interface PlayerEntry {
   active: Card[];
   activeTracked: TrackedHalfState[];
   activeEffects: ActiveEffect[];
+  /** Deferred XP from `on-next-retaliate-this-round` riders: each entry is
+   *  granted the next time this player retaliates, then the queue is cleared.
+   *  Expires (drops) at end of round if no retaliate occurred. */
+  pendingRetaliateXp: { amount: number; label: string }[];
   selection: CardSelection | null;
   modifierDeck: ModifierCardInstance[];
   modifierDiscard: ModifierCardInstance[];
@@ -761,6 +810,10 @@ export class Room {
   /** Unit ids of monsters whose group has taken its turn this round. Cleared
    *  each round. Drives Assassin (kill before it acts) and Vanguard. */
   private monstersActedThisRound = new Set<string>();
+  /** Per monster type (`monsterId`), the standee numbers currently in use this
+   *  scenario. Drawn at random on placement, returned to the pool on death —
+   *  mirrors the physical standee bag. Cleared at scenario start. */
+  private standeesInUse = new Map<string, Set<number>>();
   private nextEventId = 1;
   private nextMoneyTokenN = 1;
   private nextMoveId = 1;
@@ -785,11 +838,13 @@ export class Room {
     for (const ch of campaign.characters) {
       if (!Array.isArray(ch.ownedItemIds)) ch.ownedItemIds = [];
       if (!Array.isArray(ch.broughtItemIds)) ch.broughtItemIds = [];
+      if (!Array.isArray(ch.sessionPurchasedItemIds)) ch.sessionPurchasedItemIds = [];
       if (!Array.isArray(ch.spentItemIds)) ch.spentItemIds = [];
       if (!Array.isArray(ch.activeItems)) ch.activeItems = [];
       if (typeof ch.battleGoalCheckmarks !== 'number') {
         ch.battleGoalCheckmarks = 0;
       }
+      if (typeof ch.shoppingDone !== 'boolean') ch.shoppingDone = false;
     }
   }
 
@@ -810,6 +865,7 @@ export class Room {
       active: [],
       activeTracked: [],
       activeEffects: [],
+      pendingRetaliateXp: [],
       selection: null,
       modifierDeck: [],
       modifierDiscard: [],
@@ -920,12 +976,13 @@ export class Room {
       const charInst = this.campaign.characters.find(
         (c) => c.id === p.activeCharacterId,
       );
-      if (!charInst || charInst.loadout === null) {
+      if (!charInst || charInst.loadout === null || !charInst.shoppingDone) {
         return { ok: false, reason: 'players_not_ready' };
       }
     }
 
     this.units = [];
+    this.standeesInUse = new Map();
     this.moneyTokens = [];
     this.moneyTokensPlaced = 0;
     this.nextMoneyTokenN = 1;
@@ -945,6 +1002,9 @@ export class Room {
       if (!('loadout' in ch)) (ch as CharacterInstance).loadout = null;
       if (!Array.isArray(ch.ownedItemIds)) ch.ownedItemIds = [];
       if (!Array.isArray(ch.broughtItemIds)) ch.broughtItemIds = [];
+      // A new scenario closes the shopping session — prior purchases are no
+      // longer undoable.
+      ch.sessionPurchasedItemIds = [];
       ch.spentItemIds = [];
       ch.activeItems = [];
     }
@@ -965,7 +1025,7 @@ export class Room {
         hp,
         hpMax: hp,
         shield: 0,
-        retaliate: 0,
+        retaliate: [],
         conditions: [],
         hex: slot.hex,
         ownerPlayerId: p.playerId,
@@ -994,6 +1054,7 @@ export class Room {
       p.active = [];
       p.activeTracked = [];
       p.activeEffects = [];
+      p.pendingRetaliateXp = [];
       p.selection = null;
       // Fresh, shuffled attack-modifier deck. Items brought into the scenario
       // can inject extra -1 cards (e.g. Hide Armor adds two).
@@ -1018,17 +1079,24 @@ export class Room {
       if (!slot.monsterId) return;
       const def = MONSTER_DEFS[slot.monsterId as keyof typeof MONSTER_DEFS];
       if (!def) return;
-      const stats = def.levels[1]?.normal;
+      // Rank scales with party size (Gloomhaven). Elites use the elite stat
+      // block; named/normal use the normal block (named stat overrides aren't
+      // modelled yet — see revealing-spawning-and-named-monsters.md).
+      const rank: MonsterRank = slot.ranks?.[readyPlayers.length] ?? 'normal';
+      const stats = rank === 'elite' ? def.levels[1]?.elite : def.levels[1]?.normal;
       const hp = stats?.hp ?? 5;
+      const standeeNumber = this.allocateStandeeNumber(slot.monsterId, def.standeeCount);
       this.units.push({
         id: `u${unitN++}`,
         kind: 'monster',
         defId: slot.monsterId,
-        name: def.name,
+        name: standeeNumber !== undefined ? `${def.name} ${standeeNumber}` : def.name,
+        ...(standeeNumber !== undefined ? { standeeNumber } : {}),
+        rank,
         hp,
         hpMax: hp,
         shield: 0,
-        retaliate: 0,
+        retaliate: [],
         conditions: [],
         hex: slot.hex,
       });
@@ -1466,8 +1534,11 @@ export class Room {
    *   - `gain-exp` steps with `per-enemy-targeted` trigger, using the actual
    *     `hitsLanded` of the preceding attack step in the same ability.
    *
-   * Deferred (not yet awarded):
-   *   - `on-next-retaliate-this-round` — needs deferred-retaliate plumbing.
+   * Deferred:
+   *   - `on-next-retaliate-this-round` — queued onto `pendingRetaliateXp` and
+   *     granted the next time the player retaliates this round.
+   *
+   * Not yet awarded:
    *   - Element/condition/target-conditional XP riders on attacks.
    *   - `useSlotExp` on persistent-tracked halves.
    *   - `destroy-trap.gainExp`.
@@ -1494,6 +1565,10 @@ export class Room {
             this.grantXp(p, step.amount, cardName);
           } else if (trigger === 'per-enemy-targeted') {
             this.grantXp(p, step.amount * lastAttackHits, cardName);
+          } else if (trigger === 'on-next-retaliate-this-round') {
+            // Deferred: held until this player's next retaliate this round
+            // (see resolveMonsterAttack), then granted and the queue cleared.
+            p.pendingRetaliateXp.push({ amount: step.amount, label: cardName });
           }
           continue;
         }
@@ -1724,6 +1799,55 @@ export class Room {
     target.useBasic = useBasic;
     target.actions = actions;
     ct.activeSlot = slot;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /**
+   * Reverse an engaged half before anything has been performed. Returns the
+   * slot to `unlocked` so the player can pick the other card/half. Refunds any
+   * required element cost that engaging consumed (engageHalf marks the cost
+   * inert immediately). Refused once any action in the half has been performed.
+   */
+  unengageHalf(
+    playerId: string,
+    slot: 'top' | 'bottom',
+  ): { ok: true } | { ok: false; reason: string } {
+    const guard = this.requireMyTurn(playerId);
+    if (!guard.ok) return guard;
+    const ct = guard.ct;
+    const target = slot === 'top' ? ct.topSlot : ct.bottomSlot;
+    if (target.status !== 'engaged') return { ok: false, reason: 'slot_not_engaged' };
+    if (target.performedCount > 0 || target.actions.some((a) => a.done)) {
+      return { ok: false, reason: 'already_performed' };
+    }
+    // Refund the required element cost engageHalf consumed (if any). Only the
+    // elements this engage paid for sit at the tail of consumedThisTurn, and
+    // tryPayRequiredCost only pays when they weren't already consumed — so
+    // restoring them to the turn-start board value and dropping them from
+    // consumedThisTurn is a clean reversal.
+    if (!target.useBasic && target.cardId) {
+      const card = guard.p.hand.find((c) => c.id === target.cardId);
+      const half = card ? (slot === 'top' ? card.top : card.bottom) : null;
+      const cost = half?.requiredElementCost ?? [];
+      if (cost.length > 0) {
+        const live = { ...this.elementBoard };
+        const consumed = [...ct.consumedThisTurn];
+        for (const e of cost) {
+          live[e] = ct.turnStartElementBoard[e];
+          const idx = consumed.indexOf(e);
+          if (idx >= 0) consumed.splice(idx, 1);
+        }
+        this.elementBoard = live;
+        ct.consumedThisTurn = consumed;
+      }
+    }
+    target.status = 'unlocked';
+    target.cardId = null;
+    target.useBasic = false;
+    target.actions = [];
+    target.performedCount = 0;
+    if (ct.activeSlot === slot) ct.activeSlot = null;
     this.broadcastState();
     return { ok: true };
   }
@@ -2069,19 +2193,33 @@ export class Room {
         // bonuses (consumed activeEffects + locked element riders) are added
         // afterward. See cards/types.ts modify-future-attack.doubleAttack.
         const printedAttack = double ? resolvedAmount * 2 : resolvedAmount;
-        const baseAmount = printedAttack + bonusAmt + action.lockedRiderAttack + poisonBonus(tgt);
+        // Per-target conditional bonuses (e.g. +2 Attack vs an isolated target):
+        // the card's printed bonuses plus any target-gated persistent bonus
+        // (Single Out's +3). Evaluated pre-damage so "undamaged" sees full HP.
+        const cardCond = this.resolveTargetConditionalBonuses(
+          action.targetConditionalBonuses,
+          unit,
+          tgt,
+        );
+        const activeCond = this.targetConditionalActiveBonus(guard.p, attackKind, unit, tgt);
+        const condAttack = cardCond.attack + activeCond.attack;
+        const condPierce = cardCond.pierce + activeCond.pierce;
+        const baseAmount =
+          printedAttack + bonusAmt + action.lockedRiderAttack + poisonBonus(tgt) + condAttack;
         // Conditional persistent triggers fire BEFORE damage applies, so the
         // "isolated"/"shielded"/"invisible" predicates see pre-attack state.
         this.fireAttackConditionalTriggers(guard.p, unit, tgt, attackKind);
-        // Advantage sources: Simple Bow designation on this target.
+        // Advantage sources: Simple Bow designation on this target, or a printed
+        // conditional bonus that grants advantage vs this target.
         // Disadvantage sources: a ranged attack (range > 1) on an ADJACENT
         // target (distance 1) auto-gains Disadvantage (RAW, target-adjacent).
-        const hasAdvantage = ct.advantageCharge?.unitId === tgt.id;
+        const chargeAdvantage = ct.advantageCharge?.unitId === tgt.id;
+        const hasAdvantage = chargeAdvantage || cardCond.advantage;
         const autoDisadvantage = action.range > 1 && dist === 1;
         const drawMode = resolveAdvantage(hasAdvantage, autoDisadvantage);
         // The Simple Bow charge is consumed on this attack even if it cancelled
         // against the ranged-on-adjacent disadvantage (the item is still spent).
-        if (hasAdvantage) ct.advantageCharge = null;
+        if (chargeAdvantage) ct.advantageCharge = null;
         const firstDraw = drawModifier(guard.p);
         let drawn = firstDraw;
         let finalAmount = applyModifierToAttack(baseAmount, firstDraw.card);
@@ -2112,7 +2250,7 @@ export class Room {
         const dmg = applyDamage(
           tgt,
           finalAmount,
-          action.pierce + bonusPierce + action.lockedRiderPierce + itemPierce,
+          action.pierce + bonusPierce + action.lockedRiderPierce + itemPierce + condPierce,
         );
         ct.lastModifierDraws.push({
           id: nextDrawId(),
@@ -2143,10 +2281,24 @@ export class Room {
           tgt.hp > 0 &&
           !unitImmuneTo(tgt, 'poison')
         ) {
+          // Battle goals (Tormentor): capture prior conditions before applying.
+          const cid = this.charIdForUnit(unit);
+          if (cid) {
+            this.emitBG({
+              kind: 'condition_applied',
+              byCharacterId: cid,
+              targetIsEnemy: true,
+              condition: 'poison',
+              targetPriorNegativeConditions: tgt.conditions.map((c) => c.kind),
+            });
+          }
           applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
           this.pushEvent(`${tgt.name} is Poisoned.`);
         }
         if (ct.poisonCharge && ct.poisonCharge.unitId === tgt.id) ct.poisonCharge = null;
+        // Conditions printed below this attack (e.g. Shield Bash's Stun) ride on
+        // the attack and apply automatically to the target it hit.
+        this.applyAttackRiderConditions(unit, tgt, action.riderConditions, drawn.card.kind === 'null');
         // Battle goals: this character attacked an enemy.
         {
           const attackerCid = this.charIdForUnit(unit);
@@ -2174,6 +2326,9 @@ export class Room {
         action.targetsRemaining -= 1;
         action.hitsLanded += 1;
         ct.damageDealtThisTurn += dmg;
+        // XP from a printed conditional bonus (e.g. Single Out: +1 XP vs an
+        // isolated target). Granted once per matching target hit.
+        if (cardCond.exp > 0) this.grantXp(guard.p, cardCond.exp, 'conditional bonus');
         if (action.targetsRemaining <= 0) action.done = true;
         break;
       }
@@ -2219,7 +2374,19 @@ export class Room {
           // target branch above for the rationale). Applied per-target so a
           // future per-target doubling effect can slot in here.
           const printedAttack = double ? resolvedAmount * 2 : resolvedAmount;
-          const baseAmount = printedAttack + bonusAmt + action.lockedRiderAttack + poisonBonus(tgt);
+          // Per-target conditional bonuses, evaluated per enemy the AOE hits.
+          // (Advantage from a conditional bonus isn't applied to AOE — no AOE
+          // card grants it, and AOE doesn't draw with advantage.)
+          const cardCond = this.resolveTargetConditionalBonuses(
+            action.targetConditionalBonuses,
+            unit,
+            tgt,
+          );
+          const activeCond = this.targetConditionalActiveBonus(guard.p, 'melee', unit, tgt);
+          const condAttack = cardCond.attack + activeCond.attack;
+          const condPierce = cardCond.pierce + activeCond.pierce;
+          const baseAmount =
+            printedAttack + bonusAmt + action.lockedRiderAttack + poisonBonus(tgt) + condAttack;
           // Per-target conditional triggers (isolated/shielded/invisible).
           // AOE attacks are treated as melee for the shielded check.
           this.fireAttackConditionalTriggers(guard.p, unit, tgt, 'melee');
@@ -2234,7 +2401,7 @@ export class Room {
           const dmg = applyDamage(
             tgt,
             finalAmount,
-            action.pierce + bonusPierce + action.lockedRiderPierce + itemPierce,
+            action.pierce + bonusPierce + action.lockedRiderPierce + itemPierce + condPierce,
           );
           ct.lastModifierDraws.push({
             id: nextDrawId(),
@@ -2255,10 +2422,22 @@ export class Room {
             tgt.hp > 0 &&
             !unitImmuneTo(tgt, 'poison')
           ) {
+            const cid = this.charIdForUnit(unit);
+            if (cid) {
+              this.emitBG({
+                kind: 'condition_applied',
+                byCharacterId: cid,
+                targetIsEnemy: true,
+                condition: 'poison',
+                targetPriorNegativeConditions: tgt.conditions.map((c) => c.kind),
+              });
+            }
             applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
             this.pushEvent(`${tgt.name} is Poisoned.`);
           }
           if (ct.poisonCharge && ct.poisonCharge.unitId === tgt.id) ct.poisonCharge = null;
+          // Ridered conditions apply to every enemy the AOE hits.
+          this.applyAttackRiderConditions(unit, tgt, action.riderConditions, drawn.card.kind === 'null');
           {
             const attackerCid = this.charIdForUnit(unit);
             if (attackerCid) {
@@ -2283,6 +2462,8 @@ export class Room {
           }
           hitCount += 1;
           ct.damageDealtThisTurn += dmg;
+          // XP from a printed conditional bonus, per matching enemy hit.
+          if (cardCond.exp > 0) this.grantXp(guard.p, cardCond.exp, 'conditional bonus');
         }
         if (hitCount === 0) this.pushEvent(`${unit.name}'s AOE hits no enemies.`);
         action.hitsLanded = hitCount;
@@ -2378,6 +2559,7 @@ export class Room {
           expires: action.expires,
           ...(action.attackKind ? { attackKind: action.attackKind } : {}),
           ...(action.doubleAttack ? { doubleAttack: true as const } : {}),
+          ...(action.targetCondition ? { targetCondition: action.targetCondition } : {}),
         });
         const desc = action.doubleAttack
           ? `${unit.name} prepares to double their next attack.`
@@ -2404,6 +2586,14 @@ export class Room {
         unit.invisible = true;
         unit.invisibleAppliedThisTurn = true;
         this.pushEvent(`${unit.name} becomes Invisible.`);
+        action.done = true;
+        break;
+      }
+      case 'loot': {
+        const n = this.lootTokensInRange(unit, action.range, 'ability');
+        if (n === 0) {
+          this.pushEvent(`${unit.name} finds no money tokens to loot.`);
+        }
         action.done = true;
         break;
       }
@@ -2488,6 +2678,29 @@ export class Room {
     });
   }
 
+  /** Draw a random unused standee number (1..count) for `monsterId`, or
+   *  undefined if the pool is exhausted (standee shortage — the figure is placed
+   *  without a number rather than failing placement). */
+  private allocateStandeeNumber(monsterId: string, count: number): number | undefined {
+    let used = this.standeesInUse.get(monsterId);
+    if (!used) {
+      used = new Set();
+      this.standeesInUse.set(monsterId, used);
+    }
+    const free: number[] = [];
+    for (let n = 1; n <= count; n++) if (!used.has(n)) free.push(n);
+    if (free.length === 0) return undefined;
+    const pick = free[Math.floor(Math.random() * free.length)]!;
+    used.add(pick);
+    return pick;
+  }
+
+  /** Return a dead monster's standee number to its type's pool. */
+  private freeStandeeNumber(unit: Unit): void {
+    if (unit.kind !== 'monster' || unit.standeeNumber === undefined) return;
+    this.standeesInUse.get(unit.defId)?.delete(unit.standeeNumber);
+  }
+
   /** A monster target is "isolated" when no other monsters are in its adjacent
    *  hexes. Used by `attack-against-isolated-enemy` triggers (e.g. Single Out). */
   private isIsolatedMonster(target: Unit): boolean {
@@ -2498,6 +2711,75 @@ export class Room {
       if (hexDistance(u.hex, target.hex) === 1) return false;
     }
     return true;
+  }
+
+  /** Evaluate a printed per-target condition for `attacker` hitting `target`.
+   *  Drives both a card's `targetConditionalBonuses` and target-gated persistent
+   *  attack bonuses. */
+  private matchesTargetCondition(
+    cond: TargetCondition,
+    attacker: Unit,
+    target: Unit,
+  ): boolean {
+    switch (cond.kind) {
+      case 'target-undamaged':
+        return target.hp >= target.hpMax;
+      case 'target-isolated-from-allies':
+        return this.isIsolatedMonster(target);
+      case 'target-adjacent-to-your-ally':
+        // Adjacent to at least one of the acting player's allies — any other
+        // player figure (the attacker themself doesn't count).
+        for (const u of this.units) {
+          if (u.id === target.id || u.id === attacker.id) continue;
+          if (u.kind !== 'player') continue;
+          if (hexDistance(u.hex, target.hex) === 1) return true;
+        }
+        return false;
+      case 'all-of':
+        return cond.conditions.every((c) => this.matchesTargetCondition(c, attacker, target));
+    }
+  }
+
+  /** Sum the bonuses from a card's printed `targetConditionalBonuses` that match
+   *  `target`. Used by both single-target and AOE attack resolution. */
+  private resolveTargetConditionalBonuses(
+    bonuses: readonly TargetConditionalBonus[] | undefined,
+    attacker: Unit,
+    target: Unit,
+  ): { attack: number; pierce: number; exp: number; advantage: boolean } {
+    let attack = 0;
+    let pierce = 0;
+    let exp = 0;
+    let advantage = false;
+    for (const b of bonuses ?? []) {
+      if (!this.matchesTargetCondition(b.condition, attacker, target)) continue;
+      attack += b.attackBonus ?? 0;
+      pierce += b.pierce?.amount ?? 0;
+      exp += b.gainExp ?? 0;
+      if (b.advantage) advantage = true;
+    }
+    return { attack, pierce, exp, advantage };
+  }
+
+  /** Sum target-gated persistent attack bonuses (e.g. Single Out's +3 vs
+   *  isolated) that apply against `target`. These are never consumed — they
+   *  persist until their source card expires. */
+  private targetConditionalActiveBonus(
+    p: PlayerEntry,
+    attackKind: 'melee' | 'ranged',
+    attacker: Unit,
+    target: Unit,
+  ): { attack: number; pierce: number } {
+    let attack = 0;
+    let pierce = 0;
+    for (const e of p.activeEffects) {
+      if (e.kind !== 'attack-bonus' || !e.targetCondition) continue;
+      if (e.attackKind && e.attackKind !== attackKind) continue;
+      if (!this.matchesTargetCondition(e.targetCondition, attacker, target)) continue;
+      attack += e.amount;
+      pierce += e.pierceBonus;
+    }
+    return { attack, pierce };
   }
 
   /** Fire all attack-time conditional persistent triggers for a player who just
@@ -3119,6 +3401,14 @@ export class Room {
         if (ret) {
           const back = applyDamage(m, ret.amount, 0);
           this.pushEvent(`${tgtUnit.name} retaliates ${m.name} for ${back}.`);
+          // Deferred `on-next-retaliate-this-round` XP riders fire now, then
+          // the queue is cleared (a single retaliate consumes all pending).
+          if (targetPlayer.pendingRetaliateXp.length > 0) {
+            for (const q of targetPlayer.pendingRetaliateXp) {
+              this.grantXp(targetPlayer, q.amount, q.label);
+            }
+            targetPlayer.pendingRetaliateXp = [];
+          }
           if (m.hp <= 0) {
             // Retaliate is not an attack — byAttack: false.
             this.recordEnemyKilled(m, {
@@ -3162,9 +3452,11 @@ export class Room {
       if (e.kind === 'player') enemyInit.set(e.unitId, e.initiative);
     }
 
-    const monsters = this.units.filter(
-      (u) => u.kind === 'monster' && monsterDefMatchesSet(u.defId, cur.setId),
-    );
+    const monsters = this.units
+      .filter((u) => u.kind === 'monster' && monsterDefMatchesSet(u.defId, cur.setId))
+      // Acting order within the set: named → elite → normal, then ascending
+      // standee number.
+      .sort(monsterActOrder);
 
     // Set-block start: if the card has a consume step and at least one
     // member of the set is going to act, resolve the consume now. Members
@@ -3200,17 +3492,22 @@ export class Room {
       .filter((e) => e.kind === 'shield-bonus')
       .reduce((s, e) => s + e.amount, 0);
 
-    const baseAbility = readAbility(card, stat);
-    const move = baseAbility.move;
-    const attack = baseAbility.attack
-      ? {
-          range: baseAbility.attack.range + consumedRangeBonus,
-          damage: baseAbility.attack.damage + consumedAttackBonus,
-          targets: baseAbility.attack.targets,
-          effects: baseAbility.attack.effects,
-        }
-      : null;
-    const range = attack?.range ?? 1;
+    // The ability's move/attack values come from each acting figure's own
+    // rank stat block (elites hit harder / move differently), with the set-wide
+    // consume bonuses layered on. Computed per member inside the loop below.
+    const abilityForRank = (rank: MonsterRank | undefined) => {
+      const rankStat = (rank === 'elite' ? def.levels[1]?.elite : def.levels[1]?.normal) ?? stat;
+      const base = readAbility(card, rankStat);
+      const attack = base.attack
+        ? {
+            range: base.attack.range + consumedRangeBonus,
+            damage: base.attack.damage + consumedAttackBonus,
+            targets: base.attack.targets,
+            effects: base.attack.effects,
+          }
+        : null;
+      return { move: base.move, attack, range: attack?.range ?? 1 };
+    };
 
     // TODO: per-figure consume-benefit (monsters-and-elements.md). Today no
     // monster set has reveal/spawn-mid-block, so every acting member is
@@ -3237,6 +3534,7 @@ export class Room {
         for (const k of removed) this.pushEvent(`${m.name} is no longer ${k}ed.`);
         continue;
       }
+      const { move, attack, range } = abilityForRank(m.rank);
       const canMove = move && !hasCondition(m, 'immobilize');
       const canAttack = attack && !hasCondition(m, 'disarm');
       if (hasCondition(m, 'immobilize')) this.pushEvent(`${m.name} is immobilized.`);
@@ -3462,20 +3760,27 @@ export class Room {
     const waned = ALL_ELEMENTS.filter((e) => before[e] !== this.elementBoard[e]);
     if (waned.length > 0) this.pushEvent(`Elements wane: ${waned.join(', ')}.`);
     // Persistent-round cards leave the active area (to discard); 'end-round'
-    // active effects expire. Persistent-scenario cards & 'end-scenario' effects stay.
+    // active effects expire. Cards stay in the active area until their own
+    // disposition rule fires: persistent-scenario lasts to scenario end, and
+    // persistent-tracked lasts until its tracked uses run out (removed by
+    // fireTrackedTrigger). Only round-bounded cards leave here.
     for (const p of this.players.values()) {
       const stayActive: Card[] = [];
       for (const card of p.active) {
-        // We don't track which half kept the card alive; conservative rule for v1:
-        // if EITHER half has persistent-scenario disposition, keep it; otherwise discard.
-        const isScenario =
+        // We don't track which half kept the card alive; conservative rule:
+        // if EITHER half is persistent-scenario or persistent-tracked, keep it.
+        const survivesRound =
           card.top.disposition === 'persistent-scenario' ||
-          card.bottom.disposition === 'persistent-scenario';
-        if (isScenario) stayActive.push(card);
+          card.bottom.disposition === 'persistent-scenario' ||
+          card.top.disposition === 'persistent-tracked' ||
+          card.bottom.disposition === 'persistent-tracked';
+        if (survivesRound) stayActive.push(card);
         else p.discard.push(card);
       }
       p.active = stayActive;
       p.activeEffects = p.activeEffects.filter((e) => e.expires === 'end-scenario');
+      // `on-next-retaliate-this-round` riders that never fired expire now.
+      p.pendingRetaliateXp = [];
     }
     this.phase = 'card_select';
   }
@@ -3584,10 +3889,14 @@ export class Room {
       perksUnlocked: [],
       pool: [...defaultPoolForClass(classDef)],
       claimedByPlayerId: playerId,
-      gold: 0,
+      // Rulebook: each character starts with 25 gold to spend on shop items
+      // (items 1–13, the supply with no reputation requirement).
+      gold: 25,
       loadout: null,
+      shoppingDone: false,
       ownedItemIds: [],
       broughtItemIds: [],
+      sessionPurchasedItemIds: [],
       spentItemIds: [],
       activeItems: [],
       battleGoalCheckmarks: 0,
@@ -3680,6 +3989,42 @@ export class Room {
     return { ok: true };
   }
 
+  /** Mark the player's pre-scenario shopping as finished (ready up). Requires
+   *  a locked loadout — you can't ready up before choosing a hand. */
+  finishShopping(
+    playerId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    if (!entry.activeCharacterId) return { ok: false, reason: 'no_character' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'character_not_found' };
+    if (instance.loadout === null) return { ok: false, reason: 'no_loadout' };
+    instance.shoppingDone = true;
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Re-open the shop after readying up (un-ready). */
+  reopenShopping(
+    playerId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    if (!entry.activeCharacterId) return { ok: false, reason: 'no_character' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'character_not_found' };
+    instance.shoppingDone = false;
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
   buyItem(
     playerId: string,
     itemId: string,
@@ -3712,6 +4057,58 @@ export class Room {
     stock.remaining -= 1;
     instance.gold -= item.cost;
     instance.ownedItemIds.push(itemId);
+    // Remember this as a same-session purchase so it can be undone until the
+    // scenario starts.
+    if (!Array.isArray(instance.sessionPurchasedItemIds)) {
+      instance.sessionPurchasedItemIds = [];
+    }
+    instance.sessionPurchasedItemIds.push(itemId);
+    // Auto-bring the freshly bought item, but only if doing so still satisfies
+    // slot limits — otherwise leave it owned-but-not-brought for the player to
+    // sort out manually.
+    const withNew = [...instance.broughtItemIds, itemId];
+    if (validateItemLoadout(instance.level, instance.ownedItemIds, withNew).ok) {
+      instance.broughtItemIds = withNew;
+    }
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /**
+   * Undo a purchase made during the current shopping session: refund the gold,
+   * return the item to shop stock, and remove it from owned/brought. Only items
+   * in `sessionPurchasedItemIds` (bought this trip, before the scenario starts)
+   * can be undone.
+   */
+  undoBuyItem(
+    playerId: string,
+    itemId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (instance.claimedByPlayerId !== playerId) {
+      return { ok: false, reason: 'not_your_character' };
+    }
+    if (this.phase !== 'lobby') {
+      return { ok: false, reason: 'can_only_buy_in_lobby' };
+    }
+    const session = instance.sessionPurchasedItemIds ?? [];
+    if (!session.includes(itemId)) {
+      return { ok: false, reason: 'not_bought_this_session' };
+    }
+    const item = getItem(itemId);
+    if (!item) return { ok: false, reason: 'unknown_item' };
+    instance.gold += item.cost;
+    instance.ownedItemIds = instance.ownedItemIds.filter((id) => id !== itemId);
+    instance.broughtItemIds = instance.broughtItemIds.filter((id) => id !== itemId);
+    instance.sessionPurchasedItemIds = session.filter((id) => id !== itemId);
+    const stock = (this.campaign.shop ?? []).find((s) => s.itemId === itemId);
+    if (stock) stock.remaining += 1;
     void this.persist();
     this.broadcastState();
     return { ok: true };
@@ -3746,6 +4143,32 @@ export class Room {
   }
 
   useItem(
+    playerId: string,
+    itemId: string,
+    slot: 'top' | 'bottom' | undefined,
+    actionId: string | undefined,
+    targetUnitId?: string,
+    targetCardId?: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const result = this.useItemInner(playerId, itemId, slot, actionId, targetUnitId, targetCardId);
+    // Battle goals (Prohibitionist): a successful use of any item — covering
+    // every effect branch and the activation path — emits one item_used event.
+    if (result.ok) {
+      const cid = this.charIdForPlayer(playerId);
+      const item = getItem(itemId);
+      if (cid && item) {
+        this.emitBG({
+          kind: 'item_used',
+          characterId: cid,
+          itemId,
+          isPotion: item.isPotion ?? false,
+        });
+      }
+    }
+    return result;
+  }
+
+  private useItemInner(
     playerId: string,
     itemId: string,
     slot: 'top' | 'bottom' | undefined,
@@ -4053,26 +4476,31 @@ export class Room {
   /** Refresh any `amountRef`-bound amounts on the active turn's queue from the
    *  current state. Cheap; called before every broadcast so the player sees
    *  Attack X / Move X update live as they move or deal damage. */
-  /** Denormalize each player unit's aggregate Retaliate amount onto the
-   *  Unit for client display. Source of truth remains PlayerEntry.activeEffects
-   *  (which carries per-source range + amount); the wire `Unit.retaliate` is
-   *  just the sum for UI status chips. Monsters can't gain Retaliate today. */
+  /** Denormalize each player unit's active Retaliate onto the Unit for client
+   *  display, aggregated into bands by range (amounts sharing a range are
+   *  summed; bands sorted by ascending range). Source of truth remains
+   *  PlayerEntry.activeEffects. Monsters can't gain Retaliate today. */
   private syncUnitRetaliate(): void {
     for (const u of this.units) {
       if (u.kind !== 'player' || !u.ownerPlayerId) {
-        u.retaliate = 0;
+        u.retaliate = [];
         continue;
       }
       const p = this.players.get(u.ownerPlayerId);
       if (!p) {
-        u.retaliate = 0;
+        u.retaliate = [];
         continue;
       }
-      let total = 0;
+      const byRange = new Map<number, number>();
       for (const e of p.activeEffects) {
-        if (e.kind === 'retaliate') total += e.amount;
+        if (e.kind === 'retaliate') {
+          byRange.set(e.range, (byRange.get(e.range) ?? 0) + e.amount);
+        }
       }
-      u.retaliate = total;
+      u.retaliate = [...byRange.entries()]
+        .filter(([, amount]) => amount > 0)
+        .sort(([a], [b]) => a - b)
+        .map(([range, amount]) => ({ amount, range }));
     }
   }
 
@@ -4291,31 +4719,43 @@ export class Room {
    * Removes the token(s) from the map and adds them to the unit's held count.
    */
   private autoLootForUnit(unit: Unit): void {
-    if (unit.kind !== 'player') return;
+    this.lootTokensInRange(unit, 0, 'end-of-turn');
+  }
+
+  /**
+   * Loot every money token within `range` hexes of `unit` (range 0 = own hex).
+   * Removes them from the map, adds to the unit's held count, emits the battle
+   * goal event, and returns how many were collected. Shared by the mandatory
+   * end-of-turn auto-loot (range 0) and Loot abilities (range 1+).
+   */
+  private lootTokensInRange(
+    unit: Unit,
+    range: number,
+    source: 'end-of-turn' | 'ability',
+  ): number {
+    if (unit.kind !== 'player') return 0;
     const here: MoneyToken[] = [];
     const rest: MoneyToken[] = [];
     for (const t of this.moneyTokens) {
-      (hexEqual(t.hex, unit.hex) ? here : rest).push(t);
+      (hexDistance(t.hex, unit.hex) <= range ? here : rest).push(t);
     }
-    if (here.length === 0) return;
+    if (here.length === 0) return 0;
     this.moneyTokens = rest;
     unit.moneyTokensHeld = (unit.moneyTokensHeld ?? 0) + here.length;
-    // Battle goals: mandatory end-of-turn loot.
-    {
-      const cid = this.charIdForUnit(unit);
-      if (cid) {
-        this.emitBG({
-          kind: 'loot_collected',
-          characterId: cid,
-          tokenIds: here.map((t) => t.id),
-          source: 'end-of-turn',
-          adjacentToEnemy: this.adjacentEnemyCount(unit) > 0,
-        });
-      }
+    const cid = this.charIdForUnit(unit);
+    if (cid) {
+      this.emitBG({
+        kind: 'loot_collected',
+        characterId: cid,
+        tokenIds: here.map((t) => t.id),
+        source,
+        adjacentToEnemy: this.adjacentEnemyCount(unit) > 0,
+      });
     }
     this.pushEvent(
       `${unit.name} loots ${here.length} money token${here.length === 1 ? '' : 's'} (holding ${unit.moneyTokensHeld}).`,
     );
+    return here.length;
   }
 
   // ---- Battle goals ------------------------------------------------------
@@ -4324,6 +4764,34 @@ export class Room {
   private charIdForUnit(unit: Unit): string | null {
     if (unit.kind !== 'player' || !unit.ownerPlayerId) return null;
     return this.players.get(unit.ownerPlayerId)?.activeCharacterId ?? null;
+  }
+
+  /** Apply each condition that rides on an attack to the target it just hit.
+   *  A negative condition applied to an enemy through an attack is mandatory,
+   *  so there is no player choice here. Skipped on a miss or a kill (a dead
+   *  figure can't carry a condition) and for immune targets. */
+  private applyAttackRiderConditions(
+    attacker: Unit,
+    target: Unit,
+    conditions: readonly NegativeCondition[] | undefined,
+    missed: boolean,
+  ): void {
+    if (!conditions || conditions.length === 0 || missed || target.hp <= 0) return;
+    for (const condition of conditions) {
+      if (unitImmuneTo(target, condition)) continue;
+      const cid = this.charIdForUnit(attacker);
+      if (cid) {
+        this.emitBG({
+          kind: 'condition_applied',
+          byCharacterId: cid,
+          targetIsEnemy: true,
+          condition,
+          targetPriorNegativeConditions: target.conditions.map((c) => c.kind),
+        });
+      }
+      applyConditionToUnit(target, condition, /*isOwnTurn*/ false);
+      this.pushEvent(`${target.name} is ${condition}ed.`);
+    }
   }
 
   private charIdForPlayer(playerId: string): string | null {
@@ -4389,6 +4857,9 @@ export class Room {
     },
   ): void {
     const droppedLootTokenId = this.dropMoneyTokenOnDeath(dead);
+    // Return the dead figure's standee number to its type's pool so a later
+    // reveal/spawn of the same type can reuse it.
+    this.freeStandeeNumber(dead);
     this.monsterTypesSeen.add(dead.defId);
     const hpBefore = opts.hpBeforeHit ?? dead.hpMax;
     const wouldCause = opts.finalDamage ?? 0;
@@ -4402,9 +4873,7 @@ export class Room {
       overkill: opts.byAttack ? Math.max(0, wouldCause - hpBefore) : 0,
       targetWasUndamaged: hpBefore >= dead.hpMax,
       attackAdvantage: opts.attackAdvantage ?? (opts.byAttack ? 'normal' : null),
-      // TODO: units don't carry rank yet (only normal monsters spawn); wire
-      // elite/named/boss when rank lands on Unit. Affects Hunter/Plebeian.
-      targetRank: 'normal',
+      targetRank: dead.rank ?? 'normal',
       targetDefId: dead.defId,
       droppedLootTokenId,
       elementsStrongOrWaning: this.countStrongOrWaningElements(),
@@ -4449,11 +4918,47 @@ export class Room {
     return { ok: true };
   }
 
-  /** The owning player's secret battle-goal hand, for PrivatePlayerState. */
+  /** The owning player's secret battle-goal hand, for PrivatePlayerState.
+   *  Augmented with a live pass/fail status for the chosen goal so the
+   *  Scenario tab can show a running checkbox. */
   private battleGoalHandForPlayer(playerId: string): BattleGoalHand | null {
     const charId = this.charIdForPlayer(playerId);
     if (!charId) return null;
-    return this.battleGoalHands.get(charId) ?? null;
+    const hand = this.battleGoalHands.get(charId);
+    if (!hand) return null;
+    const chosenGoalStatus = hand.chosenGoalId
+      ? this.liveGoalStatus(charId, hand.chosenGoalId)
+      : null;
+    return { ...hand, chosenGoalStatus };
+  }
+
+  /** Best-effort live status of a chosen goal, folded from the in-progress
+   *  event log. A goal that's satisfiable at the very start but not now has
+   *  been broken ('failed', e.g. a "never…" goal); one that's never yet been
+   *  satisfied is still 'pending'. */
+  private liveGoalStatus(
+    charId: string,
+    goalId: string,
+  ): 'achieved' | 'failed' | 'pending' {
+    const allCharacterIds = [...this.battleGoalHands.keys()];
+    const lootByCharacter: Record<string, number> = {};
+    for (const cid of allCharacterIds) lootByCharacter[cid] = 0;
+    for (const u of this.units) {
+      const cid = this.charIdForUnit(u);
+      if (cid) lootByCharacter[cid] = u.moneyTokensHeld ?? 0;
+    }
+    const ctx = {
+      characterId: charId,
+      allCharacterIds,
+      lootByCharacter,
+      monsterTypesInScenario: [...this.monsterTypesSeen],
+    };
+    if (evaluateBattleGoal(goalId, this.battleGoalLog, ctx).achieved) {
+      return 'achieved';
+    }
+    // Satisfied with no events at all → a "never break this" goal that has now
+    // been broken; otherwise it just hasn't happened yet.
+    return evaluateBattleGoal(goalId, [], ctx).achieved ? 'failed' : 'pending';
   }
 
   /** Fold the scenario's event log through each character's chosen goal and

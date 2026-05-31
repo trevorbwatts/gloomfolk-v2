@@ -8,6 +8,9 @@ import type {
 
 interface AppState {
   connected: boolean;
+  /** Server's LAN IPv4 (from the `hello` message), for the host join URL.
+   *  Null until received or if the server couldn't determine one. */
+  lanHost: string | null;
   role: Role | null;
   playerId: string | null;
   campaignId: string | null;
@@ -23,6 +26,7 @@ interface AppState {
 
 export const useStore = create<AppState>((set) => ({
   connected: false,
+  lanHost: null,
   role: null,
   playerId: null,
   campaignId: null,

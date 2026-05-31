@@ -12,6 +12,7 @@ import { skewer } from '@gloomfolk/shared/cards';
 
 import {
   addMonster,
+  advanceToNextRound,
   attachTracked,
   disposePlayerCards,
   fireAttackConditional,
@@ -78,6 +79,26 @@ describe('persistent-tracked: Warding Strength (Bruiser, bottom)', () => {
     const result = fireTrigger(room, player, 'attack-targets-self');
     assert.equal(result.damageNegated, false);
     assert.equal(player.activeTracked.length, 0);
+  });
+
+  it('survives end of round with unused slots — stays active until uses run out', () => {
+    const { room, player } = makeFixture();
+    attachTracked(player, wardingStrength, 'bottom');
+
+    // Use 2 of 6 slots, then a round flips over before the rest are spent.
+    fireTrigger(room, player, 'attack-targets-self');
+    fireTrigger(room, player, 'attack-targets-self');
+    advanceToNextRound(room);
+
+    assert.equal(player.active.length, 1, 'card stays in the active area across the round');
+    assert.equal(player.active[0]?.id, wardingStrength.id);
+    assert.equal(player.discard.length, 0, 'not prematurely discarded');
+    assert.equal(player.activeTracked[0]?.currentSlot, 3, 'tracked progress preserved');
+
+    // Disposition still fires normally once the remaining slots are consumed.
+    for (let i = 0; i < 4; i++) fireTrigger(room, player, 'attack-targets-self');
+    assert.equal(player.active.length, 0, 'card leaves once its 6 uses are spent');
+    assert.equal(player.lost.length, 1);
   });
 });
 

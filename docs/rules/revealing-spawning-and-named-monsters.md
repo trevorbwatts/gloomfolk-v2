@@ -132,6 +132,25 @@ priority order:
   field on the figure and "no base" doesn't apply. Engine should not
   fail placement on this condition.
 
+### Standee number assignment
+
+Each placed figure gets a **standee number** drawn **at random** from the
+unused numbers for its type (`1..standeeCount`), mirroring pulling a physical
+standee from the bag. Numbers are **unique per type** within a scenario.
+
+- **Draw at random, not sequentially** — placing two Bandit Archers might
+  yield #4 and #1, not #1 and #2.
+- **Return on death:** a figure's number goes back into its type's pool when it
+  dies, so a later reveal/spawn of the same type can reuse it (relevant for
+  continuous-spawn scenarios).
+- **Pool exhaustion is the standee shortage above:** once a type's numbers are
+  all in use, further additions hit the shortage case (place elites first, by
+  proximity). In software, place without a number rather than fail placement.
+- The number is **display/identity only** for normal monsters; it becomes
+  load-bearing for bosses (section-book lookup, see
+  [monster-damage-and-death.md](monster-damage-and-death.md)) and for
+  acting-order ties (ascending standee number within a rank).
+
 ### Initiative splice
 
 The round's initiative order is mutable mid-round. When a new set joins:

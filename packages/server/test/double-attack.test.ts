@@ -39,6 +39,7 @@ describe('consumeAttackBonus — doubleAttack reporting', () => {
       active: [],
       activeTracked: [],
       activeEffects: effects,
+      pendingRetaliateXp: [],
       selection: null,
       modifierDeck: [],
       modifierDiscard: [],

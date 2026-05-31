@@ -134,6 +134,39 @@ export function HexBoard({
     return () => cancelAnimationFrame(rafId);
   }, [moveAnim]);
 
+  // --- Monster-attack cinematic ---------------------------------------------
+  // The server streams the enemy turn as phases (focus → move → modifier-draw →
+  // damage). We bump a nonce each time a fresh hit resolves so the one-shot
+  // impact visuals (flash, damage pop, lunge, shake) remount and replay.
+  const mAnim = monsterTurnAnim ?? null;
+  const mDraw = mAnim?.modifierDraw ?? null;
+  const isImpact = mAnim?.phase === 'damage' && !!mDraw && mDraw.damageDealt !== null;
+  const hitSig = isImpact
+    ? `${mAnim!.activeMonsterId}|${mDraw!.targetUnitId}|${mDraw!.finalAmount}|${mDraw!.damageDealt}`
+    : null;
+  const hitSigRef = useRef<string | null>(null);
+  const [hitNonce, setHitNonce] = useState(0);
+  useEffect(() => {
+    if (hitSig && hitSig !== hitSigRef.current) {
+      hitSigRef.current = hitSig;
+      setHitNonce((n) => n + 1);
+    } else if (!hitSig) {
+      hitSigRef.current = null;
+    }
+  }, [hitSig]);
+  // Screen shake on a landed hit — the reflow trick replays the CSS animation
+  // without React clobbering it (animation isn't part of the style prop).
+  useEffect(() => {
+    if (hitNonce === 0) return;
+    if ((mDraw?.damageDealt ?? 0) <= 0) return; // misses/full blocks don't shake
+    const el = svgRef.current;
+    if (!el) return;
+    el.style.animation = 'none';
+    void el.getBoundingClientRect();
+    el.style.animation = 'hexImpactShake 0.4s ease-in-out';
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hitNonce]);
+
   // Pixel position to render `unit` at — interpolated along moveAnim if it
   // applies to this unit, otherwise its true hex.
   const unitRenderPos = (u: Unit): Pt => {
@@ -159,6 +192,51 @@ export function HexBoard({
       }
     }
     return axialToPx(u.hex.q, u.hex.r, size);
+  };
+
+  // One-shot transform animation for a unit's token during an impact: the
+  // attacker lunges toward its target and back; the struck target jitters.
+  // Returns an <animateTransform> to drop inside the token's <g> (keyed by the
+  // hit nonce so it replays each hit).
+  const renderTokenFx = (u: Unit): React.ReactNode => {
+    if (!isImpact || !mAnim || !mDraw) return null;
+    if (u.id === mAnim.activeMonsterId) {
+      const target = units.find((x) => x.id === mDraw.targetUnitId);
+      if (!target) return null;
+      const a = unitRenderPos(u);
+      const b = unitRenderPos(target);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const lx = ((dx / len) * size * 0.5).toFixed(1);
+      const ly = ((dy / len) * size * 0.5).toFixed(1);
+      return (
+        <animateTransform
+          key={`lunge-${hitNonce}`}
+          attributeName="transform"
+          type="translate"
+          dur="0.32s"
+          repeatCount="1"
+          keyTimes="0;0.45;1"
+          values={`0 0; ${lx} ${ly}; 0 0`}
+          calcMode="spline"
+          keySplines="0.3 0 0.2 1; 0.4 0 0.2 1"
+        />
+      );
+    }
+    if (u.id === mDraw.targetUnitId && (mDraw.damageDealt ?? 0) > 0) {
+      return (
+        <animateTransform
+          key={`shake-${hitNonce}`}
+          attributeName="transform"
+          type="translate"
+          dur="0.4s"
+          repeatCount="1"
+          values="0 0; -2.5 1.5; 2.5 -1.5; -1.5 1; 1 -0.5; 0 0"
+        />
+      );
+    }
+    return null;
   };
 
   useEffect(() => {
@@ -372,6 +450,12 @@ export function HexBoard({
         })()}
       </g>
       <defs>
+        <style>{
+          '@keyframes hexImpactShake{0%,100%{transform:translate(0,0)}' +
+          '15%{transform:translate(-3px,2px)}30%{transform:translate(3px,-2px)}' +
+          '45%{transform:translate(-2px,2px)}60%{transform:translate(2px,-1px)}' +
+          '80%{transform:translate(-1px,1px)}}'
+        }</style>
         {units.map((u) => {
           const { x, y } = unitRenderPos(u);
           return (
@@ -420,19 +504,7 @@ export function HexBoard({
             </circle>
             {t && (() => {
               const tPos = unitRenderPos(t);
-              return (
-                <circle
-                  cx={tPos.x}
-                  cy={tPos.y}
-                  r={size * 0.95}
-                  fill="none"
-                  stroke="#ffd84d"
-                  strokeWidth={3.5}
-                  opacity={0.85}
-                >
-                  <animate attributeName="opacity" values="0.4;1;0.4" dur="1.2s" repeatCount="indefinite" />
-                </circle>
-              );
+              return <Reticle x={tPos.x} y={tPos.y} size={size} />;
             })()}
           </g>
         );
@@ -455,6 +527,7 @@ export function HexBoard({
               style={{ cursor: handler ? 'pointer' : 'default' }}
               onClick={handler}
             >
+              {renderTokenFx(u)}
               {isActive && (
                 <circle cx={x} cy={y} r={size * 0.85} fill="none" stroke="#ffd84d" strokeWidth={3} />
               )}
@@ -467,7 +540,16 @@ export function HexBoard({
                   <circle cx={x} cy={y} r={size * 0.78} fill="none" stroke="#d9a441" strokeWidth={3.5} />
                 </>
               )}
-              <circle cx={x} cy={y} r={size * 0.62} fill={fill} stroke="#fff" strokeWidth={1.5} />
+              <circle
+                cx={x}
+                cy={y}
+                r={size * 0.62}
+                fill={fill}
+                stroke={
+                  u.rank === 'elite' ? '#f0c850' : u.rank === 'named' ? '#e0564f' : '#fff'
+                }
+                strokeWidth={u.rank === 'elite' || u.rank === 'named' ? 3 : 1.5}
+              />
               {avatar ? (
                 <image
                   href={avatar}
@@ -489,6 +571,14 @@ export function HexBoard({
                     ? `⛨${u.shield}`
                     : `${u.hp}/${u.hpMax}${u.shield > 0 ? ` ⛨${u.shield}` : ''}`}
                 </text>
+              )}
+              {u.kind === 'monster' && u.standeeNumber !== undefined && (
+                <>
+                  <circle cx={x + size * 0.52} cy={y - size * 0.52} r={size * 0.34} fill="#1b1b1b" stroke="#fff" strokeWidth={1} />
+                  <text x={x + size * 0.52} y={y - size * 0.52} textAnchor="middle" dominantBaseline="central" fontSize={size * 0.4} fontWeight={700} fill="#fff">
+                    {u.standeeNumber}
+                  </text>
+                </>
               )}
               {(u.conditions.length > 0 || u.invisible) && (() => {
                 const items = [
@@ -526,6 +616,21 @@ export function HexBoard({
           );
         })}
       </g>
+      {isImpact && mDraw && (() => {
+        const t = units.find((u) => u.id === mDraw.targetUnitId);
+        if (!t) return null;
+        const { x, y } = unitRenderPos(t);
+        return (
+          <AttackImpactFx
+            key={hitNonce}
+            x={x}
+            y={y}
+            size={size}
+            dealt={mDraw.damageDealt ?? 0}
+            blocked={Math.max(0, mDraw.finalAmount - (mDraw.damageDealt ?? 0))}
+          />
+        );
+      })()}
       {(() => {
         // Arrow from active monster to its current target. Drawn last so it
         // sits on top of unit tokens. Skipped during the move-anim segment
@@ -566,5 +671,151 @@ export function HexBoard({
         );
       })()}
     </svg>
+  );
+}
+
+/** Animated targeting reticle that "locks onto" the figure an enemy is about to
+ *  attack: a slowly rotating dashed ring with crosshair ticks plus a pulsing
+ *  inner ring. Replaces the old static gold ring. */
+function Reticle({ x, y, size }: { x: number; y: number; size: number }) {
+  const r = size * 0.95;
+  const tick = size * 0.24;
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <g>
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from={`0 ${x} ${y}`}
+          to={`360 ${x} ${y}`}
+          dur="6s"
+          repeatCount="indefinite"
+        />
+        <circle
+          cx={x}
+          cy={y}
+          r={r}
+          fill="none"
+          stroke="#ffd84d"
+          strokeWidth={2.5}
+          strokeDasharray={`${(r * 0.5).toFixed(1)} ${(r * 0.32).toFixed(1)}`}
+          opacity={0.9}
+        />
+        {[0, 90, 180, 270].map((a) => {
+          const rad = (a * Math.PI) / 180;
+          const ox = Math.cos(rad);
+          const oy = Math.sin(rad);
+          return (
+            <line
+              key={a}
+              x1={x + ox * (r - tick)}
+              y1={y + oy * (r - tick)}
+              x2={x + ox * (r + tick * 0.35)}
+              y2={y + oy * (r + tick * 0.35)}
+              stroke="#ffd84d"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+            />
+          );
+        })}
+      </g>
+      <circle cx={x} cy={y} r={size * 0.7} fill="none" stroke="#ffd84d" strokeWidth={1.5}>
+        <animate attributeName="r" values={`${size * 0.6};${size * 0.82};${size * 0.6}`} dur="1.3s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.2;0.6;0.2" dur="1.3s" repeatCount="indefinite" />
+      </circle>
+    </g>
+  );
+}
+
+/** One-shot impact burst when an enemy attack lands: a shock ring, a red flash,
+ *  a slash, and a floating damage number (with a "blocked" note when shield
+ *  soaked part of it, or "Miss"/"Blocked" when nothing got through). Mounted
+ *  fresh per hit (keyed by the hit nonce) so its SMIL animations replay. */
+function AttackImpactFx({
+  x,
+  y,
+  size,
+  dealt,
+  blocked,
+}: {
+  x: number;
+  y: number;
+  size: number;
+  dealt: number;
+  blocked: number;
+}) {
+  const label = dealt > 0 ? `−${dealt}` : blocked > 0 ? 'Blocked' : 'Miss';
+  const labelColor = dealt > 0 ? '#ff5252' : blocked > 0 ? '#74c2d6' : '#cfcfcf';
+  const struck = dealt > 0 || blocked > 0;
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      {struck && (
+        <>
+          <circle cx={x} cy={y} r={size * 0.35} fill="none" stroke="#ff5252" strokeWidth={5}>
+            <animate attributeName="r" values={`${size * 0.3};${size * 1.5}`} dur="0.4s" fill="freeze" />
+            <animate attributeName="opacity" values="0.9;0" dur="0.4s" fill="freeze" />
+            <animate attributeName="stroke-width" values="5;0.5" dur="0.4s" fill="freeze" />
+          </circle>
+          {dealt > 0 && (
+            <circle cx={x} cy={y} r={size * 0.7} fill="#ff5252">
+              <animate attributeName="opacity" values="0.5;0" dur="0.3s" fill="freeze" />
+            </circle>
+          )}
+          <line
+            x1={x - size * 0.7}
+            y1={y - size * 0.7}
+            x2={x + size * 0.7}
+            y2={y + size * 0.7}
+            stroke="#fff"
+            strokeWidth={3}
+            strokeLinecap="round"
+          >
+            <animate attributeName="opacity" values="1;0" dur="0.35s" fill="freeze" />
+          </line>
+        </>
+      )}
+      <g>
+        <animateTransform
+          attributeName="transform"
+          type="translate"
+          values={`0 0; 0 ${(-size * 1.1).toFixed(1)}`}
+          dur="0.9s"
+          fill="freeze"
+          calcMode="spline"
+          keyTimes="0;1"
+          keySplines="0.2 0.6 0.2 1"
+        />
+        <text
+          x={x}
+          y={y - size * 0.85}
+          textAnchor="middle"
+          fontSize={size * 0.9}
+          fontWeight={800}
+          fill={labelColor}
+          stroke="#000"
+          strokeWidth={1}
+          paintOrder="stroke"
+        >
+          {label}
+          <animate attributeName="opacity" values="1;1;0" keyTimes="0;0.6;1" dur="0.9s" fill="freeze" />
+        </text>
+        {dealt > 0 && blocked > 0 && (
+          <text
+            x={x}
+            y={y - size * 0.2}
+            textAnchor="middle"
+            fontSize={size * 0.42}
+            fontWeight={700}
+            fill="#74c2d6"
+            stroke="#000"
+            strokeWidth={0.8}
+            paintOrder="stroke"
+          >
+            {`⛨ ${blocked} blocked`}
+            <animate attributeName="opacity" values="1;1;0" keyTimes="0;0.6;1" dur="0.9s" fill="freeze" />
+          </text>
+        )}
+      </g>
+    </g>
   );
 }

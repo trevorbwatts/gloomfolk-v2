@@ -321,6 +321,7 @@ export function PlayerScreen() {
             character={myCharInstance}
             unit={myUnit}
             {...(headerTitle ? { title: headerTitle } : {})}
+            {...(phase === 'lobby' ? { gold: myCharInstance.gold } : {})}
           />
           {you && <ActiveArea you={you} />}
         </div>
@@ -423,62 +424,52 @@ export function PlayerScreen() {
           );
         })()}
         {onPlayTab && me?.characterId && !editingLoadout && phase === 'lobby' && (() => {
-          const ready = myCharInstance?.loadout != null;
-          return (
-            <div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button
-                  onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
-                  style={ready ? {
-                    fontSize: 14,
-                    padding: '8px 14px',
-                    background: 'transparent',
-                    color: theme.accent,
-                    border: `1px solid ${theme.accent}`,
-                    borderRadius: 3,
-                    fontFamily: theme.headingFont,
-                    letterSpacing: 1,
-                    textTransform: 'uppercase',
-                    cursor: 'pointer',
-                  } : {
-                    fontSize: 16,
-                    padding: '12px 18px',
-                    background: theme.accent,
-                    color: '#0e1612',
-                    border: 'none',
-                    borderRadius: 3,
-                    fontFamily: theme.headingFont,
-                    letterSpacing: 1,
-                    textTransform: 'uppercase',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {ready ? 'Edit hand' : 'Pick cards'}
-                </button>
-                <button
-                  onClick={() => {
-                    setEditingLoadout(false);
-                    sock.send({ type: 'player_unclaim_character' });
-                  }}
-                  style={{
-                    fontSize: 14,
-                    padding: '8px 14px',
-                    background: 'transparent',
-                    color: theme.muted,
-                    border: `1px solid ${theme.border}`,
-                    borderRadius: 3,
-                    fontFamily: theme.headingFont,
-                    letterSpacing: 1,
-                    textTransform: 'uppercase',
-                    cursor: 'pointer',
-                  }}
-                >
-                  Change hero
-                </button>
-              </div>
+          const hasLoadout = myCharInstance?.loadout != null;
+          const ready = myCharInstance?.shoppingDone === true;
+          const editBtnStyle: React.CSSProperties = hasLoadout
+            ? {
+                fontSize: 14,
+                padding: '8px 14px',
+                background: 'transparent',
+                color: theme.accent,
+                border: `1px solid ${theme.accent}`,
+                borderRadius: 3,
+                fontFamily: theme.headingFont,
+                letterSpacing: 1,
+                textTransform: 'uppercase',
+                cursor: 'pointer',
+              }
+            : {
+                fontSize: 16,
+                padding: '12px 18px',
+                background: theme.accent,
+                color: '#0e1612',
+                border: 'none',
+                borderRadius: 3,
+                fontFamily: theme.headingFont,
+                letterSpacing: 1,
+                textTransform: 'uppercase',
+                cursor: 'pointer',
+              };
+          const secondaryBtnStyle: React.CSSProperties = {
+            fontSize: 14,
+            padding: '8px 14px',
+            background: 'transparent',
+            color: theme.muted,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 3,
+            fontFamily: theme.headingFont,
+            letterSpacing: 1,
+            textTransform: 'uppercase',
+            cursor: 'pointer',
+          };
+
+          // Readied up: show the confirmation and a way back to the shop.
+          if (ready) {
+            return (
               <div
                 style={{
-                  marginTop: 48,
+                  marginTop: 16,
                   display: 'flex',
                   flexDirection: 'column',
                   alignItems: 'center',
@@ -487,38 +478,83 @@ export function PlayerScreen() {
                   padding: '48px 16px',
                 }}
               >
-                {ready ? (
-                  <>
-                    <div
-                      style={{
-                        fontSize: 64,
-                        fontFamily: theme.headingFont,
-                        color: theme.good,
-                        letterSpacing: 1,
-                        lineHeight: 1,
-                      }}
-                    >
-                      ✓ Ready
-                    </div>
-                    <p
-                      style={{
-                        marginTop: 16,
-                        color: theme.muted,
-                        fontSize: 14,
-                        letterSpacing: 0.5,
-                      }}
-                    >
-                      Waiting for host to start the scenario…
-                    </p>
-                  </>
-                ) : (
-                  <p style={{ color: theme.muted, fontSize: 14 }}>
-                    Build your hand to ready up.
-                  </p>
-                )}
+                <div
+                  style={{
+                    fontSize: 64,
+                    fontFamily: theme.headingFont,
+                    color: theme.good,
+                    letterSpacing: 1,
+                    lineHeight: 1,
+                  }}
+                >
+                  ✓ Ready
+                </div>
+                <p style={{ marginTop: 16, color: theme.muted, fontSize: 14, letterSpacing: 0.5 }}>
+                  Waiting for host to start the scenario…
+                </p>
+                <button
+                  onClick={() => sock.send({ type: 'player_reopen_shopping' })}
+                  style={{ ...secondaryBtnStyle, marginTop: 24 }}
+                >
+                  Back to shop
+                </button>
               </div>
-              {myCharInstance && gameState && (
-                <Shop character={myCharInstance} shop={gameState.shop} />
+            );
+          }
+
+          // Still setting up: pick a hand, then shop, then ready up.
+          return (
+            <div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
+                  style={editBtnStyle}
+                >
+                  {hasLoadout ? 'Edit hand' : 'Pick cards'}
+                </button>
+                <button
+                  onClick={() => {
+                    setEditingLoadout(false);
+                    sock.send({ type: 'player_unclaim_character' });
+                  }}
+                  style={secondaryBtnStyle}
+                >
+                  Change hero
+                </button>
+              </div>
+              {!hasLoadout && (
+                <div
+                  style={{
+                    marginTop: 48,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    textAlign: 'center',
+                    padding: '48px 16px',
+                  }}
+                >
+                  <p style={{ color: theme.muted, fontSize: 14 }}>
+                    Build your hand, then visit the shop to ready up.
+                  </p>
+                </div>
+              )}
+              {hasLoadout && myCharInstance && gameState && (
+                <>
+                  <Shop character={myCharInstance} shop={gameState.shop} />
+                  <button
+                    onClick={() => sock.send({ type: 'player_finish_shopping' })}
+                    style={{
+                      ...btn.primary(false),
+                      marginTop: 24,
+                      width: '100%',
+                      fontSize: 16,
+                      padding: '14px 16px',
+                    }}
+                  >
+                    Done shopping — I’m ready
+                  </button>
+                </>
               )}
             </div>
           );

@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type {
+  AttackConsumeOffer,
   Card,
   CardHalf,
   CharacterInstance,
+  ElementSelector,
   HalfSlot,
   Hex,
   ModifierCard,
@@ -41,7 +43,7 @@ import { GameIcon, type IconKey } from '../icons.js';
 
 const cap = (s: string): string => s.length === 0 ? s : s[0]!.toUpperCase() + s.slice(1);
 import { btn, theme } from '../theme.js';
-import { CardView, HalfView, type CardElementContext } from './CardView.js';
+import { CardView, HalfView, ElementChip, type CardElementContext } from './CardView.js';
 import { CardsOverview } from './Hand.js';
 
 export function TurnPlay({
@@ -60,7 +62,6 @@ export function TurnPlay({
     () => gameState.units.find((u) => u.ownerPlayerId === myPlayerId) ?? null,
     [gameState.units, myPlayerId],
   );
-  const { moveAnim, onMoveAnimDone } = useMoveAnim(gameState.lastMove);
 
   if (!isMyTurn || !ct) {
     // Long-rest turn: my init-99 slot is up but there's no currentTurn —
@@ -90,18 +91,10 @@ export function TurnPlay({
                 : 'No active turn.'}
           </p>
         )}
-        <HexBoard
-          tiles={gameState.tiles}
-          units={gameState.units}
-          moneyTokens={gameState.moneyTokens}
-          size={20}
-          maxWidthPx={400}
-          activeUnitIds={cur?.kind === 'player' ? [cur.unitId] : []}
-          unitAvatarUrl={unitAvatarUrl}
-          moveAnim={moveAnim}
-          onMoveAnimDone={onMoveAnimDone}
-          monsterTurnAnim={gameState.monsterTurnAnim}
-        />
+        {/* The board is intentionally hidden while it isn't this player's turn
+            (monster attacks, waiting on others) — the map only appears once the
+            player is actively taking an action. The MonsterTurnBanner above
+            carries the enemy-turn play-by-play on its own. */}
         {selectedCards.length > 0 && (
           <div style={{ marginTop: 12 }}>
             <h3 style={{ margin: '0 0 6px', fontSize: 12, color: theme.muted, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: theme.headingFont }}>Your cards this round</h3>
@@ -128,8 +121,6 @@ export function TurnPlay({
       activeSlotKind={activeSlotKind}
       myUnit={myUnit}
       you={you}
-      moveAnim={moveAnim}
-      onMoveAnimDone={onMoveAnimDone}
     />
   );
 }
@@ -162,8 +153,6 @@ function ActionDriver({
   activeSlotKind,
   myUnit,
   you,
-  moveAnim,
-  onMoveAnimDone,
 }: {
   gameState: PublicGameState;
   myPlayerId: string;
@@ -172,10 +161,14 @@ function ActionDriver({
   activeSlotKind: 'top' | 'bottom' | null;
   myUnit: Unit | null;
   you: PrivatePlayerState | null;
-  moveAnim: { unitId: string; steps: Hex[] } | null;
-  onMoveAnimDone: () => void;
 }) {
   const sock = useSocket();
+  // Driven here (not in TurnPlay) so the hook's lifecycle matches the board's:
+  // it mounts only during this player's turn. Moves that happen while the board
+  // is hidden (enemy turns, other players) are skipped on mount by useMoveAnim's
+  // initial-snapshot guard, instead of being queued and replayed when the board
+  // reappears.
+  const { moveAnim, onMoveAnimDone } = useMoveAnim(gameState.lastMove);
   const [selectedActionId, setSelectedActionId] = useState<string | null>(null);
   /** For push/pull: the target unit chosen first; destination tap follows. */
   const [forcedMoveTargetId, setForcedMoveTargetId] = useState<string | null>(null);
@@ -192,22 +185,27 @@ function ActionDriver({
     setPendingTarget(null);
   }, [slotSig]);
 
+  // Engaging a top/bottom half (and entering your turn at all) swaps in a fresh
+  // screen — scroll back to the top so the player always starts at the header,
+  // not wherever the previous screen had them scrolled to.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [slotSig]);
+
   const firstPending = activeSlot?.actions.find((a) => !a.done) ?? null;
   const firstPendingId = firstPending?.id ?? null;
-  const firstPendingIsTargeted = !!firstPending && isTargetedActionType(firstPending.type);
 
-  // Auto-enter target mode for the next targeted action so the player
-  // doesn't have to tap "Perform" — moving straight from card-half choice
-  // into picking a destination/target.
+  // Auto-select the next pending action so it's highlighted and its
+  // Confirm/Skip controls appear in the bottom bar — the player never has to
+  // tap a "Perform" button. Targeted actions additionally enter board target
+  // mode; non-targeted ones (Shield, Retaliate, …) just wait for Confirm.
+  // Unsupported actions are selected too so their bar's Skip lets the player
+  // move past something the engine can't resolve yet.
   useEffect(() => {
-    if (firstPendingId && firstPendingIsTargeted) {
-      setSelectedActionId(firstPendingId);
-    } else {
-      setSelectedActionId(null);
-    }
+    setSelectedActionId(firstPendingId);
     setForcedMoveTargetId(null);
     setPendingTarget(null);
-  }, [firstPendingId, firstPendingIsTargeted]);
+  }, [firstPendingId]);
 
   const selectedAction =
     activeSlot?.actions.find((a) => a.id === selectedActionId && !a.done) ?? null;
@@ -294,26 +292,39 @@ function ActionDriver({
     if (!pendingTarget || !selectedAction) return '';
     switch (pendingTarget.kind) {
       case 'attack':
-        return (
+        return selectedAction.type === 'attack' ? (
+          <AttackTargetSummary action={selectedAction} target={pendingTarget.unit} />
+        ) : (
           <>
-            <strong><GameIcon kind="attack" /> Attack {selectedAction.type === 'attack' ? selectedAction.amount : ''}</strong>
+            <strong><GameIcon kind="attack" /> Attack</strong>
             {' on '}
             <strong>{pendingTarget.unit.name}</strong>
           </>
         );
-      case 'condition':
-        return selectedAction.type === 'apply-condition' ? (
-          <>
-            <strong>Apply <GameIcon kind={selectedAction.condition} /> {cap(selectedAction.condition)}</strong>
-            {' to '}
-            <strong>{pendingTarget.unit.name}</strong>
-          </>
-        ) : (
-          <>
-            {'Apply to '}
-            <strong>{pendingTarget.unit.name}</strong>
-          </>
+      case 'condition': {
+        const stateChips = targetStateChips(pendingTarget.unit);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div>
+              {selectedAction.type === 'apply-condition' ? (
+                <>
+                  <strong>Apply <GameIcon kind={selectedAction.condition} /> {cap(selectedAction.condition)}</strong>
+                  {' to '}
+                  <strong>{pendingTarget.unit.name}</strong>
+                </>
+              ) : (
+                <>
+                  {'Apply to '}
+                  <strong>{pendingTarget.unit.name}</strong>
+                </>
+              )}
+            </div>
+            {stateChips.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{stateChips}</div>
+            )}
+          </div>
         );
+      }
       case 'aoe':
         return <strong>Attack the highlighted hex</strong>;
       case 'forced-move':
@@ -323,8 +334,60 @@ function ActionDriver({
     }
   }, [pendingTarget, selectedAction]);
 
+  // A non-targeted action (Shield, Retaliate, Heal, Loot, …) that's selected
+  // and waiting to be confirmed. These have no board target, so Confirm is
+  // always enabled.
+  const nonTargetedReady =
+    !!selectedAction &&
+    !isTargetedActionType(selectedAction.type) &&
+    selectedAction.type !== 'unsupported' &&
+    !pendingTarget;
+
+  // Move drives its own Skip/Confirm bar inside BoardForTurn (it needs the
+  // live path state), so the shared ActionBottomBar covers everything else.
+  const isMoveSelected = selectedAction?.type === 'move';
+  // Targeted actions other than move: attack, AOE, apply-condition, push/pull.
+  const targetedSelected =
+    !!selectedAction &&
+    isTargetedActionType(selectedAction.type) &&
+    !isMoveSelected;
+  // The bar stays visible the whole time an action is selected so the player
+  // always has a Skip to move past it — even when there's no legal target to
+  // confirm, or the action isn't supported yet. Confirm is disabled until a
+  // target is staged (and always for unsupported actions).
+  const showActionBar = !!selectedAction && !isMoveSelected;
+  const isUnsupported = selectedAction?.type === 'unsupported';
+  const confirmDisabled = (targetedSelected && !pendingTarget) || isUnsupported;
+
+  // Only summarize a staged target (e.g. "Attack 3 on Goblin") — that names
+  // the specific target, which isn't shown above. The plain "Perform <action>"
+  // line is dropped: it just echoed the action row already on screen.
+  const bottomSummary: ReactNode = pendingTarget ? targetSummary : '';
+
+  // The player can back out of the chosen half (to pick the other card/half)
+  // only while nothing has been performed yet. The button sits above the
+  // "Your turn" header so it reads as "go back a screen".
+  const canGoBack =
+    !!activeSlot &&
+    !!activeSlotKind &&
+    activeSlot.performedCount === 0 &&
+    !activeSlot.actions.some((a) => a.done);
+
   return (
     <div>
+      {canGoBack && activeSlotKind && (
+        <button
+          onClick={() => sock.send({ type: 'player_unengage_half', slot: activeSlotKind })}
+          style={{
+            ...btn.ghost(),
+            padding: '4px 10px',
+            fontSize: 11,
+            marginBottom: 10,
+          }}
+        >
+          ← Back
+        </button>
+      )}
       <h2 style={{ marginBottom: 10, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>Your turn</h2>
 
       {activeSlot && activeSlotKind ? (
@@ -333,21 +396,6 @@ function ActionDriver({
           slotKind={activeSlotKind}
           you={you}
           selectedActionId={selectedActionId}
-          onSelect={(actionId) => {
-            const action = activeSlot.actions.find((a) => a.id === actionId);
-            if (!action || action.done) return;
-            // Targeted actions are auto-selected by ActionDriver; this handler
-            // is only invoked for non-targeted "Apply" actions, which fire now.
-            sock.send({ type: 'player_perform_action', slot: activeSlotKind, actionId });
-          }}
-          onSkip={(actionId) => {
-            sock.send({ type: 'player_skip_action', slot: activeSlotKind, actionId });
-            if (selectedActionId === actionId) {
-              setSelectedActionId(null);
-              setForcedMoveTargetId(null);
-              setPendingTarget(null);
-            }
-          }}
         />
       ) : (
         <SlotPicker ct={ct} you={you} />
@@ -389,14 +437,6 @@ function ActionDriver({
         </p>
       )}
 
-      <ItemTray
-        gameState={gameState}
-        myPlayerId={myPlayerId}
-        firstPending={firstPending}
-        activeSlotKind={activeSlotKind}
-        you={you}
-      />
-
       {activeSlot && (
         <BoardForTurn
           gameState={gameState}
@@ -417,14 +457,32 @@ function ActionDriver({
         />
       )}
 
+      <ItemTray
+        gameState={gameState}
+        myPlayerId={myPlayerId}
+        firstPending={firstPending}
+        activeSlotKind={activeSlotKind}
+        you={you}
+      />
+
       {/* Spacer so content doesn't sit under the fixed action bar. */}
-      {(pendingTarget || showEndTurn || isPersistentEmpty) && <div style={{ height: 80 }} />}
+      {(showActionBar || isMoveSelected || showEndTurn || isPersistentEmpty) && <div style={{ height: 80 }} />}
 
       <ActionBottomBar
-        targetSummary={targetSummary}
-        hasPendingTarget={!!pendingTarget}
-        hideSkip={pendingTarget?.kind === 'forced-move'}
-        onConfirm={confirmPendingTarget}
+        summary={bottomSummary}
+        show={showActionBar}
+        confirmDisabled={confirmDisabled}
+        onConfirm={() => {
+          if (pendingTarget) {
+            confirmPendingTarget();
+          } else if (nonTargetedReady && selectedAction && activeSlotKind) {
+            sock.send({
+              type: 'player_perform_action',
+              slot: activeSlotKind,
+              actionId: selectedAction.id,
+            });
+          }
+        }}
         onSkip={() => {
           // Skip the underlying action: send the skip message and clear any
           // local target/forced-move state so the action row updates and the
@@ -448,7 +506,6 @@ function ActionDriver({
 
       {isPersistentEmpty && activeSlotKind && activeCard && !pendingTarget && (
         <PersistentConfirmBar
-          cardName={activeCard.name}
           onConfirm={() =>
             sock.send({ type: 'player_confirm_persistent_half', slot: activeSlotKind })
           }
@@ -752,6 +809,23 @@ function ItemTray({
   );
 }
 
+/** Shared style for the buttons in the fixed bottom bars (Confirm/Skip/End
+ *  Turn). A fixed height keeps Confirm (primary, no border) and Skip (ghost,
+ *  1px border) the exact same size, and keeps every bottom bar consistent. */
+function bottomBarBtn(primary: boolean): CSSProperties {
+  return {
+    ...(primary ? btn.primary(false) : btn.ghost()),
+    flex: 1,
+    height: 40,
+    padding: '0 16px',
+    fontSize: 14,
+    boxSizing: 'border-box',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  };
+}
+
 function EndTurnBar({ onEndTurn }: { onEndTurn: () => void }) {
   return (
     <div
@@ -765,11 +839,8 @@ function EndTurnBar({ onEndTurn }: { onEndTurn: () => void }) {
         zIndex: 55,
       }}
     >
-      <div style={{ padding: '10px 14px', display: 'flex' }}>
-        <button
-          onClick={onEndTurn}
-          style={{ ...btn.primary(false), flex: 1, padding: '10px 16px', fontSize: 14 }}
-        >
+      <div style={{ padding: '6px 14px', display: 'flex' }}>
+        <button onClick={onEndTurn} style={bottomBarBtn(true)}>
           End Turn
         </button>
       </div>
@@ -778,25 +849,24 @@ function EndTurnBar({ onEndTurn }: { onEndTurn: () => void }) {
 }
 
 function ActionBottomBar({
-  targetSummary,
-  hasPendingTarget,
-  hideSkip = false,
+  summary,
+  show,
+  confirmDisabled = false,
   onConfirm,
   onSkip,
 }: {
-  targetSummary: ReactNode;
-  hasPendingTarget: boolean;
-  /** True for forced-move (push/pull) resolution — there's no "skip" option
-   *  once the player has committed to the move and the only way out is to
-   *  confirm a destination. */
-  hideSkip?: boolean;
+  summary: ReactNode;
+  show: boolean;
+  /** Disable Confirm while the selected action has no legal/staged target.
+   *  Skip stays available so the player can always move past the action. */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   /** Skip the underlying action entirely — sends player_skip_action and
    *  clears any staged target. Replaces the previous "Cancel" (which only
    *  un-staged the target). */
   onSkip: () => void;
 }) {
-  if (!hasPendingTarget) return null;
+  if (!show) return null;
   return (
     <div
       style={{
@@ -809,16 +879,18 @@ function ActionBottomBar({
         zIndex: 55,
       }}
     >
-      <div
-        style={{
-          padding: '6px 14px',
-          color: theme.text,
-          fontSize: 14,
-          borderBottom: `1px solid ${theme.border}`,
-        }}
-      >
-        {targetSummary}
-      </div>
+      {summary && (
+        <div
+          style={{
+            padding: '6px 14px',
+            color: theme.text,
+            fontSize: 14,
+            borderBottom: `1px solid ${theme.border}`,
+          }}
+        >
+          {summary}
+        </div>
+      )}
       <div
         style={{
           padding: '6px 14px',
@@ -827,12 +899,17 @@ function ActionBottomBar({
           gap: 10,
         }}
       >
-        {!hideSkip && (
-          <button onClick={onSkip} style={{ ...btn.ghost(), flex: 1, padding: '6px 14px', fontSize: 13 }}>
-            Skip
-          </button>
-        )}
-        <button onClick={onConfirm} style={{ ...btn.primary(false), flex: 1, padding: '6px 18px', fontSize: 14 }}>
+        <button onClick={onSkip} style={bottomBarBtn(false)}>
+          Skip
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={confirmDisabled}
+          style={{
+            ...bottomBarBtn(true),
+            ...(confirmDisabled ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+          }}
+        >
           Confirm
         </button>
       </div>
@@ -1412,15 +1489,11 @@ function ActiveHalfPanel({
   slotKind,
   you,
   selectedActionId,
-  onSelect,
-  onSkip,
 }: {
   slot: HalfSlot;
   slotKind: 'top' | 'bottom';
   you: PrivatePlayerState | null;
   selectedActionId: string | null;
-  onSelect: (actionId: string) => void;
-  onSkip: (actionId: string) => void;
 }) {
   const card = slot.cardId && you ? you.hand.find((c) => c.id === slot.cardId) ?? null : null;
   const firstPendingId = slot.actions.find((a) => !a.done)?.id ?? null;
@@ -1456,13 +1529,67 @@ function ActiveHalfPanel({
               slotKind={slotKind}
               isNext={a.id === firstPendingId}
               selected={selectedActionId === a.id}
-              onSelect={() => onSelect(a.id)}
-              onSkip={() => onSkip(a.id)}
             />
           ))}
+          <InfuseRows half={halfData} />
         </div>
       )}
     </div>
+  );
+}
+
+/** Element selectors this half infuses at end of turn (its `create-element`
+ *  steps). Pulled straight off the committed card half — the engine resolves
+ *  these automatically at finishHalf, so they never enter the action queue. */
+function infusedElements(half: CardHalf | null): ElementSelector[] {
+  if (!half) return [];
+  const out: ElementSelector[] = [];
+  for (const ability of half.abilities) {
+    for (const step of ability.steps) {
+      if (step.type === 'create-element') out.push(step.element);
+    }
+  }
+  return out;
+}
+
+/** Informational row(s) shown beneath the action queue for any element the
+ *  half infuses. Infusion is automatic and mandatory at end of turn, so this
+ *  is display-only — there's no Perform/Skip gesture. */
+function InfuseRows({ half }: { half: CardHalf | null }) {
+  const elements = infusedElements(half);
+  if (elements.length === 0) return null;
+  return (
+    <>
+      {elements.map((element, i) => (
+        <div
+          key={i}
+          style={{
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+            padding: '6px 8px',
+            background: theme.panel,
+            borderRadius: 4,
+            border: `1px dashed ${theme.border}`,
+            color: theme.muted,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 10,
+              textTransform: 'uppercase',
+              letterSpacing: 0.5,
+            }}
+          >
+            Infuse
+          </span>
+          <ElementChip element={element} context={null} consumeIntent={false} />
+          <span style={{ flex: 1, fontSize: 11, textAlign: 'right' }}>
+            automatic at end of turn
+          </span>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -1479,8 +1606,10 @@ function PersistentConfirmPanel({ half }: { half: CardHalf }) {
     <div
       style={{
         padding: '8px 12px',
-        background: theme.panel,
-        border: `1px solid ${theme.border}`,
+        // Highlighted like a selected ActionRow so a tracked/persistent half
+        // reads as "active" the same way Attack does.
+        background: 'rgba(217, 164, 65, 0.14)',
+        border: `1px solid ${theme.accent}`,
         borderRadius: 6,
         marginBottom: 8,
       }}
@@ -1494,11 +1623,9 @@ function PersistentConfirmPanel({ half }: { half: CardHalf }) {
  *  queue is empty. Mirrors ActionBottomBar so the gesture matches attack/move
  *  confirmation. Skip sends player_finish_half (no credit → card discards). */
 function PersistentConfirmBar({
-  cardName,
   onConfirm,
   onSkip,
 }: {
-  cardName: string;
   onConfirm: () => void;
   onSkip: () => void;
 }) {
@@ -1514,27 +1641,11 @@ function PersistentConfirmBar({
         zIndex: 55,
       }}
     >
-      <div
-        style={{
-          padding: '6px 14px',
-          color: theme.text,
-          fontSize: 14,
-          borderBottom: `1px solid ${theme.border}`,
-        }}
-      >
-        Activate <strong>{cardName}</strong>?
-      </div>
       <div style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button
-          onClick={onSkip}
-          style={{ ...btn.ghost(), flex: 1, padding: '6px 14px', fontSize: 13 }}
-        >
+        <button onClick={onSkip} style={bottomBarBtn(false)}>
           Skip
         </button>
-        <button
-          onClick={onConfirm}
-          style={{ ...btn.primary(false), flex: 1, padding: '6px 18px', fontSize: 14 }}
-        >
+        <button onClick={onConfirm} style={bottomBarBtn(true)}>
           Confirm
         </button>
       </div>
@@ -1547,20 +1658,17 @@ function ActionRow({
   slotKind,
   isNext,
   selected,
-  onSelect,
-  onSkip,
 }: {
   action: PendingAction;
   slotKind: 'top' | 'bottom';
   isNext: boolean;
   selected: boolean;
-  onSelect: () => void;
-  onSkip: () => void;
 }) {
   const sock = useSocket();
   const label = actionLabel(action);
-  const needsTarget = isTargetedActionType(action.type);
-  const supported = action.type !== 'unsupported';
+  // The Perform/Skip controls live in the fixed bottom bar (ActionBottomBar)
+  // for every action type; the row itself only shows the label, its done
+  // checkmark, and any element-consume offers.
   const showButtons = isNext && !action.done;
   const bgDone = action.done
     ? 'rgba(123, 185, 107, 0.10)'
@@ -1593,16 +1701,6 @@ function ActionRow({
         <span style={{ flex: 1, fontSize: 13 }}>
           {label} {action.done ? '✓' : ''}
         </span>
-        {showButtons && supported && !needsTarget && (
-          <button onClick={onSelect} style={{ ...btn.primary(false), padding: '4px 12px', fontSize: 11 }}>
-            Apply
-          </button>
-        )}
-        {showButtons && (
-          <button onClick={onSkip} style={{ ...btn.ghost(), padding: '4px 10px', fontSize: 11 }}>
-            Skip
-          </button>
-        )}
       </div>
       {showButtons && consumeOffers.length > 0 && !consumesLocked && (
         <div
@@ -1679,6 +1777,125 @@ function withActionIcon(kind: IconKey, label: ReactNode): ReactNode {
   );
 }
 
+/** Conditions that ride on an attack and auto-apply to whatever it hits — shown
+ *  inline on the attack's label so the player knows the attack carries them. */
+function riderConditionSuffix(conditions?: readonly string[]): ReactNode {
+  if (!conditions || conditions.length === 0) return null;
+  return (
+    <>
+      {conditions.map((c) => (
+        <span key={c}> · <GameIcon kind={c as IconKey} /> {cap(c)}</span>
+      ))}
+    </>
+  );
+}
+
+type ChipTone = 'applied' | 'muted' | 'warn';
+
+/** Small pill used in the target breakdown. `applied` = something this action
+ *  will do to the enemy (accent); `muted` = the enemy's current defensive
+ *  state; `warn` = something that will hit the player back (retaliate). */
+function StatusChip({
+  icon,
+  label,
+  tone,
+}: {
+  icon?: IconKey;
+  label: ReactNode;
+  tone: ChipTone;
+}) {
+  const palette =
+    tone === 'applied'
+      ? { bg: 'rgba(217, 164, 65, 0.14)', border: theme.accent, fg: theme.text }
+      : tone === 'warn'
+        ? { bg: 'rgba(200, 80, 80, 0.14)', border: theme.bad, fg: theme.text }
+        : { bg: 'transparent', border: theme.border, fg: theme.muted };
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '2px 8px',
+        borderRadius: 999,
+        fontSize: 12,
+        background: palette.bg,
+        border: `1px solid ${palette.border}`,
+        color: palette.fg,
+      }}
+    >
+      {icon && <GameIcon kind={icon} />} {label}
+    </span>
+  );
+}
+
+/** The enemy's current defensive state, shown so the player sees what they're
+ *  hitting (existing conditions, shield, retaliate). */
+function targetStateChips(unit: Unit): ReactNode[] {
+  const chips: ReactNode[] = [];
+  if (unit.shield > 0) {
+    chips.push(<StatusChip key="shield" icon="shield" label={`Shield ${unit.shield}`} tone="muted" />);
+  }
+  const retaliateTotal = unit.retaliate.reduce((s, b) => s + b.amount, 0);
+  if (retaliateTotal > 0) {
+    chips.push(<StatusChip key="retaliate" icon="retaliate" label={`Retaliate ${retaliateTotal}`} tone="warn" />);
+  }
+  for (const c of unit.conditions) {
+    // Poison is surfaced on the attack summary itself (it adds damage), so skip
+    // it here to avoid showing it twice.
+    if (c.kind === 'poison') continue;
+    chips.push(<StatusChip key={`cond-${c.kind}`} icon={c.kind as IconKey} label={cap(c.kind)} tone="muted" />);
+  }
+  return chips;
+}
+
+/** Full breakdown of a staged single-target attack: damage (with deterministic
+ *  bonuses folded in), pierce, conditions it will apply, the poison interaction,
+ *  and the enemy's current defensive state. Shown in the bar above Confirm so
+ *  the player sees the whole hit before committing. */
+function AttackTargetSummary({
+  action,
+  target,
+}: {
+  action: Extract<PendingAction, { type: 'attack' }>;
+  target: Unit;
+}) {
+  const targetPoisoned = target.conditions.some((c) => c.kind === 'poison');
+  const acceptedOffers = action.acceptedConsumeIndices
+    .map((i) => action.consumeOffers.find((o) => o.riderIndex === i))
+    .filter((o): o is AttackConsumeOffer => !!o);
+  const bonusAttack = action.consumesLocked
+    ? action.lockedRiderAttack
+    : acceptedOffers.reduce((s, o) => s + (o.attackBonus ?? 0), 0);
+  const bonusPierce = action.consumesLocked
+    ? action.lockedRiderPierce
+    : acceptedOffers.reduce((s, o) => s + (o.pierceBonus ?? 0), 0);
+  const dmg = action.amount + bonusAttack + (targetPoisoned ? 1 : 0);
+  const pierceTotal = action.pierce + bonusPierce;
+  const riders = action.riderConditions ?? [];
+  const stateChips = targetStateChips(target);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div>
+        <GameIcon kind="attack" />{' '}
+        <strong>Attack {action.amountRef ? 'X' : dmg}</strong>
+        {' on '}
+        <strong>{target.name}</strong>
+        {amountSuffix(action)}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {pierceTotal > 0 && <StatusChip icon="pierce" label={`Pierce ${pierceTotal}`} tone="applied" />}
+        {riders.map((c) => (
+          <StatusChip key={`rider-${c}`} icon={c as IconKey} label={cap(c)} tone="applied" />
+        ))}
+        {targetPoisoned && <StatusChip icon="poison" label="+1 dmg, cleanses poison" tone="applied" />}
+        {stateChips}
+      </div>
+      <div style={{ fontSize: 11, color: theme.muted }}>Before the attack-modifier draw.</div>
+    </div>
+  );
+}
+
 function actionLabel(a: PendingAction): ReactNode {
   switch (a.type) {
     case 'move':
@@ -1697,6 +1914,7 @@ function actionLabel(a: PendingAction): ReactNode {
       return (
         <>
           <GameIcon kind="attack" /> Attack {a.amount}{range}{pierce}{t}{amountSuffix(a)}
+          {riderConditionSuffix(a.riderConditions)}
         </>
       );
     }
@@ -1707,6 +1925,7 @@ function actionLabel(a: PendingAction): ReactNode {
       return (
         <>
           <GameIcon kind="attack" /> AOE Attack {a.amount}{pierce}{amountSuffix(a)}
+          {riderConditionSuffix(a.riderConditions)}
         </>
       );
     }
@@ -1714,6 +1933,8 @@ function actionLabel(a: PendingAction): ReactNode {
       return withActionIcon('heal', `Heal ${a.amount}${a.selfOnly ? ' (self)' : ''}`);
     case 'shield':
       return withActionIcon('shield', `Shield ${a.amount}`);
+    case 'loot':
+      return withActionIcon('loot', a.range <= 0 ? 'Loot your hex' : `Loot within ${a.range}`);
     case 'push':
       return (
         <>
@@ -1839,6 +2060,8 @@ function BoardForTurn({
     if (!myUnit || !selectedAction) return new Set<string>();
     if (selectedAction.type === 'move') {
       if (!movePredicates) return new Set<string>();
+      // Immobilized: no hexes are reachable, so don't highlight any.
+      if (myUnit.conditions.some((c) => c.kind === 'immobilize')) return new Set<string>();
       const reach = selectedAction.jump
         ? bfsReachableJump(myUnit.hex, selectedAction.amount, movePredicates.walkable, movePredicates.canEnd)
         : bfsReachable(myUnit.hex, selectedAction.amount, movePredicates.canEnd);
@@ -2064,10 +2287,14 @@ function BoardForTurn({
   const isForcedMove =
     selectedAction?.type === 'push' || selectedAction?.type === 'pull';
   const isAoeMode = selectedAction?.type === 'attack-aoe';
+  // An immobilized figure can't move, so don't let the player trace a path the
+  // server will only reject. The Move bar's Confirm is disabled and relabeled
+  // "Immobilized"; the player skips the move instead.
+  const isImmobilized = !!myUnit?.conditions.some((c) => c.kind === 'immobilize');
   const canTapHex =
     (isForcedMove && !!forcedMoveTargetId) ||
     isAoeMode ||
-    (!pendingTarget && selectedAction?.type === 'move');
+    (!pendingTarget && selectedAction?.type === 'move' && !isImmobilized);
   const canTapUnit =
     !pendingTarget &&
     (selectedAction?.type === 'attack' ||
@@ -2092,7 +2319,7 @@ function BoardForTurn({
   const moveStepsUsed = movePath.length;
 
   const handleHexEnter = (h: Hex) => {
-    if (isMoveMode) {
+    if (isMoveMode && !isImmobilized) {
       updateMovePath(h);
     } else if (isAoeMode) {
       // Drag restages the anchor whenever the pointer crosses one of the 6
@@ -2123,9 +2350,11 @@ function BoardForTurn({
             {moveStepsUsed}/{moveBudget}
           </span>
           <span style={{ color: theme.muted, fontSize: 12, flex: 1 }}>
-            {moveStepsUsed === 0
-              ? 'Tap or drag across hexes to trace your path.'
-              : 'Drag to adjust. Tap your hex to clear.'}
+            {isImmobilized
+              ? "You're immobilized and can't move this turn — skip the move."
+              : moveStepsUsed === 0
+                ? 'Tap or drag across hexes to trace your path.'
+                : 'Drag to adjust. Tap your hex to clear.'}
           </span>
         </div>
       )}
@@ -2156,7 +2385,7 @@ function BoardForTurn({
         onMoveAnimDone={onMoveAnimDone}
         monsterTurnAnim={gameState.monsterTurnAnim}
       />
-      {isMoveMode && moveStepsUsed > 0 && (
+      {isMoveMode && (
         <div
           style={{
             position: 'fixed',
@@ -2180,9 +2409,18 @@ function BoardForTurn({
           </button>
           <button
             onClick={confirmMove}
-            style={{ ...btn.primary(false), flex: 1, padding: '6px 18px', fontSize: 14 }}
+            disabled={isImmobilized || moveStepsUsed === 0}
+            style={{
+              ...btn.primary(false),
+              flex: 1,
+              padding: '6px 18px',
+              fontSize: 14,
+              ...(isImmobilized || moveStepsUsed === 0
+                ? { opacity: 0.4, cursor: 'not-allowed' }
+                : {}),
+            }}
           >
-            Confirm
+            {isImmobilized ? 'Immobilized' : 'Confirm'}
           </button>
         </div>
       )}
@@ -2209,7 +2447,6 @@ function MonsterTurnBanner({ anim, units }: { anim: MonsterTurnAnim; units: Unit
         return '…';
     }
   })();
-  const draw = anim.modifierDraw;
   return (
     <div
       style={{
@@ -2243,73 +2480,9 @@ function MonsterTurnBanner({ anim, units }: { anim: MonsterTurnAnim; units: Unit
           </span>
         </div>
         <div style={{ fontSize: 11, color: theme.muted, marginTop: 1 }}>{phaseLabel}</div>
+        {/* The monster's attack-modifier pull is shown big on the Host screen
+            (see MonsterModifierModal in HostScreen) rather than here. */}
       </div>
-      {draw && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-          {draw.advantageDraw ? (
-            <>
-              <span
-                style={{
-                  fontSize: 8,
-                  letterSpacing: 0.8,
-                  textTransform: 'uppercase',
-                  fontFamily: theme.headingFont,
-                  color: draw.advantageDraw.mode === 'advantage' ? theme.good : theme.bad,
-                }}
-              >
-                {draw.advantageDraw.mode === 'advantage' ? 'Advantage' : 'Disadvantage'}
-              </span>
-              <div style={{ display: 'flex', gap: 4 }}>
-                {draw.advantageDraw.cards.map((c, i) => (
-                  <MonsterModCardMini
-                    key={i}
-                    card={c}
-                    chosen={i === draw.advantageDraw!.usedIndex}
-                  />
-                ))}
-              </div>
-            </>
-          ) : (
-            <MonsterModCardMini card={draw.card} />
-          )}
-          <div style={{ fontSize: 9, color: theme.muted }}>
-            {draw.baseAmount}→{draw.finalAmount}
-          </div>
-          {draw.damageDealt !== null && (
-            <div style={{ fontSize: 9, color: theme.bad }}>−{draw.damageDealt}</div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Small attack-modifier card chip used in the player-side monster-turn ticker.
- *  `chosen` highlights the used card of an Advantage/Disadvantage pair. */
-function MonsterModCardMini({ card, chosen }: { card: ModifierCard; chosen?: boolean }) {
-  const isCrit = card.kind === 'crit';
-  const isNull = card.kind === 'null';
-  const faded = chosen === false;
-  return (
-    <div
-      style={{
-        width: 40,
-        height: 52,
-        borderRadius: 5,
-        border: `${chosen ? 2 : 1}px solid ${chosen ? theme.good : theme.border}`,
-        background: theme.panelRaised,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontFamily: theme.headingFont,
-        fontWeight: 700,
-        fontSize: modifierLabel(card).length > 2 ? 11 : 18,
-        opacity: faded ? 0.4 : 1,
-        filter: faded ? 'grayscale(1)' : 'none',
-        color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
-      }}
-    >
-      {modifierLabel(card)}
     </div>
   );
 }

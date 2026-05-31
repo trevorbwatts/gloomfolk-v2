@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { getBattleGoal } from '@gloomfolk/shared';
-import { theme } from '../theme.js';
+import { btn, theme } from '../theme.js';
 
 /**
  * Secret battle-goal pick shown at scenario start: three dealt goals, keep one.
@@ -12,6 +13,7 @@ export function BattleGoalPicker({
   dealtGoalIds: readonly string[];
   onChoose: (goalId: string) => void;
 }) {
+  const [pendingId, setPendingId] = useState<string | null>(null);
   return (
     <div style={{ marginBottom: 24 }}>
       <h1
@@ -27,7 +29,15 @@ export function BattleGoalPicker({
       >
         Choose a battle goal
       </h1>
-      <p style={{ color: theme.muted, fontSize: 13, margin: '0 0 16px', lineHeight: 1.4 }}>
+      <p
+        style={{
+          color: theme.muted,
+          fontFamily: theme.font,
+          fontSize: 13,
+          margin: '0 0 16px',
+          lineHeight: 1.4,
+        }}
+      >
         Keep one in secret. You earn its checkmarks only if you complete the
         scenario.
       </p>
@@ -35,14 +45,15 @@ export function BattleGoalPicker({
         {dealtGoalIds.map((id) => {
           const goal = getBattleGoal(id);
           if (!goal) return null;
+          const isPending = pendingId === id;
           return (
             <button
               key={id}
-              onClick={() => onChoose(id)}
+              onClick={() => setPendingId(id)}
               style={{
                 textAlign: 'left',
-                background: theme.panel,
-                border: `1px solid ${theme.border}`,
+                background: isPending ? theme.panelRaised : theme.panel,
+                border: `1px solid ${isPending ? theme.accent : theme.border}`,
                 borderRadius: 6,
                 padding: '14px 16px',
                 cursor: 'pointer',
@@ -73,13 +84,36 @@ export function BattleGoalPicker({
                     : 'varies ✓'}
                 </span>
               </div>
-              <p style={{ margin: '6px 0 0', fontSize: 13, lineHeight: 1.4 }}>
+              <p
+                style={{
+                  margin: '6px 0 0',
+                  fontFamily: theme.font,
+                  fontSize: 13,
+                  lineHeight: 1.4,
+                }}
+              >
                 {goal.description}
               </p>
             </button>
           );
         })}
       </div>
+      <button
+        type="button"
+        disabled={pendingId === null}
+        onClick={() => {
+          if (pendingId !== null) onChoose(pendingId);
+        }}
+        style={{
+          ...btn.primary(pendingId === null),
+          width: '100%',
+          marginTop: 16,
+          padding: '12px 18px',
+          fontSize: 15,
+        }}
+      >
+        {pendingId === null ? 'Select a battle goal' : 'Confirm battle goal'}
+      </button>
     </div>
   );
 }

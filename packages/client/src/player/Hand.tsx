@@ -85,41 +85,7 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
       </div>
 
       {shortRestPending && pendingLost && (
-        <div
-          style={{
-            background: theme.panel,
-            border: `1px solid ${theme.accent}`,
-            borderRadius: 6,
-            padding: 12,
-            marginBottom: 12,
-          }}
-        >
-          <div style={{ fontSize: 12, color: theme.muted, textTransform: 'uppercase', letterSpacing: 1, fontFamily: theme.headingFont }}>
-            Short rest — losing
-          </div>
-          <div style={{ margin: '4px 0 10px' }}>
-            <CardView card={pendingLost} />
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              style={btn.outline()}
-              onClick={() => sock.send({ type: 'player_short_rest_accept' })}
-            >
-              Confirm
-            </button>
-            <button
-              style={{ ...btn.ghost(), opacity: canReroll ? 1 : 0.5, cursor: canReroll ? 'pointer' : 'not-allowed' }}
-              disabled={!canReroll}
-              title={canReroll ? 'Take 1 damage, lose a different random card instead (once per short rest)' : 'No other cards to swap to'}
-              onClick={() => {
-                if (!canReroll) return;
-                sock.send({ type: 'player_short_rest_reroll' });
-              }}
-            >
-              Suffer 1 damage to reroll
-            </button>
-          </div>
-        </div>
+        <ShortRestModal card={pendingLost} canReroll={canReroll} />
       )}
 
       <p style={{ fontSize: 13, color: theme.muted, marginTop: 0 }}>
@@ -230,6 +196,74 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
         >
           Confirm
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** Short rest resolution shown as a centered modal over a dimming overlay.
+ *  The lost card is server-chosen, so the player only confirms or pays 1
+ *  damage to reroll — there's nothing to dismiss, hence no backdrop close. */
+function ShortRestModal({ card, canReroll }: { card: Card; canReroll: boolean }) {
+  const sock = useSocket();
+  return (
+    <div
+      role="dialog"
+      aria-label="Short rest"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0, 0, 0, 0.65)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 80,
+        padding: 20,
+      }}
+    >
+      <div
+        style={{
+          background: theme.panel,
+          border: `1px solid ${theme.accent}`,
+          borderRadius: 8,
+          padding: 20,
+          maxWidth: 360,
+          width: '100%',
+        }}
+      >
+        <div
+          style={{
+            fontSize: 12,
+            color: theme.muted,
+            textTransform: 'uppercase',
+            letterSpacing: 1,
+            fontFamily: theme.headingFont,
+          }}
+        >
+          Short rest — losing
+        </div>
+        <div style={{ margin: '8px 0 14px' }}>
+          <CardView card={card} />
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            style={btn.outline()}
+            onClick={() => sock.send({ type: 'player_short_rest_accept' })}
+          >
+            Confirm
+          </button>
+          <button
+            style={{ ...btn.ghost(), opacity: canReroll ? 1 : 0.5, cursor: canReroll ? 'pointer' : 'not-allowed' }}
+            disabled={!canReroll}
+            title={canReroll ? 'Take 1 damage, lose a different random card instead (once per short rest)' : 'No other cards to swap to'}
+            onClick={() => {
+              if (!canReroll) return;
+              sock.send({ type: 'player_short_rest_reroll' });
+            }}
+          >
+            Suffer 1 damage to reroll
+          </button>
+        </div>
       </div>
     </div>
   );

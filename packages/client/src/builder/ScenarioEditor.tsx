@@ -1,4 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
+import {
+  ArrowDownLeft,
+  ArrowDownRight,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUpLeft,
+  ArrowUpRight,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { TILE_SHAPES, TILE_SIDES, type Hex, hexKey } from '@gloomfolk/shared';
 import { btn, theme } from '../theme.js';
 import { SceneCanvas } from './SceneCanvas.js';
@@ -14,7 +23,12 @@ import {
   newOverlayId,
   newPlacedTileId,
 } from './scenarios.js';
-import { OVERLAY_KINDS, OVERLAY_STYLES } from './overlayStyle.js';
+import {
+  OVERLAY_KINDS,
+  OVERLAY_STYLES,
+  TOKEN_LETTER_KINDS,
+  TOKEN_NUMBER_KINDS,
+} from './overlayStyle.js';
 import { MONSTER_CATALOG, monsterEntry } from './monsterCatalog.js';
 import { monsterAvatarUrl, onAvatarError } from '../avatars.js';
 
@@ -141,10 +155,13 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
     if (!selectedTile) return;
     patchSelectedTile({ rotation: ((selectedTile.rotation + step) % 6 + 6) % 6 });
   }
+  function removeTileById(id: string) {
+    updateTiles(placed.filter((p) => p.id !== id));
+    if (selectedTileId === id) setSelectedTileId(null);
+  }
   function removeTile() {
     if (!selectedTile) return;
-    updateTiles(placed.filter((p) => p.id !== selectedTile.id));
-    setSelectedTileId(null);
+    removeTileById(selectedTile.id);
   }
 
   function handleHexClick(h: Hex, shift: boolean) {
@@ -248,29 +265,40 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
             </p>
           ) : (
             placed.map((p) => (
-              <button
+              <div
                 key={p.id}
-                onClick={() => setSelectedTileId(p.id)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '6px 10px',
-                  marginBottom: 2,
-                  background: p.id === selectedTileId ? theme.panelRaised : 'transparent',
-                  color: p.id === selectedTileId ? theme.accent : theme.text,
-                  border: 'none',
-                  borderRadius: 3,
-                  fontFamily: theme.font,
-                  fontSize: 13,
-                  cursor: 'pointer',
-                }}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}
               >
-                {p.tileSideId}
-                <span style={{ color: theme.muted, fontSize: 11, marginLeft: 8 }}>
-                  ({p.origin.q},{p.origin.r}) · rot {p.rotation}
-                </span>
-              </button>
+                <button
+                  onClick={() => setSelectedTileId(p.id)}
+                  style={{
+                    flex: 1,
+                    display: 'block',
+                    textAlign: 'left',
+                    padding: '6px 10px',
+                    background: p.id === selectedTileId ? theme.panelRaised : 'transparent',
+                    color: p.id === selectedTileId ? theme.accent : theme.text,
+                    border: 'none',
+                    borderRadius: 3,
+                    fontFamily: theme.font,
+                    fontSize: 13,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {p.tileSideId}
+                  <span style={{ color: theme.muted, fontSize: 11, marginLeft: 8 }}>
+                    ({p.origin.q},{p.origin.r}) · rot {p.rotation}
+                  </span>
+                </button>
+                <button
+                  onClick={() => removeTileById(p.id)}
+                  title="Remove tile"
+                  aria-label={`Remove tile ${p.tileSideId}`}
+                  style={{ ...btn.ghost(), fontSize: 14, padding: '4px 8px', flexShrink: 0 }}
+                >
+                  ×
+                </button>
+              </div>
             ))
           )}
         </div>
@@ -327,6 +355,23 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {selectedHexKeys.size > 0 && (
+          <div style={panelStyle}>
+            <div style={sectionLabel}>Tokens</div>
+            <TokenRow
+              kinds={TOKEN_LETTER_KINDS}
+              matched={matchedOverlays}
+              onToggle={toggleOverlayKind}
+            />
+            <div style={{ height: 6 }} />
+            <TokenRow
+              kinds={TOKEN_NUMBER_KINDS}
+              matched={matchedOverlays}
+              onToggle={toggleOverlayKind}
+            />
           </div>
         )}
 
@@ -482,6 +527,51 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
   );
 }
 
+/** Compact grid of square glyph buttons for placing/removing map tokens on the
+    current hex selection. Active tokens are filled with their kind colour. */
+function TokenRow({
+  kinds,
+  matched,
+  onToggle,
+}: {
+  kinds: OverlayKind[];
+  matched: Overlay[];
+  onToggle: (kind: OverlayKind) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+      {kinds.map((kind) => {
+        const s = OVERLAY_STYLES[kind];
+        const isCurrent = matched.some((o) => o.kind === kind);
+        return (
+          <button
+            key={kind}
+            onClick={() => onToggle(kind)}
+            title={`Token ${s.symbol}`}
+            style={{
+              width: 28,
+              height: 28,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: isCurrent ? s.color : 'transparent',
+              color: isCurrent ? '#fff' : theme.text,
+              border: `1px solid ${isCurrent ? s.color : theme.border}`,
+              borderRadius: 3,
+              fontSize: 13,
+              fontWeight: 700,
+              fontFamily: theme.headingFont,
+              cursor: 'pointer',
+            }}
+          >
+            {s.symbol}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function SpecialRules({
   value,
   onChange,
@@ -604,17 +694,38 @@ function MonsterRow({
   );
 }
 
+/** Lucide arrow matching each of the six pointy-top hex directions. */
+const DIRECTION_ICON: Record<string, LucideIcon> = {
+  NW: ArrowUpLeft,
+  NE: ArrowUpRight,
+  W: ArrowLeft,
+  E: ArrowRight,
+  SW: ArrowDownLeft,
+  SE: ArrowDownRight,
+};
+
 function MoveControls({ onMove }: { onMove: (q: number, r: number) => void }) {
-  const moveBtn = (label: string, q: number, r: number): React.ReactElement => (
-    <button
-      key={label}
-      onClick={() => onMove(q, r)}
-      style={{ ...btn.ghost(), fontSize: 11, padding: '4px 6px', minWidth: 38 }}
-      title={`Move ${label}`}
-    >
-      {label}
-    </button>
-  );
+  const moveBtn = (label: string, q: number, r: number): React.ReactElement => {
+    const Icon = DIRECTION_ICON[label];
+    return (
+      <button
+        key={label}
+        onClick={() => onMove(q, r)}
+        style={{
+          ...btn.ghost(),
+          padding: '4px 6px',
+          minWidth: 38,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+        title={`Move ${label}`}
+        aria-label={`Move ${label}`}
+      >
+        {Icon ? <Icon size={16} strokeWidth={1.75} /> : label}
+      </button>
+    );
+  };
   const find = (label: string) => {
     const d = HEX_DIRECTIONS.find((h) => h.label === label);
     if (!d) return moveBtn(label, 0, 0);

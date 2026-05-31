@@ -58,6 +58,7 @@ export function HostScreen() {
   const gameState = useStore((s) => s.gameState);
   const { moveAnim, onMoveAnimDone } = useMoveAnim(gameState?.lastMove);
   const campaignId = useStore((s) => s.campaignId);
+  const lanHost = useStore((s) => s.lanHost);
   const clearCampaign = useStore((s) => s.clearCampaign);
   const [newName, setNewName] = useState('');
 
@@ -143,7 +144,14 @@ export function HostScreen() {
     );
   }
 
-  const joinUrl = `${location.origin}/p#${campaignId}`;
+  // Phones join over the LAN, not on this machine — so prefer the server's LAN
+  // IP (from `hello`) over location.origin, which is usually localhost on the
+  // host. Keep the current protocol/port and just swap the hostname.
+  const joinPort = location.port ? `:${location.port}` : '';
+  const joinOrigin = lanHost
+    ? `${location.protocol}//${lanHost}${joinPort}`
+    : location.origin;
+  const joinUrl = `${joinOrigin}/p#${campaignId}`;
   const playersWithChars = gameState?.players.filter((p) => p.characterId) ?? [];
   const playersReady = playersWithChars.filter((p) => {
     const ch = gameState?.characters.find((c) => c.id === p.characterId);
@@ -299,6 +307,12 @@ export function HostScreen() {
                       onSkip={() => sock.send({ type: 'host_skip_monster_anim' })}
                     />
                   )}
+                  {gameState.monsterTurnAnim && (
+                    <MonsterModifierModal
+                      anim={gameState.monsterTurnAnim}
+                      units={gameState.units}
+                    />
+                  )}
                   <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <HexBoard
@@ -379,7 +393,6 @@ function MonsterTurnPanel({
         return '…';
     }
   })();
-  const draw = anim.modifierDraw;
   return (
     <div
       style={{
@@ -414,40 +427,8 @@ function MonsterTurnPanel({
             {target ? target.name : 'no target'}
           </span>
         </div>
-        <div style={{ fontSize: 12, color: theme.muted, marginTop: 2 }}>
-          {phaseLabel}
-          {draw?.advantageDraw && (
-            <span
-              style={{
-                color: draw.advantageDraw.mode === 'advantage' ? theme.good : theme.bad,
-                marginLeft: 6,
-                fontWeight: 600,
-              }}
-            >
-              · {draw.advantageDraw.mode === 'advantage' ? 'Advantage' : 'Disadvantage'}
-            </span>
-          )}
-        </div>
+        <div style={{ fontSize: 12, color: theme.muted, marginTop: 2 }}>{phaseLabel}</div>
       </div>
-      {draw && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
-          {draw.advantageDraw ? (
-            <div style={{ display: 'flex', gap: 6 }}>
-              {draw.advantageDraw.cards.map((c, i) => (
-                <HostModCard key={i} card={c} chosen={i === draw.advantageDraw!.usedIndex} />
-              ))}
-            </div>
-          ) : (
-            <HostModCard card={draw.card} />
-          )}
-          <div style={{ fontSize: 10, color: theme.muted }}>
-            {draw.baseAmount} → {draw.finalAmount}
-          </div>
-          {draw.damageDealt !== null && (
-            <div style={{ fontSize: 10, color: theme.bad }}>−{draw.damageDealt}</div>
-          )}
-        </div>
-      )}
       <button onClick={onSkip} style={{ ...btn.outline(), fontSize: 12, padding: '6px 12px' }}>
         Skip ▶▶
       </button>
@@ -455,33 +436,196 @@ function MonsterTurnPanel({
   );
 }
 
-/** Attack-modifier card chip for the host monster-turn banner. `chosen`
- *  highlights the used card of an Advantage/Disadvantage pair (the other is
- *  rendered dimmed). */
-function HostModCard({ card, chosen }: { card: ModifierCard; chosen?: boolean }) {
-  const isCrit = card.kind === 'crit';
-  const isNull = card.kind === 'null';
-  const faded = chosen === false;
+/** Big centered overlay that reveals the active monster's attack-modifier pull.
+ *  Shown on the Host screen while a monster's attack draw is live (the player
+ *  screens no longer show the pull). Non-interactive — clicks pass through so
+ *  the host can still hit Skip / the board behind it. The card flips in on each
+ *  fresh draw via a remount key. */
+function MonsterModifierModal({ anim, units }: { anim: MonsterTurnAnim; units: Unit[] }) {
+  const draw = anim.modifierDraw;
+  if (!draw) return null;
+  // Only the "roll" beat. Once damage lands the modal clears so the board's
+  // impact cinematic (lunge, flash, floating damage) is visible behind it.
+  if (anim.phase !== 'modifier-draw') return null;
+  const active = units.find((u) => u.id === anim.activeMonsterId) ?? null;
+  const target = units.find((u) => u.id === draw.targetUnitId) ?? null;
+  // Remount the flip card whenever the live draw changes so it re-animates.
+  const flipKey = `${anim.setId}|${anim.activeMonsterId}|${draw.targetUnitId}|${modifierLabel(draw.card)}`;
   return (
     <div
       style={{
-        width: 52,
-        height: 68,
-        borderRadius: 6,
-        border: `${chosen ? 2 : 1}px solid ${chosen ? theme.good : theme.border}`,
-        background: theme.panelRaised,
+        position: 'fixed',
+        inset: 0,
+        zIndex: 120,
+        pointerEvents: 'none',
+        background: 'rgba(0,0,0,0.6)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        fontFamily: theme.headingFont,
-        fontWeight: 700,
-        fontSize: modifierLabel(card).length > 2 ? 14 : 22,
-        opacity: faded ? 0.4 : 1,
-        filter: faded ? 'grayscale(1)' : 'none',
-        color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+        padding: 24,
       }}
     >
-      {modifierLabel(card)}
+      <div
+        style={{
+          background: theme.panel,
+          border: `1px solid ${theme.accent}`,
+          borderRadius: 12,
+          padding: '28px 36px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 16,
+          minWidth: 320,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: theme.headingFont,
+            fontSize: 14,
+            letterSpacing: 1,
+            textTransform: 'uppercase',
+            color: theme.accent,
+            textAlign: 'center',
+          }}
+        >
+          {anim.abilityCardName}
+        </div>
+        <div style={{ fontSize: 22, textAlign: 'center' }}>
+          <span style={{ color: '#ff6b6b', fontWeight: 600 }}>{active?.name ?? '—'}</span>
+          <span style={{ color: theme.muted, margin: '0 10px' }}>→</span>
+          <span style={{ color: target ? '#ffd84d' : theme.muted }}>
+            {target ? target.name : 'no target'}
+          </span>
+        </div>
+        {draw.advantageDraw && (
+          <div
+            style={{
+              fontFamily: theme.headingFont,
+              fontSize: 14,
+              letterSpacing: 1,
+              textTransform: 'uppercase',
+              color: draw.advantageDraw.mode === 'advantage' ? theme.good : theme.bad,
+            }}
+          >
+            {draw.advantageDraw.mode === 'advantage' ? 'Advantage' : 'Disadvantage'}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 20 }}>
+          {draw.advantageDraw ? (
+            draw.advantageDraw.cards.map((c, i) => (
+              <BigModCard
+                key={`${flipKey}|${i}`}
+                card={c}
+                chosen={i === draw.advantageDraw!.usedIndex}
+                faded={i !== draw.advantageDraw!.usedIndex}
+              />
+            ))
+          ) : (
+            <BigModCard key={flipKey} card={draw.card} />
+          )}
+        </div>
+        <div style={{ fontSize: 22, color: theme.muted, fontFamily: theme.headingFont }}>
+          {draw.baseAmount} → <strong style={{ color: theme.text }}>{draw.finalAmount}</strong>
+        </div>
+        {draw.damageDealt !== null && (
+          <div style={{ fontSize: 16, color: theme.bad, fontFamily: theme.headingFont }}>
+            −{draw.damageDealt} damage
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Large attack-modifier card that flips face-up on mount, for the host modal.
+ *  `chosen` rings the used card of an Advantage/Disadvantage pair; `faded` dims
+ *  the discarded one. */
+function BigModCard({
+  card,
+  chosen,
+  faded = false,
+}: {
+  card: ModifierCard;
+  chosen?: boolean;
+  faded?: boolean;
+}) {
+  const [flipped, setFlipped] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setFlipped(true), 80);
+    return () => clearTimeout(t);
+  }, []);
+  const label = modifierLabel(card);
+  const isCrit = card.kind === 'crit';
+  const isNull = card.kind === 'null';
+  const accent = chosen ? theme.good : isCrit ? theme.accent : isNull ? theme.bad : theme.border;
+  const width = 150;
+  const height = 200;
+  return (
+    <div style={{ position: 'relative', width, height, perspective: 1000, opacity: faded ? 0.4 : 1 }}>
+      {chosen && (
+        <span
+          style={{
+            position: 'absolute',
+            top: -12,
+            right: -12,
+            zIndex: 2,
+            width: 28,
+            height: 28,
+            borderRadius: 14,
+            background: theme.good,
+            color: '#0e1612',
+            fontSize: 18,
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          ✓
+        </span>
+      )}
+      <div
+        style={{
+          position: 'relative',
+          width: '100%',
+          height: '100%',
+          transition: 'transform 450ms ease-out',
+          transformStyle: 'preserve-3d',
+          transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backfaceVisibility: 'hidden',
+            background: theme.panelRaised,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 12,
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backfaceVisibility: 'hidden',
+            transform: 'rotateY(180deg)',
+            background: theme.panelRaised,
+            border: `3px solid ${accent}`,
+            borderRadius: 12,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: 700,
+            fontSize: label.length > 2 ? 44 : 64,
+            fontFamily: theme.headingFont,
+            color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+            filter: faded ? 'grayscale(1)' : 'none',
+          }}
+        >
+          {label}
+        </div>
+      </div>
     </div>
   );
 }

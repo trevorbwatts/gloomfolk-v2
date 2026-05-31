@@ -45,7 +45,7 @@ function elementSelectorText(
 /** Visual chip showing one element. Glows when the live context says the
  *  element is currently available to consume (strong/waning at turn-start,
  *  not yet consumed). */
-function ElementChip({
+export function ElementChip({
   element,
   context,
   consumeIntent,

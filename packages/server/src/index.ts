@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientToServer, ServerToClient } from '@gloomfolk/shared';
 import {
@@ -12,6 +13,29 @@ import { Room } from './room.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const SERVER_VERSION = '0.1.0';
+
+/** Best-guess LAN IPv4 for this machine, so the host screen can show a join URL
+ *  that phones on the same Wi-Fi can actually reach (localhost won't work from
+ *  another device). Prefers private home/office ranges over VPN/other NICs.
+ *  Computed once at startup — a machine's LAN address rarely changes mid-session
+ *  and re-enumerating per connection isn't worth it. */
+const LAN_HOST: string | undefined = (() => {
+  const ifaces = os.networkInterfaces();
+  const candidates: string[] = [];
+  for (const nets of Object.values(ifaces)) {
+    for (const net of nets ?? []) {
+      // Node may report family as 'IPv4' (string) or 4 (number) across versions.
+      const isV4 = net.family === 'IPv4' || (net.family as unknown) === 4;
+      if (!isV4 || net.internal) continue;
+      candidates.push(net.address);
+    }
+  }
+  const isPrivate = (a: string) =>
+    a.startsWith('192.168.') ||
+    a.startsWith('10.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(a);
+  return candidates.find(isPrivate) ?? candidates[0];
+})();
 
 const rooms = new Map<string, Room>();
 
@@ -39,7 +63,11 @@ const wss = new WebSocketServer({ port: PORT });
 
 wss.on('connection', (ws) => {
   const conn: ConnState = { role: null, campaignId: null, playerId: null };
-  send(ws, { type: 'hello', serverVersion: SERVER_VERSION });
+  send(ws, {
+    type: 'hello',
+    serverVersion: SERVER_VERSION,
+    ...(LAN_HOST ? { lanHost: LAN_HOST } : {}),
+  });
 
   ws.on('message', async (raw) => {
     let msg: ClientToServer;
@@ -229,6 +257,33 @@ async function handle(
       return;
     }
 
+    case 'player_undo_buy_item': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.undoBuyItem(conn.playerId, msg.itemId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_finish_shopping': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.finishShopping(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_reopen_shopping': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.reopenShopping(conn.playerId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
     case 'player_set_item_loadout': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
@@ -411,6 +466,15 @@ async function handle(
       const r = rooms.get(conn.campaignId);
       if (!r) return;
       const result = r.engageHalf(conn.playerId, msg.slot, msg.cardId, msg.useBasic);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_unengage_half': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.unengageHalf(conn.playerId, msg.slot);
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }

@@ -24,6 +24,7 @@ export type PlayerEntry = {
   active: Card[];
   activeTracked: TrackedHalfState[];
   activeEffects: ActiveEffect[];
+  pendingRetaliateXp: { amount: number; label: string }[];
   selection: null;
   modifierDeck: ModifierCardInstance[];
   modifierDiscard: ModifierCardInstance[];
@@ -56,8 +57,10 @@ export function makeFixture(opts?: {
     claimedByPlayerId: playerId,
     gold: 0,
     loadout: null,
+    shoppingDone: false,
     ownedItemIds: [],
     broughtItemIds: [],
+    sessionPurchasedItemIds: [],
     spentItemIds: [],
     activeItems: [],
     battleGoalCheckmarks: 0,
@@ -87,6 +90,7 @@ export function makeFixture(opts?: {
     active: [],
     activeTracked: [],
     activeEffects: [],
+    pendingRetaliateXp: [],
     selection: null,
     modifierDeck: [],
     modifierDiscard: [],
@@ -106,7 +110,7 @@ export function makeFixture(opts?: {
     hpMax: 10,
     hex: { q: 0, r: 0 },
     shield: 0,
-    retaliate: 0,
+    retaliate: [],
     conditions: [],
     ownerPlayerId: playerId,
   };
@@ -128,7 +132,7 @@ export function addMonster(
     hpMax: opts.hp ?? 5,
     hex: opts.hex,
     shield: opts.shield ?? 0,
-    retaliate: 0,
+    retaliate: [],
     conditions: [],
   };
   room.units.push(m);
@@ -238,6 +242,49 @@ export function disposePlayerCards(room: Room, player: PlayerEntry): void {
   ).disposePlayerCards(player);
 }
 
+/**
+ * Drive a single monster attack against a target unit to completion. Seeds the
+ * shared monster modifier deck with a deterministic +0 card so the drawn
+ * modifier never misses, then drains the private `resolveMonsterAttackOnTarget`
+ * generator. There are no reactive items in the fixture, so the generator never
+ * yields an 'await-prompt' — we just run it dry.
+ */
+export function resolveMonsterAttack(
+  room: Room,
+  attacker: Unit,
+  target: Unit,
+  damage: number,
+): void {
+  const r = room as unknown as {
+    monsterModifierDeck: ModifierCardInstance[];
+    monsterModifierDiscard: ModifierCardInstance[];
+    resolveMonsterAttackOnTarget: (
+      m: Unit,
+      tgtUnit: Unit,
+      attack: { damage: number; effects: readonly unknown[] },
+      range: number,
+      setId: string,
+      abilityCardName: string,
+    ) => Generator<unknown, void, unknown>;
+  };
+  // Deterministic +0 draw — enough copies that disadvantage (two draws) is safe.
+  r.monsterModifierDeck = [
+    { id: 'mm-0a', card: { kind: 'flat', amount: 0 } },
+    { id: 'mm-0b', card: { kind: 'flat', amount: 0 } },
+  ];
+  r.monsterModifierDiscard = [];
+  const gen = r.resolveMonsterAttackOnTarget(
+    attacker,
+    target,
+    { damage, effects: [] },
+    1,
+    'test-set',
+    'Test Attack',
+  );
+  let step = gen.next();
+  while (!step.done) step = gen.next();
+}
+
 /** Reach into Room and invoke the private trigger dispatcher. */
 export function fireTrigger(
   room: Room,
@@ -252,6 +299,31 @@ export function fireTrigger(
       ) => { damageNegated: boolean };
     }
   ).fireTrackedTrigger(player, kind);
+}
+
+/** Reach into Room and run the private retaliate denormalization onto units. */
+export function syncUnitRetaliate(room: Room): void {
+  (room as unknown as { syncUnitRetaliate: () => void }).syncUnitRetaliate();
+}
+
+/** Reach into Room and invoke the private XP-award walk for a finished half. */
+export function awardHalfXp(
+  room: Room,
+  player: PlayerEntry,
+  card: Card,
+  which: 'top' | 'bottom',
+): void {
+  const half = which === 'top' ? card.top : card.bottom;
+  (
+    room as unknown as {
+      awardHalfXp: (p: PlayerEntry, h: unknown, actions: unknown[], name: string) => void;
+    }
+  ).awardHalfXp(player, half, [], card.name);
+}
+
+/** Reach into Room and advance to the next round (expires round-scoped state). */
+export function advanceToNextRound(room: Room): void {
+  (room as unknown as { advanceToNextRound: () => void }).advanceToNextRound();
 }
 
 /** Reach into Room and invoke the attack-time conditional trigger dispatcher. */

@@ -160,8 +160,9 @@ character_moved, exited_enemy_adjacent_hex, entered_occupied_hex, door_opened,
 round_end_position, turn_end_position, scenario_end_piles.
 
 **Known emission gaps / partial (cards affected):**
-- `targetRank` is always `'normal'` — Unit carries no rank yet → **Hunter**
-  can't trigger (needs elite kills); **Plebeian** trivially passes.
+- `targetRank` reflects the killed figure's actual rank (normal/elite/named) now
+  that Unit carries `rank`. **Hunter** (elite kills) and **Plebeian** work once
+  scenarios mark elites via `SpawnSlot.ranks`.
 - `ability_performed.targetedAlly` always false → **Promoter** can't trigger.
 - `damage_negated` is not emitted (card-loss-to-negate-damage isn't wired in
   the engine) → **Acrobat**, **Wastrel** can't trigger.

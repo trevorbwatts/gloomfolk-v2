@@ -35,7 +35,7 @@ export function useSocketBootstrap(): void {
     const off = sock.on((msg) => {
       switch (msg.type) {
         case 'hello': {
-          useStore.setState({ connected: true });
+          useStore.setState({ connected: true, lanHost: msg.lanHost ?? null });
           // Only auto-rejoin a saved player session on the player route.
           // On the host route (/) a stale player session would yank the
           // host into a scenario view on every refresh.
