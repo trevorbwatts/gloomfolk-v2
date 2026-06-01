@@ -16,6 +16,7 @@ import type {
   ClientToServer,
   ConditionInstance,
   CurrentTurn,
+  Door,
   Element,
   ElementBoardState,
   AdvantageDraw,
@@ -26,10 +27,17 @@ import type {
   ModifierCardInstance,
   ModifierDrawResult,
   MoneyToken,
+  MonsterAbilityCard,
+  MonsterAbilityStep,
   MonsterAttackEffect,
+  MonsterBehavior,
   MonsterConsumeEffect,
+  MonsterLevel,
   MonsterRank,
   MonsterStatCard,
+  NarrativeEntry,
+  ScriptedAction,
+  SpawnSlot,
   MonsterTurnAnim,
   MoveAnimation,
   NegativeCondition,
@@ -53,11 +61,16 @@ import {
   archerDeck,
   banditArcher,
   banditScout,
+  cityGuard,
+  guardDeck,
   cardMatchesLevel,
   bfsForcedMove,
   bfsForcedMovePath,
+  bfsPath,
+  bfsPathJump,
   bfsReachable,
   bfsReachableJump,
+  pathCost,
   bruiser,
   silentKnife,
   createMonsterModifierDeck,
@@ -68,6 +81,9 @@ import {
   getBattleGoal,
   getScenario,
   goldConversionFor,
+  MAX_SCENARIO_LEVEL,
+  MIN_SCENARIO_LEVEL,
+  recommendedScenarioLevel,
   hasLineOfSight,
   hexDistance,
   hexEqual,
@@ -90,6 +106,7 @@ import {
 const MONSTER_DECKS = {
   archer: archerDeck,
   scout: scoutDeck,
+  guard: guardDeck,
 } as const;
 import { type CampaignSave, saveCampaign } from './saves.js';
 import type { DestinationEval } from './ai.js';
@@ -98,12 +115,33 @@ import { determineFocus, determineMovement, readAbility } from './ai.js';
 const MONSTER_DEFS = {
   'bandit-archer': banditArcher,
   'bandit-scout': banditScout,
+  'city-guard': cityGuard,
 } as const;
 
 const MONSTER_DEF_BY_SETID: Record<string, MonsterStatCard | undefined> = {
   archer: banditArcher,
   scout: banditScout,
+  guard: cityGuard,
 };
+
+/** The stat block (both ranks) for a monster type at a given scenario level.
+ *  Monster defs only carry blocks for the levels where the type actually
+ *  appears; if the exact level is missing, fall back to the nearest defined
+ *  level at or below it, then the nearest above. */
+function rankedStatsForLevel(def: MonsterStatCard, level: number) {
+  const at = (l: number) => def.levels[l as MonsterLevel];
+  const exact = at(level);
+  if (exact) return exact;
+  for (let l = level - 1; l >= MIN_SCENARIO_LEVEL; l--) {
+    const b = at(l);
+    if (b) return b;
+  }
+  for (let l = level + 1; l <= MAX_SCENARIO_LEVEL; l++) {
+    const b = at(l);
+    if (b) return b;
+  }
+  return undefined;
+}
 
 function monsterDefMatchesSet(defId: string, setId: string): boolean {
   const def = MONSTER_DEFS[defId as keyof typeof MONSTER_DEFS];
@@ -386,6 +424,7 @@ function basicActions(slot: 'top' | 'bottom'): PendingAction[] {
         targets: 1,
         targetsRemaining: 1,
         hitsLanded: 0,
+        hitTargetIds: [],
         consumeOffers: [],
         acceptedConsumeIndices: [],
         lockedRiderAttack: 0,
@@ -559,6 +598,7 @@ function buildActionQueue(
               targets,
               targetsRemaining: targets,
               hitsLanded: 0,
+              hitTargetIds: [],
               consumeOffers: [],
               acceptedConsumeIndices: [],
               lockedRiderAttack: 0,
@@ -740,6 +780,8 @@ interface PlayerEntry {
    *  Expires (drops) at end of round if no retaliate occurred. */
   pendingRetaliateXp: { amount: number; label: string }[];
   selection: CardSelection | null;
+  /** Placement phase: true once this player has placed and tapped Ready. */
+  placementReady: boolean;
   modifierDeck: ModifierCardInstance[];
   modifierDiscard: ModifierCardInstance[];
   modifierNeedsReshuffle: boolean;
@@ -807,6 +849,31 @@ export class Room {
   private battleGoalResults: BattleGoalScenarioResult[] | null = null;
   /** Monster-type ids that appeared this scenario (for Exterminator). */
   private monsterTypesSeen = new Set<string>();
+  /** Rooms currently revealed. Empty set means "no room gating" (single-room
+   *  scenarios show everything). The starting room is added at scenario start;
+   *  more rooms are added as doors open. */
+  private revealedRooms = new Set<string>();
+  /** Available starting hexes for the placement phase (player-start overlays in
+   *  the revealed starting room). Players claim distinct ones before play. */
+  private startingPositions: Hex[] = [];
+  /** Door ids that have already been opened (so they can't reveal twice). */
+  private openedDoorIds = new Set<string>();
+  /** Rooms we've already announced as cleared (for one-time "door unlocked"
+   *  event log lines). */
+  private clearedRoomsAnnounced = new Set<string>();
+  /** Per spawned monster unit id → its room (for room-cleared / reveal logic). */
+  private monsterRoomById = new Map<string, string>();
+  /** Per spawned monster unit id → its behavior (normal / dummy / scripted). */
+  private monsterBehaviorById = new Map<string, MonsterBehavior>();
+  /** Scripted action per monster set this round (for the synthetic ability
+   *  card scripted figures perform instead of drawing). Rebuilt each round. */
+  private scriptedActionBySet = new Map<string, ScriptedAction>();
+  /** Story-text blocks waiting to be shown (FIFO). The head is broadcast as
+   *  `narrative`; players dismiss it to advance. */
+  private narrativeQueue: NarrativeEntry[] = [];
+  /** Monotonic unit-id counter for the current scenario (players + monsters,
+   *  including monsters spawned later when a door opens). */
+  private nextUnitN = 1;
   /** Unit ids of monsters whose group has taken its turn this round. Cleared
    *  each round. Drives Assassin (kill before it acts) and Vanguard. */
   private monstersActedThisRound = new Set<string>();
@@ -867,6 +934,7 @@ export class Room {
       activeEffects: [],
       pendingRetaliateXp: [],
       selection: null,
+      placementReady: false,
       modifierDeck: [],
       modifierDiscard: [],
       modifierNeedsReshuffle: false,
@@ -960,7 +1028,10 @@ export class Room {
     this.broadcastState();
   }
 
-  startScenario(scenarioId: string): { ok: true } | { ok: false; reason: string } {
+  startScenario(
+    scenarioId: string,
+    level?: number,
+  ): { ok: true } | { ok: false; reason: string } {
     const scenario = getScenario(scenarioId);
     if (!scenario) return { ok: false, reason: 'unknown_scenario' };
 
@@ -968,10 +1039,12 @@ export class Room {
     const enemySlots = scenario.spawns.filter((s) => s.side === 'enemy');
     const readyPlayers = [...this.players.values()].filter((p) => p.activeCharacterId);
 
-    if (readyPlayers.length === 0) {
-      return { ok: false, reason: 'no_players_with_characters' };
+    // Gloomhaven requires a party of at least two.
+    if (readyPlayers.length < 2) {
+      return { ok: false, reason: 'need_two_players' };
     }
 
+    const partyLevels: number[] = [];
     for (const p of readyPlayers) {
       const charInst = this.campaign.characters.find(
         (c) => c.id === p.activeCharacterId,
@@ -979,13 +1052,34 @@ export class Room {
       if (!charInst || charInst.loadout === null || !charInst.shoppingDone) {
         return { ok: false, reason: 'players_not_ready' };
       }
+      partyLevels.push(charInst.level);
     }
+
+    // Scenario level drives monster stats, trap/hazard damage, gold conversion
+    // and bonus XP (see docs/rules/scenario-level.md). The host may override it
+    // in the lobby; otherwise default to the recommended level for the party.
+    const chosen = level ?? recommendedScenarioLevel(partyLevels);
+    this.scenarioLevel = Math.max(
+      MIN_SCENARIO_LEVEL,
+      Math.min(MAX_SCENARIO_LEVEL, Math.floor(chosen)),
+    );
 
     this.units = [];
     this.standeesInUse = new Map();
     this.moneyTokens = [];
     this.moneyTokensPlaced = 0;
     this.nextMoneyTokenN = 1;
+    // Reset scenario room/door/narrative state. The starting room (first in the
+    // reveal order) is visible immediately; rooms with no `rooms` list aren't
+    // gated at all (everything visible).
+    this.revealedRooms = new Set(scenario.rooms?.[0] ? [scenario.rooms[0]] : []);
+    this.openedDoorIds = new Set();
+    this.clearedRoomsAnnounced = new Set();
+    this.monsterRoomById = new Map();
+    this.monsterBehaviorById = new Map();
+    this.scriptedActionBySet = new Map();
+    this.narrativeQueue = [];
+    this.nextUnitN = 1;
     // Element board resets at scenario start (rulebook: tokens enter the
     // inert column when the table is reset).
     this.elementBoard = freshElementBoard();
@@ -1008,29 +1102,24 @@ export class Room {
       ch.spentItemIds = [];
       ch.activeItems = [];
     }
-    let unitN = 1;
 
-    readyPlayers.forEach((p, i) => {
-      const slot = playerSlots[i];
+    // Available starting hexes the party will choose from during placement —
+    // every player-start slot in a currently-revealed room (all of them at
+    // scenario start, since only the starting room is revealed and that's where
+    // the starts live).
+    this.startingPositions = playerSlots
+      .filter((s) => !s.room || this.revealedRooms.has(s.room))
+      .map((s) => ({ q: s.hex.q, r: s.hex.r }));
+
+    // Player figures are NOT placed here. Each player picks a starting hex in
+    // the placement phase (see placePlayer); we only do the position-independent
+    // per-player setup (hand, modifier deck, effects) now.
+    readyPlayers.forEach((p) => {
       const charInst = p.activeCharacterId
         ? this.campaign.characters.find((c) => c.id === p.activeCharacterId)
         : null;
-      if (!slot || !charInst) return;
-      const hp = characterHp(charInst.classId);
-      this.units.push({
-        id: `u${unitN++}`,
-        kind: 'player',
-        defId: charInst.classId,
-        name: charInst.name,
-        hp,
-        hpMax: hp,
-        shield: 0,
-        retaliate: [],
-        conditions: [],
-        hex: slot.hex,
-        ownerPlayerId: p.playerId,
-        moneyTokensHeld: 0,
-      });
+      if (!charInst) return;
+      p.placementReady = false;
       // Deal starting hand from the character's chosen loadout (if any),
       // falling back to the class default. We resolve loadout card IDs
       // against the class's full card list.
@@ -1075,31 +1164,11 @@ export class Room {
       p.modifierNeedsReshuffle = false;
     });
 
+    // Only spawn enemies in revealed rooms. Enemies in rooms behind a closed
+    // door are placed later, when their door is opened (see openDoor).
     enemySlots.forEach((slot) => {
-      if (!slot.monsterId) return;
-      const def = MONSTER_DEFS[slot.monsterId as keyof typeof MONSTER_DEFS];
-      if (!def) return;
-      // Rank scales with party size (Gloomhaven). Elites use the elite stat
-      // block; named/normal use the normal block (named stat overrides aren't
-      // modelled yet — see revealing-spawning-and-named-monsters.md).
-      const rank: MonsterRank = slot.ranks?.[readyPlayers.length] ?? 'normal';
-      const stats = rank === 'elite' ? def.levels[1]?.elite : def.levels[1]?.normal;
-      const hp = stats?.hp ?? 5;
-      const standeeNumber = this.allocateStandeeNumber(slot.monsterId, def.standeeCount);
-      this.units.push({
-        id: `u${unitN++}`,
-        kind: 'monster',
-        defId: slot.monsterId,
-        name: standeeNumber !== undefined ? `${def.name} ${standeeNumber}` : def.name,
-        ...(standeeNumber !== undefined ? { standeeNumber } : {}),
-        rank,
-        hp,
-        hpMax: hp,
-        shield: 0,
-        retaliate: [],
-        conditions: [],
-        hex: slot.hex,
-      });
+      if (slot.room && !this.revealedRooms.has(slot.room)) return;
+      this.spawnEnemySlot(slot, readyPlayers.length);
     });
 
     // Deal battle goals: each ready character gets three in secret and keeps
@@ -1127,11 +1196,275 @@ export class Room {
     }
 
     this.campaign.scenarioId = scenario.id;
-    this.phase = 'card_select';
+    // Show the intro story, then let players choose where to stand. Card
+    // selection (round 1) begins only after the host taps Begin in placement.
+    this.phase = 'placement';
     this.round = 1;
+    // Scenario intro story text, if any.
+    if (scenario.narrative?.start) this.narrativeQueue.push(scenario.narrative.start);
     // First round begins.
     this.battleGoalLog.push({ kind: 'round_start', round: 1 });
     void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Placement phase: claim (or move to) a starting hex. The player's figure is
+   *  created on first placement and slid on subsequent picks. Disallowed once
+   *  the player has tapped Ready (they must unready to move). */
+  placePlayer(playerId: string, hex: Hex): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'placement') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p || !p.activeCharacterId) return { ok: false, reason: 'no_player' };
+    if (p.placementReady) return { ok: false, reason: 'already_ready' };
+    if (!this.startingPositions.some((s) => hexEqual(s, hex))) {
+      return { ok: false, reason: 'not_a_start_hex' };
+    }
+    // Can't stand where another figure already is.
+    const occupant = this.units.find((u) => hexEqual(u.hex, hex));
+    if (occupant && occupant.ownerPlayerId !== playerId) {
+      return { ok: false, reason: 'hex_occupied' };
+    }
+    const charInst = this.campaign.characters.find((c) => c.id === p.activeCharacterId);
+    if (!charInst) return { ok: false, reason: 'no_character' };
+    const existing = this.units.find(
+      (u) => u.kind === 'player' && u.ownerPlayerId === playerId,
+    );
+    if (existing) {
+      existing.hex = { q: hex.q, r: hex.r };
+    } else {
+      const hp = characterHp(charInst.classId);
+      this.units.push({
+        id: `u${this.nextUnitN++}`,
+        kind: 'player',
+        defId: charInst.classId,
+        name: charInst.name,
+        hp,
+        hpMax: hp,
+        shield: 0,
+        retaliate: [],
+        conditions: [],
+        hex: { q: hex.q, r: hex.r },
+        ownerPlayerId: playerId,
+        moneyTokensHeld: 0,
+      });
+    }
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Placement phase: lock in (or release) this player's chosen starting hex.
+   *  A player must have placed a figure before they can ready up. */
+  setPlacementReady(
+    playerId: string,
+    ready: boolean,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'placement') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p || !p.activeCharacterId) return { ok: false, reason: 'no_player' };
+    if (
+      ready &&
+      !this.units.some((u) => u.kind === 'player' && u.ownerPlayerId === playerId)
+    ) {
+      return { ok: false, reason: 'not_placed' };
+    }
+    p.placementReady = ready;
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** True when every connected character-player has placed a figure and tapped
+   *  Ready — the host may begin play. */
+  private placementComplete(): boolean {
+    const mustPlace = [...this.players.values()].filter(
+      (p) => p.activeCharacterId && p.socket !== null,
+    );
+    if (mustPlace.length === 0) return false;
+    return mustPlace.every(
+      (p) =>
+        p.placementReady &&
+        this.units.some((u) => u.kind === 'player' && u.ownerPlayerId === p.playerId),
+    );
+  }
+
+  /** Placement phase: host begins play. Advances to round-1 card selection. */
+  beginScenarioPlay(): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'placement') return { ok: false, reason: 'wrong_phase' };
+    if (!this.placementComplete()) return { ok: false, reason: 'placement_incomplete' };
+    this.phase = 'card_select';
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Spawn a single enemy slot onto the board. Used at scenario start (revealed
+   *  rooms) and when a door reveals a new room. */
+  private spawnEnemySlot(slot: SpawnSlot, playerCount: number): void {
+    if (!slot.monsterId) return;
+    const def = MONSTER_DEFS[slot.monsterId as keyof typeof MONSTER_DEFS];
+    if (!def) return;
+    // Rank scales with party size (Gloomhaven). Elites use the elite stat
+    // block; named/normal use the normal block (named stat overrides aren't
+    // modelled yet — see revealing-spawning-and-named-monsters.md). The
+    // standee count per slot also varies by party size: a slot with no rank at
+    // this count ('none' in the editor — omitted from `ranks` by the compiler)
+    // simply isn't placed. Scaling is defined for 2–4 players; clamp solo play
+    // to the 2-player column.
+    let rank: MonsterRank;
+    if (!slot.ranks) {
+      rank = 'normal';
+    } else {
+      const pc = Math.min(4, Math.max(2, playerCount));
+      const r = slot.ranks[pc];
+      if (!r) return; // 'none' at this party size — this figure doesn't spawn.
+      rank = r;
+    }
+    const ranked = rankedStatsForLevel(def, this.scenarioLevel);
+    const stats = rank === 'elite' ? ranked?.elite : ranked?.normal;
+    const hp = stats?.hp ?? 5;
+    const standeeNumber = this.allocateStandeeNumber(slot.monsterId, def.standeeCount);
+    const id = `u${this.nextUnitN++}`;
+    this.units.push({
+      id,
+      kind: 'monster',
+      defId: slot.monsterId,
+      name: standeeNumber !== undefined ? `${def.name} ${standeeNumber}` : def.name,
+      ...(standeeNumber !== undefined ? { standeeNumber } : {}),
+      rank,
+      hp,
+      hpMax: hp,
+      shield: 0,
+      retaliate: [],
+      conditions: [],
+      hex: slot.hex,
+    });
+    if (slot.room) this.monsterRoomById.set(id, slot.room);
+    this.monsterBehaviorById.set(id, slot.behavior ?? 'normal');
+  }
+
+  /** Behavior of a monster unit (defaults to 'normal'). */
+  private behaviorOf(unitId: string): MonsterBehavior {
+    return this.monsterBehaviorById.get(unitId) ?? 'normal';
+  }
+
+  /** True when every monster originally placed in `room` is dead. */
+  private roomCleared(room: string): boolean {
+    return !this.units.some(
+      (u) => u.kind === 'monster' && this.monsterRoomById.get(u.id) === room,
+    );
+  }
+
+  /** True when a door's unlock condition is currently satisfied. A
+   *  room-cleared door only unlocks once that room is actually revealed —
+   *  otherwise a hidden room (whose monsters haven't spawned) would read as
+   *  "cleared" and the door would open prematurely. */
+  private doorUnlocked(door: Door): boolean {
+    if (door.unlock === 'manual') return true;
+    const room = door.unlock.allMonstersDeadIn;
+    return this.revealedRooms.has(room) && this.roomCleared(room);
+  }
+
+  /** Doors the party can open right now: unlocked, and the room they'd reveal
+   *  isn't already shown. (Doors sit on tile edges, so we don't require the
+   *  door hex itself to be a floor tile.) */
+  private openableDoors(): { id: string; hex: Hex }[] {
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    if (!scenario?.doors) return [];
+    return scenario.doors
+      .filter(
+        (d) =>
+          !this.openedDoorIds.has(d.id) &&
+          !this.revealedRooms.has(d.revealsRoom) &&
+          this.doorUnlocked(d),
+      )
+      .map((d) => ({ id: d.id, hex: d.hex }));
+  }
+
+  /** Visible, unopened doors with their token numbers, for the board to draw a
+   *  door icon + numbered token. The token number is the door's 1-based index
+   *  in the scenario's door list (door1 → ①, door2 → ②). */
+  private doorViews(): { id: string; hex: Hex; number: number; openable: boolean }[] {
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    if (!scenario?.doors) return [];
+    const visible = new Set(this.scenarioTiles().map((t) => hexKey(t)));
+    return scenario.doors
+      .map((d, i) => ({ d, number: i + 1 }))
+      .filter(({ d }) => !this.openedDoorIds.has(d.id) && visible.has(hexKey(d.hex)))
+      .map(({ d, number }) => ({
+        id: d.id,
+        hex: { q: d.hex.q, r: d.hex.r },
+        number,
+        openable: this.doorUnlocked(d) && !this.revealedRooms.has(d.revealsRoom),
+      }));
+  }
+
+  /** If an unlocked, unopened door sits on `hex`, open it. Called when a player
+   *  moves onto a door hex (Gloomhaven: a door opens when a figure enters it). */
+  private maybeOpenDoorAt(playerId: string, hex: Hex): void {
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const door = scenario?.doors?.find((d) => hexEqual(d.hex, hex));
+    if (!door) return;
+    if (this.openedDoorIds.has(door.id)) return;
+    if (this.revealedRooms.has(door.revealsRoom)) return;
+    if (!this.doorUnlocked(door)) return;
+    this.openDoor(playerId, door.id);
+  }
+
+  /** Open a door: reveal its room, spawn that room's enemies, and fire its
+   *  narrative section. */
+  openDoor(_playerId: string, doorId: string): { ok: true } | { ok: false; reason: string } {
+    if (this.phase === 'lobby' || this.phase === 'victory' || this.phase === 'defeat') {
+      return { ok: false, reason: 'wrong_phase' };
+    }
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const door = scenario?.doors?.find((d) => d.id === doorId);
+    if (!door) return { ok: false, reason: 'unknown_door' };
+    if (this.openedDoorIds.has(doorId)) return { ok: false, reason: 'already_open' };
+    if (!this.doorUnlocked(door)) return { ok: false, reason: 'door_locked' };
+
+    this.openedDoorIds.add(doorId);
+    this.revealedRooms.add(door.revealsRoom);
+    const playerCount = this.units.filter((u) => u.kind === 'player').length;
+    for (const slot of scenario?.spawns ?? []) {
+      if (slot.side === 'enemy' && slot.room === door.revealsRoom) {
+        this.spawnEnemySlot(slot, playerCount);
+      }
+    }
+    // Revealed monsters act this round. For any set new to the board, draw its
+    // ability card and splice its initiative token relative to the acting
+    // figure (docs/rules/revealing-spawning-and-named-monsters.md). Sets already
+    // in play keep their existing card — newly-placed members just inherit it.
+    if (this.phase === 'turn_resolution') {
+      const existingSets = new Set<string>();
+      for (const e of this.turnOrder) {
+        if (e.kind === 'monster-group') existingSets.add(e.setId);
+      }
+      const revealedSets = new Set<string>();
+      for (const u of this.units) {
+        if (u.kind !== 'monster') continue;
+        const def = MONSTER_DEFS[u.defId as keyof typeof MONSTER_DEFS];
+        if (def && !existingSets.has(def.setId)) revealedSets.add(def.setId);
+      }
+      const newEntries: TurnOrderEntry[] = [];
+      for (const setId of revealedSets) {
+        const entry = this.buildMonsterSetTurnEntry(setId);
+        if (entry) newEntries.push(entry);
+      }
+      this.spliceRevealedSetsIntoTurnOrder(newEntries);
+    }
+    this.pushEvent('A door opens, revealing a new room.');
+    if (door.narrativeKey && scenario?.narrative?.[door.narrativeKey]) {
+      this.narrativeQueue.push(scenario.narrative[door.narrativeKey]!);
+    }
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Dismiss the story-text block currently shown to the party. */
+  dismissNarrative(): { ok: true } {
+    this.narrativeQueue.shift();
     this.broadcastState();
     return { ok: true };
   }
@@ -2066,18 +2399,29 @@ export class Room {
         const moveBonus = activeMoveBonus(guard.p);
         const budget = action.amount + moveBonus;
         const isJump = action.jump === true;
+        // A walk pays 2 movement to enter difficult terrain; a jump ignores
+        // difficult terrain, so each hex of a jump costs 1.
+        const enterCost = isJump ? (() => 1) : this.enterCostForTiles();
         let stepsTaken: number;
+        // Movement points this confirm actually spends (difficult terrain
+        // inflates it past the physical hex count). Subtracted from the budget
+        // below so leftover movement survives a partial confirm.
+        let movementCost: number;
         if (target.path && target.path.length > 0) {
-          // Client-provided path: count the actual hexes walked, not the
-          // BFS shortest distance. This matters for cards like Balanced
-          // Measure where the attack amount equals hexes moved this turn —
-          // a path around an obstacle should count every step.
+          // Client-provided path. `stepsTaken` is the count of hexes actually
+          // walked (for cards like Balanced Measure, whose attack equals hexes
+          // moved this turn — a path around an obstacle counts every step). The
+          // movement budget is spent in movement points, which difficult
+          // terrain inflates, so it's checked separately via pathCost.
           const path = target.path;
-          if (path.length > budget) return { ok: false, reason: 'path_over_budget' };
+          movementCost = pathCost(path, enterCost);
+          if (movementCost > budget) return { ok: false, reason: 'path_over_budget' };
           const last = path[path.length - 1]!;
           if (!hexEqual(last, target.hex)) return { ok: false, reason: 'path_dest_mismatch' };
           const canEnd = this.passableForUnit(unit.id);
-          const walkable = isJump ? this.walkableForJump() : canEnd;
+          // Mid-path: a jump ignores all figures, a walk may pass through allies
+          // but not enemies. The destination (last step) must still be unoccupied.
+          const walkable = isJump ? this.walkableForJump() : this.walkableForUnit(unit);
           let prev = unit.hex;
           for (let i = 0; i < path.length; i++) {
             const step = path[i]!;
@@ -2091,10 +2435,17 @@ export class Room {
         } else {
           const reachable = isJump
             ? this.reachableFromJump(unit.hex, budget, unit.id)
-            : this.reachableFrom(unit.hex, budget, unit.id);
-          const dist = reachable.get(hexKey(target.hex));
-          if (dist === undefined) return { ok: false, reason: 'unreachable' };
-          stepsTaken = dist;
+            : this.reachableFrom(unit.hex, budget, unit);
+          // `reachable` is keyed by movement cost; presence means it's affordable.
+          if (!reachable.has(hexKey(target.hex))) return { ok: false, reason: 'unreachable' };
+          movementCost = reachable.get(hexKey(target.hex))!;
+          // hexesMovedThisTurn counts physical hexes, not movement points, so
+          // reconstruct the cheapest path and use its hex count.
+          const canEnd = this.passableForUnit(unit.id);
+          const path = isJump
+            ? bfsPathJump(unit.hex, target.hex, budget, this.walkableForJump(), canEnd)
+            : bfsPath(unit.hex, target.hex, budget, this.walkableForUnit(unit), canEnd, enterCost);
+          stepsTaken = path ? path.length - 1 : reachable.get(hexKey(target.hex))!;
         }
         unit.hex = target.hex;
         ct.hexesMovedThisTurn += stepsTaken;
@@ -2154,8 +2505,22 @@ export class Room {
             }
           }
         }
-        this.fireTrackedTrigger(guard.p, 'move-ability-performed');
-        action.done = true;
+        // Spend only the movement points this confirm used. If budget remains,
+        // keep the move pending so the player can keep moving — e.g. after
+        // stopping on a door hex to open it — or Skip the leftover. A move with
+        // a dynamic amount (X = hexes moved this turn) stays one-shot, since its
+        // "remaining" can't be tracked the same way.
+        const remainingBudget = budget - movementCost;
+        if (action.amountRef || remainingBudget < 1) {
+          action.done = true;
+        } else {
+          action.amount -= movementCost;
+        }
+        // Stepping onto an unlocked door opens it (reveals the next room).
+        this.maybeOpenDoorAt(playerId, unit.hex);
+        // The move-ability trigger represents finishing the whole move, so it
+        // fires once the action is actually done — not on each partial confirm.
+        if (action.done) this.fireTrackedTrigger(guard.p, 'move-ability-performed');
         break;
       }
       case 'attack': {
@@ -2166,6 +2531,9 @@ export class Room {
         const tgt = this.units.find((u) => u.id === target.unitId);
         if (!tgt) return { ok: false, reason: 'no_target' };
         if (tgt.kind === 'player') return { ok: false, reason: 'cannot_attack_ally' };
+        // Each shot of a multi-target (`Target N`) attack must hit a distinct
+        // enemy — an enemy already hit by this same ability can't be re-targeted.
+        if (action.hitTargetIds.includes(tgt.id)) return { ok: false, reason: 'already_targeted' };
         const dist = hexDistance(unit.hex, tgt.hex);
         if (dist > action.range) return { ok: false, reason: 'out_of_range' };
         if (action.range > 1 && !this.hasLOS(unit.hex, tgt.hex)) {
@@ -2213,13 +2581,14 @@ export class Room {
         // conditional bonus that grants advantage vs this target.
         // Disadvantage sources: a ranged attack (range > 1) on an ADJACENT
         // target (distance 1) auto-gains Disadvantage (RAW, target-adjacent).
-        const chargeAdvantage = ct.advantageCharge?.unitId === tgt.id;
+        // Simple Bow rides along with the next ranged attack you perform.
+        const chargeAdvantage = ct.advantageCharge && attackKind === 'ranged';
         const hasAdvantage = chargeAdvantage || cardCond.advantage;
         const autoDisadvantage = action.range > 1 && dist === 1;
         const drawMode = resolveAdvantage(hasAdvantage, autoDisadvantage);
         // The Simple Bow charge is consumed on this attack even if it cancelled
         // against the ranged-on-adjacent disadvantage (the item is still spent).
-        if (chargeAdvantage) ct.advantageCharge = null;
+        if (chargeAdvantage) ct.advantageCharge = false;
         const firstDraw = drawModifier(guard.p);
         let drawn = firstDraw;
         let finalAmount = applyModifierToAttack(baseAmount, firstDraw.card);
@@ -2241,8 +2610,9 @@ export class Room {
             usedIndex: useSecond ? 1 : 0,
           };
         }
+        // Scouting Lens rides along with the next attack you perform (any range).
         let itemPierce = 0;
-        if (ct.pierceCharge && ct.pierceCharge.unitId === tgt.id) {
+        if (ct.pierceCharge) {
           itemPierce = ct.pierceCharge.amount;
           ct.pierceCharge = null;
         }
@@ -2272,11 +2642,12 @@ export class Room {
         this.pushEvent(
           `${unit.name} attacks ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg})${itemPierce ? ` [Pierce ${itemPierce}]` : ''}${drawTag}.`,
         );
-        // Poison Dagger: apply Poison if this target was designated, the attack
-        // didn't miss, and the target survives (a kill can't be poisoned).
+        // Poison Dagger: apply Poison on the next melee attack you perform,
+        // provided it didn't miss and the target survives (a kill can't be
+        // poisoned).
+        const poisonRides = ct.poisonCharge && attackKind === 'melee';
         if (
-          ct.poisonCharge &&
-          ct.poisonCharge.unitId === tgt.id &&
+          poisonRides &&
           drawn.card.kind !== 'null' &&
           tgt.hp > 0 &&
           !unitImmuneTo(tgt, 'poison')
@@ -2295,7 +2666,7 @@ export class Room {
           applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
           this.pushEvent(`${tgt.name} is Poisoned.`);
         }
-        if (ct.poisonCharge && ct.poisonCharge.unitId === tgt.id) ct.poisonCharge = null;
+        if (poisonRides) ct.poisonCharge = false;
         // Conditions printed below this attack (e.g. Shield Bash's Stun) ride on
         // the attack and apply automatically to the target it hit.
         this.applyAttackRiderConditions(unit, tgt, action.riderConditions, drawn.card.kind === 'null');
@@ -2325,6 +2696,7 @@ export class Room {
         }
         action.targetsRemaining -= 1;
         action.hitsLanded += 1;
+        action.hitTargetIds = [...action.hitTargetIds, tgt.id];
         ct.damageDealtThisTurn += dmg;
         // XP from a printed conditional bonus (e.g. Single Out: +1 XP vs an
         // isolated target). Granted once per matching target hit.
@@ -2392,8 +2764,9 @@ export class Room {
           this.fireAttackConditionalTriggers(guard.p, unit, tgt, 'melee');
           const drawn = drawModifier(guard.p);
           const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
+          // Scouting Lens rides along with the first enemy this AOE hits.
           let itemPierce = 0;
-          if (ct.pierceCharge && ct.pierceCharge.unitId === tgt.id) {
+          if (ct.pierceCharge) {
             itemPierce = ct.pierceCharge.amount;
             ct.pierceCharge = null;
           }
@@ -2415,9 +2788,11 @@ export class Room {
           this.pushEvent(
             `${unit.name} hits ${tgt.name}: ${baseAmount} ${modifierLabel(drawn.card)} → ${finalAmount} (dealt ${dmg})${itemPierce ? ` [Pierce ${itemPierce}]` : ''}.`,
           );
+          // Poison Dagger rides along with the first enemy this AOE hits (AOE
+          // counts as melee). Consumed on that first hit regardless of outcome.
+          const poisonRides = ct.poisonCharge;
           if (
-            ct.poisonCharge &&
-            ct.poisonCharge.unitId === tgt.id &&
+            poisonRides &&
             drawn.card.kind !== 'null' &&
             tgt.hp > 0 &&
             !unitImmuneTo(tgt, 'poison')
@@ -2435,7 +2810,7 @@ export class Room {
             applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
             this.pushEvent(`${tgt.name} is Poisoned.`);
           }
-          if (ct.poisonCharge && ct.poisonCharge.unitId === tgt.id) ct.poisonCharge = null;
+          if (poisonRides) ct.poisonCharge = false;
           // Ridered conditions apply to every enemy the AOE hits.
           this.applyAttackRiderConditions(unit, tgt, action.riderConditions, drawn.card.kind === 'null');
           {
@@ -2802,12 +3177,9 @@ export class Room {
   }
 
   private passableForUnit(ignoreUnitId: string): (h: Hex) => boolean {
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
     const tilePassable = new Set<string>();
-    if (scenario) {
-      for (const t of scenario.tiles) {
-        if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
-      }
+    for (const t of this.scenarioTiles()) {
+      if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
     }
     const occupied = new Set<string>();
     for (const u of this.units) {
@@ -2825,18 +3197,56 @@ export class Room {
    * for mid-path hexes — the destination still has to pass `passableForUnit`.
    */
   private walkableForJump(): (h: Hex) => boolean {
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
     const tilePassable = new Set<string>();
-    if (scenario) {
-      for (const t of scenario.tiles) {
-        if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
-      }
+    for (const t of this.scenarioTiles()) {
+      if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
     }
     return (h: Hex) => tilePassable.has(`${h.q},${h.r}`);
   }
 
-  private reachableFrom(start: Hex, budget: number, ignoreUnitId: string): Map<string, number> {
-    return bfsReachable(start, budget, this.passableForUnit(ignoreUnitId));
+  /**
+   * Walkable predicate for a normal (ground) move: walls and enemy figures
+   * block, but the mover may pass through its allies (figures of the same
+   * kind). Used for mid-path hexes — the destination still has to pass
+   * `passableForUnit`, which also rejects ally-occupied hexes.
+   */
+  private walkableForUnit(mover: Unit): (h: Hex) => boolean {
+    const tilePassable = new Set<string>();
+    for (const t of this.scenarioTiles()) {
+      if (t.kind !== 'wall') tilePassable.add(`${t.q},${t.r}`);
+    }
+    const enemyOccupied = new Set<string>();
+    for (const u of this.units) {
+      if (u.id === mover.id) continue;
+      if (u.kind !== mover.kind) enemyOccupied.add(`${u.hex.q},${u.hex.r}`);
+    }
+    return (h: Hex) => {
+      const k = `${h.q},${h.r}`;
+      return tilePassable.has(k) && !enemyOccupied.has(k);
+    };
+  }
+
+  /**
+   * Movement cost to step into a hex: difficult terrain costs 2, everything
+   * else 1. Mirrors the monster AI's terrain cost so players and monsters are
+   * charged the same for difficult terrain.
+   */
+  private enterCostForTiles(): (h: Hex) => number {
+    const difficult = new Set<string>();
+    for (const t of this.scenarioTiles()) {
+      if (t.kind === 'difficult') difficult.add(`${t.q},${t.r}`);
+    }
+    return (h: Hex) => (difficult.has(`${h.q},${h.r}`) ? 2 : 1);
+  }
+
+  private reachableFrom(start: Hex, budget: number, mover: Unit): Map<string, number> {
+    return bfsReachable(
+      start,
+      budget,
+      this.walkableForUnit(mover),
+      this.passableForUnit(mover.id),
+      this.enterCostForTiles(),
+    );
   }
 
   private reachableFromJump(start: Hex, budget: number, ignoreUnitId: string): Map<string, number> {
@@ -3032,8 +3442,8 @@ export class Room {
         consumedThisTurn: [],
         jumpAllMoves: false,
         pierceCharge: null,
-        poisonCharge: null,
-        advantageCharge: null,
+        poisonCharge: false,
+        advantageCharge: false,
         performedLostAction: false,
       };
       // New turn → fresh rider-source map (the previous turn's are stale).
@@ -3434,15 +3844,42 @@ export class Room {
    *
    *  Semantically identical to the previous sync resolver: same focus AI,
    *  same modifier draw timing, same retaliate / death / infusion handling. */
+  /** Build the synthetic ability card a scripted monster set performs this
+   *  round. The scripted action carries *absolute* Move/Attack values; we
+   *  convert them to the deck's modifier form against the set's normal stat
+   *  block so the existing resolver (readAbility) produces those exact values. */
+  private scriptedCardFor(setId: string): MonsterAbilityCard | undefined {
+    const sa = this.scriptedActionBySet.get(setId);
+    const def = MONSTER_DEF_BY_SETID[setId];
+    if (!sa || !def) return undefined;
+    const base = rankedStatsForLevel(def, this.scenarioLevel)?.normal;
+    const baseMove = base?.movement ?? 0;
+    const baseAttack = base?.attack ?? 0;
+    const abilities: MonsterAbilityStep[] = [];
+    if (sa.move !== undefined) abilities.push({ kind: 'move', modifier: sa.move - baseMove });
+    if (sa.attack !== undefined) abilities.push({ kind: 'attack', modifier: sa.attack - baseAttack });
+    return {
+      id: `scripted:${setId}`,
+      setId,
+      name: 'Scripted Action',
+      initiative: sa.initiative,
+      abilities,
+    };
+  }
+
   private *runMonsterGroupAnim(): Generator<unknown, void, unknown> {
     const cur = this.turnOrder[this.activeTurnIndex];
     if (!cur || cur.kind !== 'monster-group') return;
     const def = MONSTER_DEF_BY_SETID[cur.setId];
-    const card = MONSTER_DECKS[cur.setId as keyof typeof MONSTER_DECKS]?.cards.find(
-      (c) => c.id === cur.abilityCardId,
-    );
+    // Scripted groups don't draw a deck card — they synthesize a fixed one.
+    const card = cur.abilityCardId.startsWith('scripted:')
+      ? this.scriptedCardFor(cur.setId)
+      : MONSTER_DECKS[cur.setId as keyof typeof MONSTER_DECKS]?.cards.find(
+          (c) => c.id === cur.abilityCardId,
+        );
     if (!def || !card) return;
-    const stat = def.levels[1]?.normal;
+    const ranked = rankedStatsForLevel(def, this.scenarioLevel);
+    const stat = ranked?.normal;
     if (!stat) return;
     const setId = cur.setId;
     const abilityCardName = cur.abilityCardName;
@@ -3453,7 +3890,13 @@ export class Room {
     }
 
     const monsters = this.units
-      .filter((u) => u.kind === 'monster' && monsterDefMatchesSet(u.defId, cur.setId))
+      .filter(
+        (u) =>
+          u.kind === 'monster' &&
+          monsterDefMatchesSet(u.defId, cur.setId) &&
+          // Training dummies never act.
+          this.behaviorOf(u.id) !== 'dummy',
+      )
       // Acting order within the set: named → elite → normal, then ascending
       // standee number.
       .sort(monsterActOrder);
@@ -3496,7 +3939,7 @@ export class Room {
     // rank stat block (elites hit harder / move differently), with the set-wide
     // consume bonuses layered on. Computed per member inside the loop below.
     const abilityForRank = (rank: MonsterRank | undefined) => {
-      const rankStat = (rank === 'elite' ? def.levels[1]?.elite : def.levels[1]?.normal) ?? stat;
+      const rankStat = (rank === 'elite' ? ranked?.elite : ranked?.normal) ?? stat;
       const base = readAbility(card, rankStat);
       const attack = base.attack
         ? {
@@ -3700,7 +4143,11 @@ export class Room {
 
   private scenarioTiles() {
     const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
-    return scenario?.tiles ?? [];
+    if (!scenario) return [];
+    // No room gating: single-room maps (no `rooms`) show every tile.
+    if (!scenario.rooms || scenario.rooms.length === 0) return scenario.tiles;
+    // Otherwise only tiles in revealed rooms (room-less tiles always show).
+    return scenario.tiles.filter((t) => !t.room || this.revealedRooms.has(t.room));
   }
 
   private pushEvent(text: string): void {
@@ -3837,23 +4284,13 @@ export class Room {
     const setIds = new Set<string>();
     for (const u of this.units) {
       if (u.kind !== 'monster') continue;
-      const def = u.defId === 'bandit-archer' ? banditArcher : u.defId === 'bandit-scout' ? banditScout : null;
+      const def = MONSTER_DEFS[u.defId as keyof typeof MONSTER_DEFS];
       if (def) setIds.add(def.setId);
     }
+    this.scriptedActionBySet = new Map();
     for (const setId of setIds) {
-      const deck = MONSTER_DECKS[setId as keyof typeof MONSTER_DECKS];
-      if (!deck) continue;
-      // Round 1 just draws the first card. Shuffle/discard pile is step-7+ work.
-      const drawn = deck.cards[(this.round - 1) % deck.cards.length];
-      if (!drawn) continue;
-      order.push({
-        kind: 'monster-group',
-        setId,
-        abilityCardId: drawn.id,
-        abilityCardName: drawn.name,
-        initiative: drawn.initiative,
-        done: false,
-      });
+      const entry = this.buildMonsterSetTurnEntry(setId);
+      if (entry) order.push(entry);
     }
 
     order.sort((a, b) => a.initiative - b.initiative);
@@ -3863,6 +4300,80 @@ export class Room {
     // Card selection has finalized — any pending short-rest reroll choice expires.
     for (const p of this.players.values()) p.shortRestPending = null;
     this.openTurn();
+  }
+
+  /** Build the turn-order entry for one monster set, drawing its ability card
+   *  for the current round (or resolving its scripted action). Returns null if
+   *  the set has no living, non-dummy actors. Shared by round-start ordering and
+   *  mid-round reveals (docs/rules/revealing-spawning-and-named-monsters.md). */
+  private buildMonsterSetTurnEntry(setId: string): TurnOrderEntry | null {
+    // Living, non-dummy members of this set. If every member is a training
+    // dummy (or the set is empty of actors), the set takes no turn.
+    const actors = this.units.filter(
+      (u) =>
+        u.kind === 'monster' &&
+        monsterDefMatchesSet(u.defId, setId) &&
+        this.behaviorOf(u.id) !== 'dummy',
+    );
+    if (actors.length === 0) return null;
+
+    // Scripted figures ignore the deck and perform a fixed action at a fixed
+    // initiative. (When a set mixes scripted + normal — rare — the scripted
+    // action wins for the whole group; our scenarios keep this uniform.)
+    const scripted = actors
+      .map((u) => this.behaviorOf(u.id))
+      .find((b): b is { scripted: ScriptedAction } => typeof b === 'object');
+    if (scripted) {
+      this.scriptedActionBySet.set(setId, scripted.scripted);
+      return {
+        kind: 'monster-group',
+        setId,
+        abilityCardId: `scripted:${setId}`,
+        abilityCardName: 'Scripted Action',
+        initiative: scripted.scripted.initiative,
+        done: false,
+      };
+    }
+
+    const deck = MONSTER_DECKS[setId as keyof typeof MONSTER_DECKS];
+    if (!deck) return null;
+    // Round 1 just draws the first card. Shuffle/discard pile is step-7+ work.
+    const drawn = deck.cards[(this.round - 1) % deck.cards.length];
+    if (!drawn) return null;
+    return {
+      kind: 'monster-group',
+      setId,
+      abilityCardId: drawn.id,
+      abilityCardName: drawn.name,
+      initiative: drawn.initiative,
+      done: false,
+    };
+  }
+
+  /** Splice newly-revealed monster sets into the current round's initiative
+   *  order (docs/rules/revealing-spawning-and-named-monsters.md). A set whose
+   *  initiative is at or before the acting figure's acts next (immediately
+   *  after them); a set whose initiative comes after slots into normal order.
+   *  The acting figure keeps its index, so its interrupted turn resumes. */
+  private spliceRevealedSetsIntoTurnOrder(newEntries: TurnOrderEntry[]): void {
+    if (newEntries.length === 0) return;
+    const acting = this.turnOrder[this.activeTurnIndex];
+    if (!acting) {
+      this.turnOrder = [...this.turnOrder, ...newEntries].sort(
+        (a, b) => a.initiative - b.initiative,
+      );
+      return;
+    }
+    const head = this.turnOrder.slice(0, this.activeTurnIndex + 1);
+    const tail = this.turnOrder.slice(this.activeTurnIndex + 1);
+    const actNext = newEntries
+      .filter((e) => e.initiative <= acting.initiative)
+      .sort((a, b) => a.initiative - b.initiative);
+    const later = [
+      ...tail,
+      ...newEntries.filter((e) => e.initiative > acting.initiative),
+    ].sort((a, b) => a.initiative - b.initiative);
+    this.turnOrder = [...head, ...actNext, ...later];
   }
 
   createCharacter(
@@ -4238,34 +4749,24 @@ export class Room {
       this.broadcastState();
       return { ok: true };
     } else if (item.effect.kind === 'pierce-one-attack') {
-      // Designate one target. The next attack against it this turn ignores
-      // `amount` of its shield. Requires an attack ability to be available.
-      if (targetUnitId === undefined) {
-        return { ok: false, reason: 'item_needs_target' };
-      }
+      // Arm Pierce on the next attack you perform this turn — it rides along
+      // with whatever target that attack hits. Requires an attack to be queued.
       const hasAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
         hs.actions.some(
           (a) => !a.done && (a.type === 'attack' || a.type === 'attack-aoe'),
         ),
       );
       if (!hasAttack) return { ok: false, reason: 'item_only_usable_during_attack' };
-      const tgt = this.units.find((u) => u.id === targetUnitId);
-      if (!tgt || tgt.kind !== 'monster' || tgt.hp <= 0) {
-        return { ok: false, reason: 'invalid_target' };
-      }
-      ct.pierceCharge = { unitId: targetUnitId, amount: item.effect.amount };
+      ct.pierceCharge = { amount: item.effect.amount };
       this.pushEvent(
-        `${instance.name} uses ${item.name}: Pierce ${item.effect.amount} on ${tgt.name}.`,
+        `${instance.name} uses ${item.name}: Pierce ${item.effect.amount} on the next attack.`,
       );
       instance.spentItemIds.push(itemId);
       this.broadcastState();
       return { ok: true };
     } else if (item.effect.kind === 'poison-one-attack') {
-      // Designate one enemy. The next MELEE attack against it this turn also
-      // applies Poison. Requires a melee attack ability to be available.
-      if (targetUnitId === undefined) {
-        return { ok: false, reason: 'item_needs_target' };
-      }
+      // Arm Poison on the next MELEE attack you perform this turn — it rides
+      // along with whatever target that attack hits. Requires a melee attack.
       const hasMeleeAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
         hs.actions.some(
           (a) =>
@@ -4276,34 +4777,23 @@ export class Room {
       if (!hasMeleeAttack) {
         return { ok: false, reason: 'item_only_usable_during_melee_attack' };
       }
-      const tgt = this.units.find((u) => u.id === targetUnitId);
-      if (!tgt || tgt.kind !== 'monster' || tgt.hp <= 0) {
-        return { ok: false, reason: 'invalid_target' };
-      }
-      if (unitImmuneTo(tgt, 'poison')) return { ok: false, reason: 'target_immune' };
-      ct.poisonCharge = { unitId: targetUnitId };
-      this.pushEvent(`${instance.name} uses ${item.name}: Poison on ${tgt.name}.`);
+      ct.poisonCharge = true;
+      this.pushEvent(`${instance.name} uses ${item.name}: Poison on the next melee attack.`);
       instance.spentItemIds.push(itemId);
       this.broadcastState();
       return { ok: true };
     } else if (item.effect.kind === 'advantage-one-attack') {
-      // Designate one target. The next RANGED attack against it this turn draws
-      // with Advantage. Requires a ranged attack ability to be available.
-      if (targetUnitId === undefined) {
-        return { ok: false, reason: 'item_needs_target' };
-      }
+      // Arm Advantage on the next RANGED attack you perform this turn — it
+      // rides along with whatever target that attack hits. Requires a ranged
+      // attack to be queued.
       const hasRangedAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
         hs.actions.some((a) => !a.done && a.type === 'attack' && a.range > 1),
       );
       if (!hasRangedAttack) {
         return { ok: false, reason: 'item_only_usable_during_ranged_attack' };
       }
-      const tgt = this.units.find((u) => u.id === targetUnitId);
-      if (!tgt || tgt.kind !== 'monster' || tgt.hp <= 0) {
-        return { ok: false, reason: 'invalid_target' };
-      }
-      ct.advantageCharge = { unitId: targetUnitId };
-      this.pushEvent(`${instance.name} uses ${item.name}: Advantage on ${tgt.name}.`);
+      ct.advantageCharge = true;
+      this.pushEvent(`${instance.name} uses ${item.name}: Advantage on the next ranged attack.`);
       instance.spentItemIds.push(itemId);
       this.broadcastState();
       return { ok: true };
@@ -4667,7 +5157,7 @@ export class Room {
       characters: this.campaign.characters,
       scenarioId: this.campaign.scenarioId,
       scenarioName: scenario?.name ?? null,
-      tiles: scenario?.tiles ?? [],
+      tiles: this.scenarioTiles(),
       units: this.units,
       moneyTokens: this.moneyTokens,
       moneyTokensPlaced: this.moneyTokensPlaced,
@@ -4680,6 +5170,10 @@ export class Room {
       monsterModifierNeedsReshuffle: this.monsterModifierNeedsReshuffle,
       monsterTurnAnim: this.monsterTurnAnim,
       battleGoalResults: this.battleGoalResults,
+      narrative: this.narrativeQueue[0] ?? null,
+      openableDoors: this.openableDoors(),
+      doors: this.doorViews(),
+      startingPositions: this.phase === 'placement' ? this.startingPositions : [],
       pendingElementChoice: this.pendingElementChoice,
       pendingReactiveItem: this.pendingReactiveItem,
       currentTurn: this.currentTurn,
@@ -4692,6 +5186,7 @@ export class Room {
         characterId: p.activeCharacterId,
         connected: p.socket !== null,
         submitted: p.selection !== null,
+        placementReady: p.placementReady,
       })),
       shop: this.campaign.shop ?? [],
     };
@@ -5027,17 +5522,54 @@ export class Room {
   }
 
   /**
-   * Check whether all enemies have been defeated. If so, transition to
-   * 'victory' and convert each player unit's held money tokens to gold on
-   * their CharacterInstance using the scenario-level conversion rate.
+   * Evaluate the scenario's victory condition. If met, transition to 'victory'
+   * (firing any victory story text) and convert each player unit's held money
+   * tokens to gold on their CharacterInstance at the scenario-level rate. Also
+   * announces newly-cleared rooms so the party sees doors unlock.
    */
   private checkScenarioEnd(): void {
     if (this.phase === 'victory' || this.phase === 'defeat') return;
     if (this.phase === 'lobby') return;
-    const monstersAlive = this.units.some((u) => u.kind === 'monster');
-    if (monstersAlive) return;
     if (this.units.length === 0) return; // not yet set up
-    this.endScenario('victory');
+    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    if (!scenario) return;
+
+    // One-time "door unlocked" announcements as rooms get cleared.
+    for (const door of scenario.doors ?? []) {
+      if (door.unlock === 'manual') continue;
+      const room = door.unlock.allMonstersDeadIn;
+      if (
+        this.revealedRooms.has(room) &&
+        !this.openedDoorIds.has(door.id) &&
+        !this.clearedRoomsAnnounced.has(room) &&
+        this.roomCleared(room)
+      ) {
+        this.clearedRoomsAnnounced.add(room);
+        this.pushEvent('A door unlocks — the way forward is open.');
+      }
+    }
+
+    if (this.scenarioWon(scenario)) {
+      if (scenario.narrative?.victory) this.narrativeQueue.push(scenario.narrative.victory);
+      this.endScenario('victory');
+    }
+  }
+
+  /** Whether the scenario's victory condition is currently satisfied. */
+  private scenarioWon(scenario: ReturnType<typeof getScenario>): boolean {
+    if (!scenario) return false;
+    const victory = scenario.victory ?? { kind: 'killAll' };
+    switch (victory.kind) {
+      case 'killAll': {
+        if (this.units.some((u) => u.kind === 'monster')) return false;
+        // Don't win while rooms remain hidden behind doors — their enemies
+        // haven't been faced yet.
+        if (scenario.rooms?.some((r) => !this.revealedRooms.has(r))) return false;
+        return true;
+      }
+      default:
+        throw new Error(`victory condition '${victory.kind}' not yet implemented`);
+    }
   }
 
   private endScenario(outcome: 'victory' | 'defeat'): void {

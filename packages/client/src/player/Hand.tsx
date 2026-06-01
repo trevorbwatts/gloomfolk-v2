@@ -11,6 +11,25 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [leadingId, setLeadingId] = useState<string | null>(null);
 
+  const selectedCards = selectedIds
+    .map((id) => hand.find((c) => c.id === id))
+    .filter((c): c is Card => !!c);
+  const bothSelected = selectedCards.length === 2;
+
+  // Default leading to the quicker (lower-initiative) card once both are
+  // picked. The player can still tap the other chip to override. This hook must
+  // run on every render (it sits above the `selection` early return below) so
+  // the hook order stays stable when the player locks in.
+  useEffect(() => {
+    if (!bothSelected) {
+      if (leadingId !== null) setLeadingId(null);
+      return;
+    }
+    if (leadingId && selectedIds.includes(leadingId)) return;
+    const quicker = selectedCards.reduce((a, b) => (a.initiative <= b.initiative ? a : b));
+    setLeadingId(quicker.id);
+  }, [bothSelected, leadingId, selectedIds, selectedCards]);
+
   if (selection) {
     return <SubmittedView selection={selection} hand={hand} />;
   }
@@ -31,10 +50,6 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
     });
   }
 
-  const selectedCards = selectedIds
-    .map((id) => hand.find((c) => c.id === id))
-    .filter((c): c is Card => !!c);
-  const bothSelected = selectedCards.length === 2;
   const canConfirm = bothSelected && leadingId !== null;
   const canShortRest = discard.length >= 2;
   // Long rest's ≥2 gate also counts active-area cards without lost icons —
@@ -44,18 +59,6 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
     active.filter((c) => c.top.disposition !== 'lost' && c.bottom.disposition !== 'lost').length;
   const canLongRest = effectiveDiscardCount >= 2;
   const secondId = bothSelected ? selectedIds.find((id) => id !== leadingId) ?? null : null;
-
-  // Default leading to the quicker (lower-initiative) card once both are
-  // picked. The player can still tap the other chip to override.
-  useEffect(() => {
-    if (!bothSelected) {
-      if (leadingId !== null) setLeadingId(null);
-      return;
-    }
-    if (leadingId && selectedIds.includes(leadingId)) return;
-    const quicker = selectedCards.reduce((a, b) => (a.initiative <= b.initiative ? a : b));
-    setLeadingId(quicker.id);
-  }, [bothSelected, leadingId, selectedIds, selectedCards]);
 
   return (
     <div style={{ paddingBottom: 88 + BOTTOM_BAR_HEIGHT }}>

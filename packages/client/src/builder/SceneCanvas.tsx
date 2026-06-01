@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { type Hex, hexKey, tileShapeById, tileSideById } from '@gloomfolk/shared';
 import { theme } from '../theme.js';
 import { applyPlacement } from './sceneGeometry.js';
@@ -6,6 +6,7 @@ import type { MonsterSpawn, Overlay, PlacedTile } from './scenarios.js';
 import { OVERLAY_STYLES } from './overlayStyle.js';
 import { monsterEntry } from './monsterCatalog.js';
 import { monsterAvatarUrl } from '../avatars.js';
+import { getTileImage } from './tileImages.js';
 
 const SQRT3 = Math.sqrt(3);
 
@@ -45,6 +46,64 @@ function hexCorners(cx: number, cy: number, size: number): string {
     pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
   }
   return pts.join(' ');
+}
+
+/**
+ * Renders a tile's uploaded artwork as the background of its hex footprint.
+ *
+ * The image is drawn in the tile's *local* (unrotated) frame — covering the
+ * footprint's bounding box and clipped to the footprint hexes — then the whole
+ * group is rotated and translated into place with the same transform the hex
+ * grid uses. This keeps the artwork glued to the hexes through rotation.
+ */
+function TileBackground({
+  placed,
+  footprint,
+  size,
+  href,
+}: {
+  placed: PlacedTile;
+  footprint: readonly Hex[];
+  size: number;
+  href: string;
+}) {
+  if (footprint.length === 0) return null;
+  // Local pixel geometry of the unrotated footprint.
+  const polygons: string[] = [];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const h of footprint) {
+    const { x, y } = axialToPx(h.q, h.r, size);
+    polygons.push(hexCorners(x, y, size));
+    if (x - size < minX) minX = x - size;
+    if (y - size < minY) minY = y - size;
+    if (x + size > maxX) maxX = x + size;
+    if (y + size > maxY) maxY = y + size;
+  }
+  const origin = axialToPx(placed.origin.q, placed.origin.r, size);
+  const clipId = `tile-clip-${placed.id}`;
+  return (
+    <g
+      transform={`translate(${origin.x} ${origin.y}) rotate(${60 * placed.rotation})`}
+      style={{ pointerEvents: 'none' }}
+    >
+      <defs>
+        <clipPath id={clipId}>
+          {polygons.map((pts, i) => (
+            <polygon key={i} points={pts} />
+          ))}
+        </clipPath>
+      </defs>
+      <image
+        href={href}
+        x={minX}
+        y={minY}
+        width={maxX - minX}
+        height={maxY - minY}
+        clipPath={`url(#${clipId})`}
+        preserveAspectRatio="xMidYMid slice"
+      />
+    </g>
+  );
 }
 
 function HexContents({
@@ -204,12 +263,38 @@ export function SceneCanvas({
 }: SceneCanvasProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
 
+  // Uploaded background art for the tile sides in play, loaded from IndexedDB.
+  const [tileImages, setTileImages] = useState<Record<string, string>>({});
+  const sideKey = Array.from(new Set(placedTiles.map((p) => p.tileSideId)))
+    .sort()
+    .join(',');
+  useEffect(() => {
+    let cancelled = false;
+    const ids = sideKey ? sideKey.split(',') : [];
+    Promise.all(
+      ids.map(async (id) => [id, await getTileImage(id)] as const),
+    )
+      .then((entries) => {
+        if (cancelled) return;
+        const next: Record<string, string> = {};
+        for (const [id, img] of entries) if (img) next[id] = img;
+        setTileImages(next);
+      })
+      .catch(() => {
+        /* image load is best-effort; tiles fall back to flat colour */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sideKey]);
+
   // Tile hexes (and lookup by key).
   const tilesWithHexes = placedTiles.map((p) => {
     const side = tileSideById(p.tileSideId);
     const shape = side ? tileShapeById(side.shapeId) : undefined;
+    const footprint = shape?.footprint ?? [];
     const hexes: Hex[] = shape ? applyPlacement(shape.footprint, p) : [];
-    return { placed: p, hexes };
+    return { placed: p, hexes, footprint };
   });
   const tileHexKeys = new Set<string>();
   for (const { hexes } of tilesWithHexes) {
@@ -310,11 +395,20 @@ export function SceneCanvas({
       }}
     >
       {/* Tile hexes */}
-      {tilesWithHexes.map(({ placed, hexes }) => {
+      {tilesWithHexes.map(({ placed, hexes, footprint }) => {
         const isTileSelected = placed.id === selectedTileId;
         const fill = tileColor(placed.tileSideId);
+        const art = tileImages[placed.tileSideId];
         return (
           <g key={placed.id}>
+            {art && (
+              <TileBackground
+                placed={placed}
+                footprint={footprint}
+                size={size}
+                href={art}
+              />
+            )}
             {hexes.map((h) => {
               const key = hexKey(h);
               const hexOverlays = overlaysByHex.get(key) ?? [];
@@ -331,8 +425,10 @@ export function SceneCanvas({
               const terrain = hexOverlays.find(
                 (o) => o.kind === 'difficult-terrain' || o.kind === 'hazardous-terrain',
               );
+              // With tile art the hex shows the image through a transparent
+              // fill; terrain still tints (semi-transparent over the art).
               const hexFill = terrain ? OVERLAY_STYLES[terrain.kind].color : fill;
-              const hexFillOpacity = terrain ? 0.85 : 1;
+              const hexFillOpacity = terrain ? 0.85 : art ? 0 : 1;
               return (
                 <g
                   key={key}
@@ -353,6 +449,7 @@ export function SceneCanvas({
                     fillOpacity={hexFillOpacity}
                     stroke={stroke}
                     strokeWidth={strokeWidth}
+                    style={{ pointerEvents: 'all' }}
                   />
                   <HexContents
                     cx={x}

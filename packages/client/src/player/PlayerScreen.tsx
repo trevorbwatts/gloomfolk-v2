@@ -9,12 +9,15 @@ import {
 import { clearSession, getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { btn, theme } from '../theme.js';
+import { NarrativeModal } from '../board/NarrativeModal.js';
+import { PlacementView } from './PlacementView.js';
 import { CharacterSelect } from './CharacterSelect.js';
 import { BattleGoalPicker } from './BattleGoalPicker.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
 import { Shop } from './Shop.js';
 import { ActiveArea, TurnPlay } from './TurnPlay.js';
+import { ItemModal } from './ItemModal.js';
 import {
   BottomBar,
   BOTTOM_BAR_HEIGHT,
@@ -32,6 +35,7 @@ const CLASS_BY_ID: Record<string, CharacterClass> = {
 function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTurn: boolean): string {
   if (!hasCharacter) return '';
   switch (phase) {
+    case 'placement': return 'Choose your starting position';
     case 'card_select': return 'Choose your cards';
     case 'turn_resolution': return isMyTurn ? '' : 'Turn in progress';
     case 'victory': return 'Victory';
@@ -158,6 +162,7 @@ export function PlayerScreen() {
 
   const [editingLoadout, setEditingLoadout] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('play');
+  const [showItemsModal, setShowItemsModal] = useState(false);
   const prevCharIdRef = useRef<string | null | undefined>(undefined);
   const [loadoutByClassId, setLoadoutByClassId] = useState<
     Record<string, readonly string[]>
@@ -202,11 +207,13 @@ export function PlayerScreen() {
     ? 'character-select'
     : editingLoadout
       ? 'loadout'
-      : phaseEarly === 'card_select'
-        ? 'card-select'
-        : phaseEarly === 'turn_resolution'
-          ? 'turn-play'
-          : `phase:${phaseEarly ?? 'lobby'}`;
+      : phaseEarly === 'placement'
+        ? 'placement'
+        : phaseEarly === 'card_select'
+          ? 'card-select'
+          : phaseEarly === 'turn_resolution'
+            ? 'turn-play'
+            : `phase:${phaseEarly ?? 'lobby'}`;
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [viewKey]);
@@ -291,6 +298,13 @@ export function PlayerScreen() {
 
   const showBottomBar = !!me?.characterId;
   const onPlayTab = activeTab === 'play' || !showBottomBar;
+  // The header "Items" button is available throughout a scenario when the
+  // character brought items — it's always visible, but items can only be used
+  // on your turn (enforced inside the modal).
+  const showItemsButton =
+    phase === 'turn_resolution' &&
+    onPlayTab &&
+    (myCharInstance?.broughtItemIds.length ?? 0) > 0;
   const headerTitle =
     showBottomBar && activeTab === 'scenario'
       ? 'Scenario'
@@ -300,12 +314,28 @@ export function PlayerScreen() {
 
   return (
     <div style={shellStyle}>
+      {gameState?.narrative && (
+        <NarrativeModal
+          entry={gameState.narrative}
+          onDismiss={() => sock.send({ type: 'dismiss_narrative' })}
+        />
+      )}
       {gameState?.pendingReactiveItem?.playerId === playerId && (
         <ReactivePrompt
           prompt={gameState.pendingReactiveItem.prompt}
           onRespond={(spend) =>
             sock.send({ type: 'player_respond_reactive_item', spend })
           }
+        />
+      )}
+      {showItemsModal && gameState && playerId && (
+        <ItemModal
+          gameState={gameState}
+          myPlayerId={playerId}
+          you={you}
+          context={null}
+          isMyTurn={isMyTurn}
+          onClose={() => setShowItemsModal(false)}
         />
       )}
       {myCharInstance && (
@@ -322,6 +352,7 @@ export function PlayerScreen() {
             unit={myUnit}
             {...(headerTitle ? { title: headerTitle } : {})}
             {...(phase === 'lobby' ? { gold: myCharInstance.gold } : {})}
+            {...(showItemsButton ? { onOpenItems: () => setShowItemsModal(true) } : {})}
           />
           {you && <ActiveArea you={you} />}
         </div>
@@ -376,7 +407,7 @@ export function PlayerScreen() {
             </p>
           );
         })()}
-        {onPlayTab && phaseHeadline(phase, !!me?.characterId, isMyTurn) && <h1
+        {onPlayTab && !(phase === 'placement' && you?.battleGoal && you.battleGoal.chosenGoalId == null && you.battleGoal.dealtGoalIds.length > 0) && phaseHeadline(phase, !!me?.characterId, isMyTurn) && <h1
           style={{
             marginTop: 6,
             marginBottom: 12,
@@ -559,7 +590,8 @@ export function PlayerScreen() {
             </div>
           );
         })()}
-        {onPlayTab && me?.characterId && you?.battleGoal &&
+        {onPlayTab && me?.characterId &&
+          (phase === 'placement' || phase === 'card_select') && you?.battleGoal &&
           you.battleGoal.chosenGoalId == null &&
           you.battleGoal.dealtGoalIds.length > 0 && (
             <BattleGoalPicker
@@ -573,6 +605,11 @@ export function PlayerScreen() {
           (you.battleGoal?.chosenGoalId != null ||
             !you.battleGoal?.dealtGoalIds?.length) && (
             <Hand you={you} />
+          )}
+        {onPlayTab && me?.characterId && phase === 'placement' && gameState && playerId &&
+          (you?.battleGoal?.chosenGoalId != null ||
+            !you?.battleGoal?.dealtGoalIds?.length) && (
+            <PlacementView gameState={gameState} myPlayerId={playerId} />
           )}
         {onPlayTab && me?.characterId && phase === 'turn_resolution' && gameState && (
           <TurnPlay gameState={gameState} myPlayerId={playerId!} you={you} />

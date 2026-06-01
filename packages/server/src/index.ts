@@ -1,6 +1,7 @@
 import os from 'node:os';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientToServer, ServerToClient } from '@gloomfolk/shared';
+import { FIRST_SCENARIO_ID } from '@gloomfolk/shared';
 import {
   type CampaignSave,
   deleteCampaign,
@@ -127,7 +128,8 @@ async function handle(
         name: msg.name.trim() || 'Untitled Campaign',
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        scenarioId: null,
+        // Every new campaign begins on Scenario 0 (Training Course).
+        scenarioId: FIRST_SCENARIO_ID,
         characters: [],
         players: [],
       };
@@ -335,6 +337,21 @@ async function handle(
       return;
     }
 
+    case 'player_open_door': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.openDoor(conn.playerId, msg.doorId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'dismiss_narrative': {
+      if (!conn.campaignId) return;
+      rooms.get(conn.campaignId)?.dismissNarrative();
+      return;
+    }
+
     case 'player_long_rest': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
@@ -516,7 +533,37 @@ async function handle(
         send(ws, { type: 'error', message: 'no_room' });
         return;
       }
-      const result = room.startScenario(msg.scenarioId);
+      const result = room.startScenario(msg.scenarioId, msg.level);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_place': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.placePlayer(conn.playerId, msg.hex);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'player_set_placement_ready': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.setPlacementReady(conn.playerId, msg.ready);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'host_begin_scenario': {
+      if (conn.role !== 'host' || !conn.campaignId) {
+        send(ws, { type: 'error', message: 'not_a_host' });
+        return;
+      }
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.beginScenarioPlay();
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }

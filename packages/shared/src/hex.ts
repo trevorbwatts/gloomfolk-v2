@@ -31,77 +31,133 @@ export function hexDistance(a: Hex, b: Hex): number {
 }
 
 /**
- * Breadth-first reachable hexes from `start`, up to `budget` steps.
- * `passable(hex)` decides if a hex can be entered (false for walls / occupied).
- * Returns a map of hexKey → distance from start.
+ * Reachable destinations from `start` within `budget` movement points.
+ *   - `walkable(h)` decides if a hex can be *moved through* — walls block, and
+ *     so do enemy figures, but a figure may pass through its allies.
+ *   - `canEnd(h)` decides if a hex is a legal stopping point — additionally
+ *     false for any occupied hex, since a figure can't end on top of another.
+ *   - `enterCost(h)` is the cost to step *into* a hex (difficult terrain = 2,
+ *     everything else 1).
+ * Returns a map of hexKey → cheapest movement cost for hexes you may stop on.
  */
 export function bfsReachable(
   start: Hex,
   budget: number,
-  passable: (h: Hex) => boolean,
+  walkable: (h: Hex) => boolean,
+  canEnd: (h: Hex) => boolean,
+  enterCost: (h: Hex) => number = () => 1,
 ): Map<string, number> {
-  const out = new Map<string, number>();
-  out.set(hexKey(start), 0);
-  if (budget <= 0) return out;
-  let frontier: Hex[] = [start];
-  for (let step = 1; step <= budget; step++) {
-    const next: Hex[] = [];
-    for (const h of frontier) {
-      for (const n of hexNeighbors(h)) {
-        const k = hexKey(n);
-        if (out.has(k)) continue;
-        if (!passable(n)) continue;
-        out.set(k, step);
-        next.push(n);
+  // Uniform-cost (Dijkstra) search by accumulated movement cost over walkable
+  // hexes, then keep only those a figure may legally stop on. With a uniform
+  // cost of 1 and canEnd === walkable this matches a plain layered BFS.
+  const cost = new Map<string, number>([[hexKey(start), 0]]);
+  const visited = new Set<string>();
+  if (budget > 0) {
+    for (;;) {
+      // Pick the cheapest unvisited hex.
+      let curK: string | null = null;
+      let curCost = Infinity;
+      for (const [k, c] of cost) {
+        if (visited.has(k)) continue;
+        if (c < curCost) {
+          curCost = c;
+          curK = k;
+        }
+      }
+      if (curK === null) break;
+      visited.add(curK);
+      const [qs, rs] = curK.split(',');
+      const cur = { q: Number(qs), r: Number(rs) };
+      for (const n of hexNeighbors(cur)) {
+        if (!walkable(n)) continue;
+        const c = curCost + enterCost(n);
+        if (c > budget) continue;
+        const nk = hexKey(n);
+        const ex = cost.get(nk);
+        if (ex === undefined || c < ex) cost.set(nk, c);
       }
     }
-    frontier = next;
-    if (frontier.length === 0) break;
+  }
+  // `start` is always included (the "don't move" option); other hexes only if
+  // they're a legal stopping point.
+  const out = new Map<string, number>();
+  out.set(hexKey(start), 0);
+  for (const [k, c] of cost) {
+    const [qs, rs] = k.split(',');
+    if (canEnd({ q: Number(qs), r: Number(rs) })) out.set(k, c);
   }
   return out;
 }
 
 /**
- * Shortest passable path from `start` to `goal`, including both endpoints.
- * Returns null if `goal` is unreachable within `budget` steps.
+ * Cheapest path from `start` to `goal`, including both endpoints. Mid-path
+ * hexes need only be `walkable` (a figure may pass through allies); the goal
+ * must also satisfy `canEnd` (no stopping on an occupied hex). `enterCost`
+ * charges 2 to step into difficult terrain. Returns null if `goal` is
+ * unreachable within `budget` movement points.
  */
 export function bfsPath(
   start: Hex,
   goal: Hex,
   budget: number,
-  passable: (h: Hex) => boolean,
+  walkable: (h: Hex) => boolean,
+  canEnd: (h: Hex) => boolean,
+  enterCost: (h: Hex) => number = () => 1,
 ): Hex[] | null {
   if (hexEqual(start, goal)) return [start];
   if (budget <= 0) return null;
+  if (!canEnd(goal)) return null;
+  const cost = new Map<string, number>([[hexKey(start), 0]]);
   const parents = new Map<string, Hex>();
-  const seen = new Set<string>([hexKey(start)]);
-  let frontier: Hex[] = [start];
-  for (let step = 1; step <= budget; step++) {
-    const next: Hex[] = [];
-    for (const h of frontier) {
-      for (const n of hexNeighbors(h)) {
-        const k = hexKey(n);
-        if (seen.has(k)) continue;
-        if (!passable(n)) continue;
-        seen.add(k);
-        parents.set(k, h);
-        if (hexEqual(n, goal)) {
-          const out: Hex[] = [n];
-          let cur = h;
-          while (!hexEqual(cur, start)) {
-            out.push(cur);
-            cur = parents.get(hexKey(cur))!;
-          }
-          out.push(start);
-          return out.reverse();
-        }
-        next.push(n);
+  const visited = new Set<string>();
+  const goalK = hexKey(goal);
+  for (;;) {
+    let curK: string | null = null;
+    let curCost = Infinity;
+    for (const [k, c] of cost) {
+      if (visited.has(k)) continue;
+      if (c < curCost) {
+        curCost = c;
+        curK = k;
       }
     }
-    frontier = next;
-    if (frontier.length === 0) break;
+    if (curK === null) break;
+    visited.add(curK);
+    if (curK === goalK) break;
+    const [qs, rs] = curK.split(',');
+    const cur = { q: Number(qs), r: Number(rs) };
+    for (const n of hexNeighbors(cur)) {
+      if (!walkable(n)) continue;
+      const c = curCost + enterCost(n);
+      if (c > budget) continue;
+      const nk = hexKey(n);
+      const ex = cost.get(nk);
+      if (ex === undefined || c < ex) {
+        cost.set(nk, c);
+        parents.set(nk, cur);
+      }
+    }
   }
-  return null;
+  if (!visited.has(goalK)) return null;
+  const out: Hex[] = [];
+  let cur: Hex | undefined = goal;
+  while (cur && !hexEqual(cur, start)) {
+    out.push(cur);
+    cur = parents.get(hexKey(cur));
+  }
+  out.push(start);
+  return out.reverse();
+}
+
+/**
+ * Total movement cost of walking `path` — the list of hexes entered, excluding
+ * the starting hex. Sums each hex's `enterCost` (difficult terrain costs 2), so
+ * it can differ from `path.length` (the physical number of hexes moved).
+ */
+export function pathCost(path: readonly Hex[], enterCost: (h: Hex) => number): number {
+  let total = 0;
+  for (const h of path) total += enterCost(h);
+  return total;
 }
 
 /**

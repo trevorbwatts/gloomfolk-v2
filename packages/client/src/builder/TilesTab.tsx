@@ -1,11 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { TILE_SHAPES, TILE_SIDES, tileShapeById, tileSideById } from '@gloomfolk/shared';
 import { btn, theme } from '../theme.js';
 import { ShapePreview } from './ShapePreview.js';
 import {
   clearTileImage,
+  fileToTileImage,
   getTileImage,
-  readFileAsDataUrl,
+  listTileImageIds,
+  migrateLegacyTileImages,
   setTileImage,
 } from './tileImages.js';
 
@@ -55,7 +57,9 @@ const shapeHeadingStyle: React.CSSProperties = {
 
 export function TilesTab() {
   const [selectedId, setSelectedId] = useState<string>(TILE_SIDES[0]?.id ?? '');
-  const [imageVersion, setImageVersion] = useState(0);
+  const [currentImage, setCurrentImage] = useState<string | null>(null);
+  const [imageIds, setImageIds] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
 
   const selectedSide = useMemo(() => tileSideById(selectedId), [selectedId]);
   const selectedShape = useMemo(
@@ -74,30 +78,68 @@ export function TilesTab() {
     return map;
   }, []);
 
-  const currentImage = useMemo(
-    () => (selectedSide ? getTileImage(selectedSide.id) : null),
-    [selectedSide, imageVersion],
-  );
+  // Which tiles have an image (for the sidebar dots). Refreshed after edits.
+  function refreshImageIds() {
+    listTileImageIds()
+      .then(setImageIds)
+      .catch((err) => console.warn('Could not list tile images:', err));
+  }
+  useEffect(() => {
+    // Pull any images saved by the old localStorage store into IndexedDB, then
+    // list what we have.
+    migrateLegacyTileImages().finally(refreshImageIds);
+  }, []);
+
+  // Load the selected tile's image whenever the selection changes.
+  useEffect(() => {
+    let cancelled = false;
+    setCurrentImage(null);
+    if (!selectedSide) return;
+    const id = selectedSide.id;
+    getTileImage(id)
+      .then((img) => {
+        if (!cancelled) setCurrentImage(img);
+      })
+      .catch((err) => console.warn('Could not load tile image:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSide]);
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file || !selectedSide) return;
+    const id = selectedSide.id;
+    setBusy(true);
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      setTileImage(selectedSide.id, dataUrl);
-      setImageVersion((v) => v + 1);
+      const dataUrl = await fileToTileImage(file);
+      await setTileImage(id, dataUrl);
+      // Only reflect it if the user is still on the same tile.
+      if (selectedSide?.id === id) setCurrentImage(dataUrl);
+      refreshImageIds();
     } catch (err) {
-      console.error('Failed to read file:', err);
-      alert('Could not read that file.');
+      console.error('Failed to save tile image:', err);
+      alert(
+        'Could not save that image. It may be corrupt, or storage may be full. ' +
+          'Try a smaller image or remove some existing tile images.',
+      );
     } finally {
-      e.target.value = '';
+      setBusy(false);
     }
   }
 
-  function handleClear() {
+  async function handleClear() {
     if (!selectedSide) return;
-    clearTileImage(selectedSide.id);
-    setImageVersion((v) => v + 1);
+    const id = selectedSide.id;
+    try {
+      await clearTileImage(id);
+      if (selectedSide?.id === id) setCurrentImage(null);
+      refreshImageIds();
+    } catch (err) {
+      console.error('Failed to remove tile image:', err);
+      alert('Could not remove that image.');
+    }
   }
 
   return (
@@ -118,7 +160,7 @@ export function TilesTab() {
                   onClick={() => setSelectedId(side.id)}
                 >
                   {side.id}
-                  {getTileImage(side.id) ? (
+                  {imageIds.has(side.id) ? (
                     <span style={{ color: theme.good, marginLeft: 6 }}>●</span>
                   ) : null}
                 </button>
@@ -223,16 +265,17 @@ export function TilesTab() {
                   </div>
                 )}
                 <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <label style={btn.outline()}>
-                    Upload image
+                  <label style={{ ...btn.outline(), opacity: busy ? 0.6 : 1 }}>
+                    {busy ? 'Saving…' : currentImage ? 'Replace image' : 'Upload image'}
                     <input
                       type="file"
                       accept="image/*"
                       onChange={handleFile}
+                      disabled={busy}
                       style={{ display: 'none' }}
                     />
                   </label>
-                  {currentImage && (
+                  {currentImage && !busy && (
                     <button style={btn.ghost()} onClick={handleClear}>
                       Remove
                     </button>

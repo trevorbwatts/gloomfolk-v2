@@ -229,8 +229,8 @@ export function startTurn(
     consumedThisTurn: [],
     jumpAllMoves: false,
     pierceCharge: null,
-    poisonCharge: null,
-    advantageCharge: null,
+    poisonCharge: false,
+    advantageCharge: false,
     performedLostAction: false,
   };
 }

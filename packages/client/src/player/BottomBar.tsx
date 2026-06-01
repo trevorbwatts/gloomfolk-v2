@@ -14,6 +14,7 @@ import {
   ALL_ITEMS,
   banditArcher,
   banditScout,
+  cityGuard,
   getBattleGoal,
   getScenario,
   modifierLabel,
@@ -33,6 +34,7 @@ type CharacterTabId = 'sheet' | 'items' | 'cards' | 'modifiers';
 const MONSTER_DEFS: Record<string, MonsterStatCard | undefined> = {
   'bandit-archer': banditArcher,
   'bandit-scout': banditScout,
+  'city-guard': cityGuard,
 };
 
 export function BottomBar({
@@ -99,6 +101,7 @@ export function PlayerHeader({
   unit,
   title,
   gold,
+  onOpenItems,
 }: {
   character: CharacterInstance | null;
   unit?: Unit | null;
@@ -106,6 +109,9 @@ export function PlayerHeader({
   /** When set, show the character's gold on the right of the bar (used during
    *  the pre-scenario shopping step). */
   gold?: number;
+  /** When set, show an "Items" button next to HP that opens the item modal.
+   *  Supplied only during a scenario when the character brought items. */
+  onOpenItems?: () => void;
 }) {
   const showStats = !title && !!character;
   return (
@@ -134,7 +140,26 @@ export function PlayerHeader({
       >
         {title ?? character?.name ?? ''}
       </h1>
-      {showStats && unit && <UnitStatusStrip unit={unit} />}
+      {(showStats && unit) || onOpenItems ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {showStats && unit && <UnitStatusStrip unit={unit} />}
+          {onOpenItems && (
+            <button
+              onClick={onOpenItems}
+              style={{
+                ...btn.ghost(),
+                padding: '4px 12px',
+                fontSize: 11,
+                letterSpacing: 0.5,
+                textTransform: 'uppercase',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Items
+            </button>
+          )}
+        </div>
+      ) : null}
       {gold != null && (
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
           <span style={{ fontSize: 18, fontFamily: theme.headingFont, color: '#d9a441', fontWeight: 600 }}>

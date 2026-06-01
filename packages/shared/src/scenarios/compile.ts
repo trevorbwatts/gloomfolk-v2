@@ -5,7 +5,7 @@
  */
 
 import type { Hex } from '../hex.js';
-import { hexKey, rotatePattern } from '../hex.js';
+import { hexKey, hexNeighbors, rotatePattern } from '../hex.js';
 import type { MonsterRank } from '../monsters/types.js';
 import { tileShapeById, tileSideById } from '../tiles/index.js';
 import type { MonsterRankAtCount, PlacedTile, ScenarioData } from './layout.js';
@@ -103,7 +103,13 @@ export function compileScenario(data: ScenarioData, rules: ScenarioRules): Scena
       const existing = tileByHex.get(hexKey(h));
       if (existing) existing.kind = kind;
       else {
-        const room = roomOf.get(hexKey(h));
+        // Overlay hex with no underlying tile (e.g. a door on a tile edge):
+        // inherit the room of an adjacent tile so it reveals/hides with it.
+        const room =
+          roomOf.get(hexKey(h)) ??
+          hexNeighbors(h)
+            .map((n) => roomOf.get(hexKey(n)))
+            .find((r): r is string => !!r);
         tileByHex.set(hexKey(h), { q: h.q, r: h.r, kind, ...(room ? { room } : {}) });
       }
     }
@@ -114,7 +120,8 @@ export function compileScenario(data: ScenarioData, rules: ScenarioRules): Scena
   // 3. Spawns: players from starting positions, enemies from monster spawns.
   const spawns: SpawnSlot[] = [];
   for (const h of playerStarts) {
-    spawns.push({ hex: h, side: 'player', room: roomOf.get(hexKey(h)) });
+    const room = roomOf.get(hexKey(h));
+    spawns.push({ hex: h, side: 'player', ...(room ? { room } : {}) });
   }
   for (const m of data.monsterSpawns ?? []) {
     const room = roomOf.get(hexKey(m.hex));
@@ -129,7 +136,7 @@ export function compileScenario(data: ScenarioData, rules: ScenarioRules): Scena
       side: 'enemy',
       monsterId: m.monsterType,
       ranks,
-      room,
+      ...(room ? { room } : {}),
       ...(behavior !== 'normal' ? { behavior } : {}),
     });
   }

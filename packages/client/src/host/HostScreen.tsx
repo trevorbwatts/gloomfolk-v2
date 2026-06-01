@@ -4,6 +4,7 @@ import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { HexBoard } from '../board/HexBoard.js';
 import { ElementBoard } from '../board/ElementBoard.js';
+import { NarrativeModal } from '../board/NarrativeModal.js';
 import { useMoveAnim } from '../board/useMoveAnim.js';
 import { TurnOrder } from './TurnOrder.js';
 import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
@@ -11,9 +12,14 @@ import { btn, theme } from '../theme.js';
 import type { CharacterInstance, LobbyPlayer, ModifierCard, MonsterTurnAnim, Unit } from '@gloomfolk/shared';
 import {
   bonusExperienceFor,
+  FIRST_SCENARIO_ID,
   goldConversionFor,
   hazardousTerrainDamageFor,
+  listScenarios,
+  MAX_SCENARIO_LEVEL,
+  MIN_SCENARIO_LEVEL,
   modifierLabel,
+  recommendedScenarioLevel,
   trapDamageFor,
 } from '@gloomfolk/shared';
 
@@ -158,9 +164,25 @@ export function HostScreen() {
     return ch?.loadout != null;
   });
   const waitingOn = playersWithChars.length - playersReady.length;
-  const canStart = playersWithChars.length > 0 && waitingOn === 0;
+  // Gloomhaven requires a party of at least two.
+  const canStart = playersWithChars.length >= 2 && waitingOn === 0;
   const inLobby = gameState?.phase === 'lobby';
   const inTurnRes = gameState?.phase === 'turn_resolution';
+  const inPlacement = gameState?.phase === 'placement';
+
+  // Placement: highlight the open starting hexes and gate the Begin button on
+  // every connected character-player being placed and ready.
+  const startingKeys = inPlacement
+    ? new Set(gameState!.startingPositions.map((h) => `${h.q},${h.r}`))
+    : undefined;
+  const placementParty = gameState?.players.filter((p) => p.characterId && p.connected) ?? [];
+  const placedOwners = new Set(
+    gameState?.units.filter((u) => u.kind === 'player').map((u) => u.ownerPlayerId) ?? [],
+  );
+  const canBegin =
+    inPlacement &&
+    placementParty.length > 0 &&
+    placementParty.every((p) => p.placementReady && placedOwners.has(p.playerId));
 
   const activeUnitIds: string[] = [];
   if (gameState && inTurnRes) {
@@ -180,7 +202,24 @@ export function HostScreen() {
   }
 
   return (
-    <div style={shellStyle}>
+    <div
+      style={{
+        ...shellStyle,
+        // Pin the scenario view to the viewport so the header, level strip,
+        // turn order and elements bar stay put; only the map scrolls.
+        height: '100vh',
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+      }}
+    >
+      {gameState?.narrative && (
+        <NarrativeModal
+          entry={gameState.narrative}
+          onDismiss={() => sock.send({ type: 'dismiss_narrative' })}
+        />
+      )}
       <div
         style={{
           background: '#000',
@@ -189,6 +228,7 @@ export function HostScreen() {
           display: 'flex',
           alignItems: 'center',
           gap: 12,
+          flexShrink: 0,
         }}
       >
         <button
@@ -255,13 +295,14 @@ export function HostScreen() {
             justifyContent: 'center',
             padding: '10px 24px',
             borderBottom: `1px solid ${theme.border}`,
+            flexShrink: 0,
           }}
         >
           <ScenarioLevelStrip level={gameState.scenarioLevel} />
         </div>
       )}
-      <div style={{ padding: 24 }}>
-        {inLobby ? (
+      {inLobby ? (
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 24 }}>
           <WaitingRoom
             scenarioName={gameState?.scenarioName ?? null}
             joinUrl={joinUrl}
@@ -270,12 +311,34 @@ export function HostScreen() {
             canStart={canStart}
             waitingOn={waitingOn}
             playersWithChars={playersWithChars.length}
-            onStart={() => sock.send({ type: 'host_start_scenario', scenarioId: 'level1' })}
+            onStart={(scenarioId, level) =>
+              sock.send({ type: 'host_start_scenario', scenarioId, level })
+            }
           />
-        ) : (
-          <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-            <div style={{ minWidth: 240 }}>
-              {gameState && (
+        </div>
+      ) : (
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            gap: 16,
+            padding: 24,
+            boxSizing: 'border-box',
+          }}
+        >
+          <div style={{ minWidth: 240, flexShrink: 0 }}>
+            {gameState && (
+              inPlacement ? (
+                <PlacementPanel
+                  round={gameState.round}
+                  players={placementParty}
+                  characters={gameState.characters}
+                  placedOwners={placedOwners}
+                  canBegin={canBegin}
+                  onBegin={() => sock.send({ type: 'host_begin_scenario' })}
+                />
+              ) : (
                 <>
                   <TurnOrder
                     order={gameState.turnOrder}
@@ -295,73 +358,182 @@ export function HostScreen() {
                     </button>
                   )}
                 </>
-              )}
-            </div>
-            <div style={{ flex: 1, minWidth: 360 }}>
-              {gameState && gameState.tiles.length > 0 ? (
-                <>
-                  {gameState.monsterTurnAnim && (
+              )
+            )}
+          </div>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            {gameState && gameState.tiles.length > 0 ? (
+              <>
+                {gameState.monsterTurnAnim && (
+                  <div style={{ flexShrink: 0 }}>
                     <MonsterTurnPanel
                       anim={gameState.monsterTurnAnim}
                       units={gameState.units}
                       onSkip={() => sock.send({ type: 'host_skip_monster_anim' })}
                     />
-                  )}
-                  {gameState.monsterTurnAnim && (
-                    <MonsterModifierModal
-                      anim={gameState.monsterTurnAnim}
-                      units={gameState.units}
-                    />
-                  )}
-                  <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <HexBoard
-                        tiles={gameState.tiles}
-                        units={gameState.units}
-                        moneyTokens={gameState.moneyTokens}
-                        activeUnitIds={activeUnitIds}
-                        pathHexes={gameState.pendingForcedMove?.path}
-                        unitAvatarUrl={(u: Unit) =>
-                          u.kind === 'monster'
-                            ? monsterAvatarUrl(u.defId)
-                            : classAvatarUrl(u.defId)
-                        }
-                        moveAnim={moveAnim}
-                        onMoveAnimDone={onMoveAnimDone}
-                        monsterTurnAnim={gameState.monsterTurnAnim}
-                      />
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      <ElementBoard board={gameState.elementBoard} />
-                    </div>
                   </div>
-                  {gameState.events.length > 0 && (
-                    <div
-                      style={{
-                        marginTop: 12,
-                        padding: 10,
-                        background: theme.panel,
-                        border: `1px solid ${theme.border}`,
-                        borderRadius: 6,
-                        fontSize: 13,
-                        maxHeight: 180,
-                        overflowY: 'auto',
-                        color: theme.text,
-                      }}
-                    >
-                      {gameState.events.slice(-8).map((ev) => (
-                        <div key={ev.id} style={{ color: theme.muted }}>{ev.text}</div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p style={{ color: theme.muted }}>No board yet — start a scenario.</p>
-              )}
-            </div>
+                )}
+                {gameState.monsterTurnAnim && (
+                  <MonsterModifierModal
+                    anim={gameState.monsterTurnAnim}
+                    units={gameState.units}
+                  />
+                )}
+                <div style={{ display: 'flex', gap: 16, alignItems: 'stretch', flex: 1, minHeight: 0 }}>
+                  {/* Map viewport: fills all remaining space up to the Elements
+                      bar and scrolls inside when the board is larger than it. */}
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'auto',
+                      background: '#0e0e10',
+                      borderRadius: 8,
+                      display: 'flex',
+                      justifyContent: 'center',
+                      alignItems: 'flex-start',
+                    }}
+                  >
+                    <HexBoard
+                      tiles={gameState.tiles}
+                      units={gameState.units}
+                      moneyTokens={gameState.moneyTokens}
+                      doors={gameState.doors}
+                      activeUnitIds={activeUnitIds}
+                      maxWidthPx={Number.POSITIVE_INFINITY}
+                      {...(startingKeys ? { reachableKeys: startingKeys } : {})}
+                      pathHexes={gameState.pendingForcedMove?.path}
+                      unitAvatarUrl={(u: Unit) =>
+                        u.kind === 'monster'
+                          ? monsterAvatarUrl(u.defId)
+                          : classAvatarUrl(u.defId)
+                      }
+                      moveAnim={moveAnim}
+                      onMoveAnimDone={onMoveAnimDone}
+                      monsterTurnAnim={gameState.monsterTurnAnim}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+                    <ElementBoard board={gameState.elementBoard} />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p style={{ color: theme.muted }}>No board yet — start a scenario.</p>
+            )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Left-column box during the placement phase — shares the Round box's frame.
+ *  Shows who's placed/ready and the Begin button (enabled once every connected
+ *  character-player is ready). */
+function PlacementPanel({
+  round,
+  players,
+  characters,
+  placedOwners,
+  canBegin,
+  onBegin,
+}: {
+  round: number;
+  players: LobbyPlayer[];
+  characters: CharacterInstance[];
+  placedOwners: Set<string | undefined>;
+  canBegin: boolean;
+  onBegin: () => void;
+}) {
+  return (
+    <div
+      style={{
+        background: theme.panel,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 6,
+        padding: 12,
+        minWidth: 260,
+        fontFamily: theme.font,
+        color: theme.text,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 12,
+          textTransform: 'uppercase',
+          letterSpacing: 1,
+          color: theme.muted,
+          marginBottom: 10,
+          textAlign: 'center',
+        }}
+      >
+        Round {round}
+      </div>
+      <div
+        style={{
+          fontFamily: theme.headingFont,
+          fontSize: 11,
+          letterSpacing: 0.8,
+          textTransform: 'uppercase',
+          color: theme.accent,
+          marginBottom: 10,
+          textAlign: 'center',
+        }}
+      >
+        Choosing starting positions
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+        {players.length === 0 ? (
+          <span style={{ color: theme.muted, fontSize: 13, textAlign: 'center' }}>
+            Waiting for players…
+          </span>
+        ) : (
+          players.map((p) => {
+            const ch = p.characterId
+              ? characters.find((c) => c.id === p.characterId) ?? null
+              : null;
+            const placed = placedOwners.has(p.playerId);
+            const status = p.placementReady ? 'ready' : placed ? 'placed' : 'choosing…';
+            const color = p.placementReady
+              ? theme.good
+              : placed
+                ? theme.accent
+                : theme.muted;
+            return (
+              <div
+                key={p.playerId}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                  fontSize: 14,
+                  padding: '6px 10px',
+                  borderRadius: 4,
+                  border: `1px solid ${theme.border}`,
+                  background: '#1c1c20',
+                }}
+              >
+                <span style={{ fontWeight: 600, color: theme.text }}>
+                  {ch?.name ?? p.name}
+                </span>
+                <span style={{ color, fontSize: 12 }}>
+                  {p.placementReady ? '✓ ' : ''}
+                  {status}
+                </span>
+              </div>
+            );
+          })
         )}
       </div>
+      <button
+        disabled={!canBegin}
+        onClick={onBegin}
+        style={{ ...btn.primary(!canBegin), width: '100%', fontSize: 15, padding: '12px 16px' }}
+      >
+        Begin Scenario
+      </button>
     </div>
   );
 }
@@ -647,10 +819,24 @@ function WaitingRoom({
   canStart: boolean;
   waitingOn: number;
   playersWithChars: number;
-  onStart: () => void;
+  onStart: (scenarioId: string, level: number) => void;
 }) {
-  const hint = playersWithChars === 0
-    ? 'Waiting for at least one player to pick a character.'
+  const scenarios = listScenarios();
+  const [scenarioId, setScenarioId] = useState(scenarios[0]?.id ?? FIRST_SCENARIO_ID);
+  // Recommended scenario level from the levels of the characters claimed by
+  // connected players (avg / 2, rounded up). Recomputes as players join, claim,
+  // or level up. The host can override with the stepper below.
+  const partyLevels = players
+    .filter((p) => p.connected && p.characterId)
+    .map((p) => characters.find((c) => c.id === p.characterId)?.level)
+    .filter((l): l is number => typeof l === 'number');
+  const recommended = recommendedScenarioLevel(partyLevels);
+  const [override, setOverride] = useState<number | null>(null);
+  const level = override ?? recommended;
+  const setLevel = (next: number) =>
+    setOverride(Math.max(MIN_SCENARIO_LEVEL, Math.min(MAX_SCENARIO_LEVEL, next)));
+  const hint = playersWithChars < 2
+    ? `Waiting for at least two players to pick a character (${playersWithChars}/2).`
     : waitingOn > 0
       ? `Waiting on ${waitingOn} ${waitingOn === 1 ? 'player' : 'players'} to lock in their hand.`
       : 'Everyone is ready.';
@@ -793,9 +979,117 @@ function WaitingRoom({
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+        <select
+          value={scenarioId}
+          onChange={(e) => setScenarioId(e.target.value)}
+          style={{
+            fontSize: 14,
+            padding: '8px 12px',
+            background: theme.panel,
+            color: theme.text,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 4,
+            fontFamily: theme.font,
+          }}
+        >
+          {scenarios.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 8,
+            padding: '14px 18px',
+            background: theme.panel,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: theme.headingFont,
+              fontSize: 11,
+              letterSpacing: 1,
+              textTransform: 'uppercase',
+              color: theme.muted,
+            }}
+          >
+            Scenario level
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <button
+              onClick={() => setLevel(level - 1)}
+              disabled={level <= MIN_SCENARIO_LEVEL}
+              style={{
+                ...btn.ghost(),
+                fontSize: 20,
+                padding: '2px 14px',
+                opacity: level <= MIN_SCENARIO_LEVEL ? 0.4 : 1,
+                cursor: level <= MIN_SCENARIO_LEVEL ? 'not-allowed' : 'pointer',
+              }}
+              aria-label="Lower scenario level"
+            >
+              −
+            </button>
+            <span
+              style={{
+                fontFamily: theme.headingFont,
+                fontSize: 34,
+                color: theme.accent,
+                minWidth: 40,
+                textAlign: 'center',
+              }}
+            >
+              {level}
+            </span>
+            <button
+              onClick={() => setLevel(level + 1)}
+              disabled={level >= MAX_SCENARIO_LEVEL}
+              style={{
+                ...btn.ghost(),
+                fontSize: 20,
+                padding: '2px 14px',
+                opacity: level >= MAX_SCENARIO_LEVEL ? 0.4 : 1,
+                cursor: level >= MAX_SCENARIO_LEVEL ? 'not-allowed' : 'pointer',
+              }}
+              aria-label="Raise scenario level"
+            >
+              +
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: theme.muted }}>
+            {override === null || override === recommended ? (
+              <>Recommended for this party (level {recommended}).</>
+            ) : (
+              <>
+                Recommended is {recommended}.{' '}
+                <button
+                  onClick={() => setOverride(null)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: theme.accent,
+                    cursor: 'pointer',
+                    padding: 0,
+                    font: 'inherit',
+                    textDecoration: 'underline',
+                  }}
+                >
+                  Reset
+                </button>
+              </>
+            )}
+          </div>
+          <ScenarioLevelStrip level={level} />
+        </div>
         <button
           disabled={!canStart}
-          onClick={onStart}
+          onClick={() => onStart(scenarioId, level)}
           style={{ ...btn.primary(!canStart), fontSize: 16, padding: '12px 28px' }}
         >
           Start Scenario

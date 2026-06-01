@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from 'react';
 import type {
   AttackConsumeOffer,
   Card,
@@ -15,15 +24,14 @@ import type {
   PublicGameState,
   Unit,
 } from '@gloomfolk/shared';
-import { ALL_ITEMS } from '@gloomfolk/shared';
 import {
-  cardMatchesLevel,
   bfsForcedMove,
   bfsForcedMovePath,
   bfsPath,
   bfsPathJump,
   bfsReachable,
   bfsReachableJump,
+  pathCost,
   hasLineOfSight,
   hexDistance,
   hexEqual,
@@ -45,6 +53,13 @@ const cap = (s: string): string => s.length === 0 ? s : s[0]!.toUpperCase() + s.
 import { btn, theme } from '../theme.js';
 import { CardView, HalfView, ElementChip, type CardElementContext } from './CardView.js';
 import { CardsOverview } from './Hand.js';
+import {
+  ItemModal,
+  UseItemButton,
+  actionHasRelevantItem,
+  attackChargeTags,
+  type ItemActionContext,
+} from './ItemModal.js';
 
 export function TurnPlay({
   gameState,
@@ -136,6 +151,28 @@ function isTargetedActionType(t: PendingAction['type']): boolean {
   );
 }
 
+/** Enemy ids the given attack can legally hit from the actor's hex (in range +
+ *  line of sight), minus any already struck by this same multi-target ability.
+ *  Shared by the board's target highlights and the targeting prompt. */
+function attackableEnemyIds(
+  gameState: PublicGameState,
+  myUnit: Unit,
+  action: { range: number; hitTargetIds: readonly string[] },
+): string[] {
+  const walls = new Set<string>();
+  for (const t of gameState.tiles) if (t.kind === 'wall') walls.add(hexKey(t));
+  const losBlocks = (h: Hex) => walls.has(hexKey(h));
+  return gameState.units
+    .filter(
+      (u) =>
+        u.kind === 'monster' &&
+        !action.hitTargetIds.includes(u.id) &&
+        hexDistance(u.hex, myUnit.hex) <= action.range &&
+        (action.range <= 1 || hasLineOfSight(myUnit.hex, u.hex, losBlocks)),
+    )
+    .map((u) => u.id);
+}
+
 /** A target the player has tapped but not yet confirmed. Different action
  *  types stage different shapes; the bottom bar reads from this to render
  *  Confirm/Cancel and the description. */
@@ -176,6 +213,20 @@ function ActionDriver({
    *  in the relevant target mode; cleared on Cancel, Confirm, or when the
    *  active action changes. */
   const [pendingTarget, setPendingTarget] = useState<PendingTarget | null>(null);
+  /** Open the item modal anchored to a specific action row (its relevant items
+   *  surface at the top). Null when closed. */
+  const [itemContext, setItemContext] = useState<ItemActionContext | null>(null);
+  /** Preview path for a Move action — ordered hexes excluding start. Lifted
+   *  here (out of BoardForTurn) so the move's Skip/Confirm renders in the
+   *  shared sticky bottom area next to the action list. BoardForTurn owns the
+   *  board interaction that mutates it. */
+  const [movePath, setMovePath] = useState<Hex[]>([]);
+  const character = gameState.characters.find((c) => c.claimedByPlayerId === myPlayerId) ?? null;
+  // The unified bottom panel (action list + Confirm/Skip) is fixed to the
+  // bottom so it stays pinned regardless of how tall the map is. We measure its
+  // height to reserve matching scroll space, so nothing hides behind it.
+  const bottomPanelRef = useRef<HTMLDivElement>(null);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(0);
 
   // Reset selection when the active slot changes (e.g., after finishing a half).
   const slotSig = `${activeSlotKind}|${activeSlot?.cardId ?? ''}`;
@@ -210,6 +261,61 @@ function ActionDriver({
   const selectedAction =
     activeSlot?.actions.find((a) => a.id === selectedActionId && !a.done) ?? null;
 
+  // Clear the move preview whenever the move action (or its budget, e.g. after
+  // a move-bonus item) changes — previously owned by BoardForTurn.
+  const moveActionSig =
+    selectedAction?.type === 'move' ? `${selectedAction.id}|${selectedAction.amount}` : null;
+  useEffect(() => {
+    setMovePath([]);
+  }, [moveActionSig]);
+
+  const isMoveSelected = selectedAction?.type === 'move';
+  const isImmobilized = !!myUnit?.conditions.some((c) => c.kind === 'immobilize');
+  const moveStepsUsed = movePath.length;
+  const clearActionSelection = () => {
+    setMovePath([]);
+    setSelectedActionId(null);
+    setForcedMoveTargetId(null);
+    setPendingTarget(null);
+  };
+  const confirmMove = () => {
+    if (!activeSlotKind || selectedAction?.type !== 'move') return;
+    const dest = movePath[movePath.length - 1];
+    if (!dest) return;
+    sock.send({
+      type: 'player_perform_action',
+      slot: activeSlotKind,
+      actionId: selectedAction.id,
+      target: { hex: dest, path: movePath },
+    });
+    // Only drop the preview path — keep the move action selected. If the move
+    // still has budget left, the server leaves it pending and the player can
+    // move again from the new hex (or Skip the remainder). If it's fully spent,
+    // the action becomes `done`, firstPendingId changes, and the auto-select
+    // effect advances to the next action.
+    setMovePath([]);
+  };
+  const skipMove = () => {
+    if (selectedAction?.type === 'move' && activeSlotKind) {
+      sock.send({
+        type: 'player_skip_action',
+        slot: activeSlotKind,
+        actionId: selectedAction.id,
+      });
+    }
+    clearActionSelection();
+  };
+
+  // Mid-sequence dead end: a multi-target attack has hit at least one enemy and
+  // still has shots left, but no other enemy is in range to spend them on (each
+  // shot must hit a distinct enemy). Drives a hint so the turn doesn't look stuck.
+  const multiTargetExhausted = useMemo(() => {
+    if (!myUnit || selectedAction?.type !== 'attack') return false;
+    if (selectedAction.targets <= 1 || selectedAction.hitsLanded === 0) return false;
+    if (selectedAction.targetsRemaining <= 0) return false;
+    return attackableEnemyIds(gameState, myUnit, selectedAction).length === 0;
+  }, [myUnit, selectedAction, gameState]);
+
   // End-turn bar appears when both halves are effectively done: either the
   // active half has all actions ticked off and the other half is `done`, or
   // both halves are already `done` (no active slot).
@@ -227,9 +333,8 @@ function ActionDriver({
 
   // Persistent-tracked (or other persistent) half with an empty engage queue
   // — all its steps are deferred to fire on a trigger. Needs an explicit
-  // Confirm gesture (→ routes to active) or Skip (→ card discards). The bar
-  // is rendered near the end of the page so it doesn't fight ActionBottomBar
-  // or EndTurnBar.
+  // Confirm gesture (→ routes to active) or Skip (→ card discards), shown in
+  // the shared sticky bottom controls.
   const activeCard =
     activeSlot && !activeSlot.useBasic && activeSlot.cardId && you
       ? you.hand.find((c) => c.id === activeSlot.cardId) ?? null
@@ -343,9 +448,8 @@ function ActionDriver({
     selectedAction.type !== 'unsupported' &&
     !pendingTarget;
 
-  // Move drives its own Skip/Confirm bar inside BoardForTurn (it needs the
-  // live path state), so the shared ActionBottomBar covers everything else.
-  const isMoveSelected = selectedAction?.type === 'move';
+  // Move renders its own Skip/Confirm in the sticky bottom area (it needs the
+  // live path state), so the shared action controls cover everything else.
   // Targeted actions other than move: attack, AOE, apply-condition, push/pull.
   const targetedSelected =
     !!selectedAction &&
@@ -373,6 +477,58 @@ function ActionDriver({
     activeSlot.performedCount === 0 &&
     !activeSlot.actions.some((a) => a.done);
 
+  // Which control row the sticky bottom area shows. At most one applies.
+  const showEndTurnControls = showEndTurn && !pendingTarget && !isPersistentEmpty;
+  const showPersistentControls =
+    isPersistentEmpty && !!activeSlotKind && !!activeCard && !pendingTarget;
+  const hasControls =
+    isMoveSelected || showActionBar || showEndTurnControls || showPersistentControls;
+  // The bottom area carries the action list (when a half is active) plus the
+  // controls, so render it whenever either is present.
+  const showStickyArea = (!!activeSlot && !!activeSlotKind) || hasControls;
+
+  // Keep the reserved scroll-space spacer in sync with the fixed bottom panel's
+  // actual height (it grows/shrinks with the action list and controls).
+  useEffect(() => {
+    const el = bottomPanelRef.current;
+    if (!el) {
+      setBottomPanelHeight(0);
+      return;
+    }
+    const update = () => setBottomPanelHeight(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showStickyArea]);
+
+  const onConfirmAction = () => {
+    if (pendingTarget) {
+      confirmPendingTarget();
+    } else if (nonTargetedReady && selectedAction && activeSlotKind) {
+      sock.send({
+        type: 'player_perform_action',
+        slot: activeSlotKind,
+        actionId: selectedAction.id,
+      });
+    }
+  };
+  const onSkipAction = () => {
+    // Skip the underlying action: send the skip message and clear any local
+    // target/forced-move state so the action row updates and the bar dismisses.
+    if (selectedActionId && activeSlotKind) {
+      sock.send({
+        type: 'player_skip_action',
+        slot: activeSlotKind,
+        actionId: selectedActionId,
+      });
+    }
+    setSelectedActionId(null);
+    setForcedMoveTargetId(null);
+    setPendingTarget(null);
+  };
+
   return (
     <div>
       {canGoBack && activeSlotKind && (
@@ -390,17 +546,6 @@ function ActionDriver({
       )}
       <h2 style={{ marginBottom: 10, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>Your turn</h2>
 
-      {activeSlot && activeSlotKind ? (
-        <ActiveHalfPanel
-          slot={activeSlot}
-          slotKind={activeSlotKind}
-          you={you}
-          selectedActionId={selectedActionId}
-        />
-      ) : (
-        <SlotPicker ct={ct} you={you} />
-      )}
-
       <ElementChoicePrompt
         choice={gameState.pendingElementChoice}
         myPlayerId={myPlayerId}
@@ -409,403 +554,190 @@ function ActionDriver({
       {/* ActiveArea has moved up under the sticky PlayerHeader (see
           PlayerScreen.tsx) so the persistent state is always visible. */}
 
-      {selectedAction && (selectedAction.type === 'push' || selectedAction.type === 'pull') && !pendingTarget && (
-        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
-          {forcedMoveTargetId
-            ? <>Tap a destination hex to <GameIcon kind={selectedAction.type} /> {cap(selectedAction.type)} the target.</>
-            : <>Tap an enemy in <GameIcon kind="range" /> Range {selectedAction.range} to <GameIcon kind={selectedAction.type} /> {cap(selectedAction.type)}.</>}
-        </p>
-      )}
-      {selectedAction?.type === 'apply-condition' && !pendingTarget && (
-        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
-          Tap an enemy to apply <strong><GameIcon kind={selectedAction.condition} /> {cap(selectedAction.condition)}</strong>.
-        </p>
-      )}
-      {selectedAction?.type === 'attack-aoe' && !pendingTarget && (
-        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
-          Tap or drag across the highlighted hexes to aim the AOE pattern.
-        </p>
-      )}
-      {selectedAction?.type === 'attack-aoe' && pendingTarget?.kind === 'aoe' && (
-        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
-          Drag to rotate the pattern, then tap Confirm.
-        </p>
-      )}
-      {selectedAction?.type === 'attack' && selectedAction.targets > 1 && (
-        <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
-          Multi-target: <strong>{selectedAction.targetsRemaining}</strong> of {selectedAction.targets} shots remaining.
-        </p>
+      {activeSlot && activeSlotKind ? (
+        <>
+          {/* Board-interaction hints sit just above the map. */}
+          {selectedAction && (selectedAction.type === 'push' || selectedAction.type === 'pull') && !pendingTarget && (
+            <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
+              {forcedMoveTargetId
+                ? <>Tap a destination hex to <GameIcon kind={selectedAction.type} /> {cap(selectedAction.type)} the target.</>
+                : <>Tap an enemy in <GameIcon kind="range" /> Range {selectedAction.range} to <GameIcon kind={selectedAction.type} /> {cap(selectedAction.type)}.</>}
+            </p>
+          )}
+          {selectedAction?.type === 'apply-condition' && !pendingTarget && (
+            <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
+              Tap an enemy to apply <strong><GameIcon kind={selectedAction.condition} /> {cap(selectedAction.condition)}</strong>.
+            </p>
+          )}
+          {selectedAction?.type === 'attack-aoe' && !pendingTarget && (
+            <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
+              Tap or drag across the highlighted hexes to aim the AOE pattern.
+            </p>
+          )}
+          {selectedAction?.type === 'attack-aoe' && pendingTarget?.kind === 'aoe' && (
+            <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
+              Drag to rotate the pattern, then tap Confirm.
+            </p>
+          )}
+          {selectedAction?.type === 'attack' && selectedAction.targets > 1 && (
+            <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
+              Multi-target: <strong>{selectedAction.targetsRemaining}</strong> of {selectedAction.targets} shots remaining.
+              {multiTargetExhausted && (
+                <> — no other target in range. Tap <strong>Skip</strong> to finish this attack.</>
+              )}
+            </p>
+          )}
+
+          <BoardForTurn
+            gameState={gameState}
+            myUnit={myUnit}
+            activeSlotKind={activeSlotKind}
+            selectedAction={selectedAction}
+            forcedMoveTargetId={forcedMoveTargetId}
+            onPickForcedMoveTarget={(id) => setForcedMoveTargetId(id)}
+            pendingTarget={pendingTarget}
+            onStageTarget={setPendingTarget}
+            movePath={movePath}
+            setMovePath={setMovePath}
+            isImmobilized={isImmobilized}
+            moveAnim={moveAnim}
+            onMoveAnimDone={onMoveAnimDone}
+          />
+        </>
+      ) : (
+        <SlotPicker ct={ct} you={you} />
       )}
 
-      {activeSlot && (
-        <BoardForTurn
+      {itemContext && (
+        <ItemModal
           gameState={gameState}
-          myUnit={myUnit}
-          activeSlotKind={activeSlotKind}
-          selectedAction={selectedAction}
-          forcedMoveTargetId={forcedMoveTargetId}
-          onPickForcedMoveTarget={(id) => setForcedMoveTargetId(id)}
-          pendingTarget={pendingTarget}
-          onStageTarget={setPendingTarget}
-          onConsumeSelection={() => {
-            setSelectedActionId(null);
-            setForcedMoveTargetId(null);
-            setPendingTarget(null);
+          myPlayerId={myPlayerId}
+          you={you}
+          context={itemContext}
+          isMyTurn
+          onClose={() => setItemContext(null)}
+        />
+      )}
+
+      {/* The action list and its Confirm/Skip controls live in one panel fixed
+          just above the app's tab bar — they read as a single bottom area while
+          the map scrolls above. A spacer below reserves matching scroll space. */}
+      {showStickyArea && <div style={{ height: bottomPanelHeight }} aria-hidden />}
+      {showStickyArea && (
+        <div
+          ref={bottomPanelRef}
+          style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: BOTTOM_BAR_HEIGHT,
+            zIndex: 55,
+            background: theme.bgSolid,
+            borderTop: `1px solid ${theme.border}`,
           }}
-          moveAnim={moveAnim}
-          onMoveAnimDone={onMoveAnimDone}
-        />
-      )}
+        >
+          <div style={{ maxWidth: 540, margin: '0 auto' }}>
+          {activeSlot && activeSlotKind && (
+            <div style={{ padding: '10px 16px 0', maxHeight: '42vh', overflowY: 'auto' }}>
+              <ActiveHalfPanel
+                slot={activeSlot}
+                slotKind={activeSlotKind}
+                you={you}
+                selectedActionId={selectedActionId}
+                character={character}
+                chargeTags={attackChargeTags(ct)}
+                onUseItem={(action) => setItemContext({ slot: activeSlotKind, action })}
+              />
+            </div>
+          )}
 
-      <ItemTray
-        gameState={gameState}
-        myPlayerId={myPlayerId}
-        firstPending={firstPending}
-        activeSlotKind={activeSlotKind}
-        you={you}
-      />
+          {showActionBar && bottomSummary && (
+            <div
+              style={{
+                padding: '6px 16px',
+                color: theme.text,
+                fontSize: 14,
+                borderTop: `1px solid ${theme.border}`,
+              }}
+            >
+              {bottomSummary}
+            </div>
+          )}
 
-      {/* Spacer so content doesn't sit under the fixed action bar. */}
-      {(showActionBar || isMoveSelected || showEndTurn || isPersistentEmpty) && <div style={{ height: 80 }} />}
-
-      <ActionBottomBar
-        summary={bottomSummary}
-        show={showActionBar}
-        confirmDisabled={confirmDisabled}
-        onConfirm={() => {
-          if (pendingTarget) {
-            confirmPendingTarget();
-          } else if (nonTargetedReady && selectedAction && activeSlotKind) {
-            sock.send({
-              type: 'player_perform_action',
-              slot: activeSlotKind,
-              actionId: selectedAction.id,
-            });
-          }
-        }}
-        onSkip={() => {
-          // Skip the underlying action: send the skip message and clear any
-          // local target/forced-move state so the action row updates and the
-          // bar dismisses.
-          if (selectedActionId && activeSlotKind) {
-            sock.send({
-              type: 'player_skip_action',
-              slot: activeSlotKind,
-              actionId: selectedActionId,
-            });
-          }
-          setSelectedActionId(null);
-          setForcedMoveTargetId(null);
-          setPendingTarget(null);
-        }}
-      />
-
-      {showEndTurn && !pendingTarget && !isPersistentEmpty && (
-        <EndTurnBar onEndTurn={() => sock.send({ type: 'end_turn' })} />
-      )}
-
-      {isPersistentEmpty && activeSlotKind && activeCard && !pendingTarget && (
-        <PersistentConfirmBar
-          onConfirm={() =>
-            sock.send({ type: 'player_confirm_persistent_half', slot: activeSlotKind })
-          }
-          onSkip={() => sock.send({ type: 'player_finish_half', slot: activeSlotKind })}
-        />
+          {hasControls && (
+            <div
+              style={{
+                padding: '8px 16px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                borderTop: `1px solid ${theme.border}`,
+              }}
+            >
+              {isMoveSelected ? (
+                <>
+                  <button onClick={skipMove} style={bottomBarBtn(false)}>
+                    Skip
+                  </button>
+                  <button
+                    onClick={confirmMove}
+                    disabled={isImmobilized || moveStepsUsed === 0}
+                    style={{
+                      ...bottomBarBtn(true),
+                      ...(isImmobilized || moveStepsUsed === 0
+                        ? { opacity: 0.4, cursor: 'not-allowed' }
+                        : {}),
+                    }}
+                  >
+                    {isImmobilized ? 'Immobilized' : 'Confirm'}
+                  </button>
+                </>
+              ) : showActionBar ? (
+                <>
+                  <button onClick={onSkipAction} style={bottomBarBtn(false)}>
+                    Skip
+                  </button>
+                  <button
+                    onClick={onConfirmAction}
+                    disabled={confirmDisabled}
+                    style={{
+                      ...bottomBarBtn(true),
+                      ...(confirmDisabled ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+                    }}
+                  >
+                    Confirm
+                  </button>
+                </>
+              ) : showEndTurnControls ? (
+                <button onClick={() => sock.send({ type: 'end_turn' })} style={bottomBarBtn(true)}>
+                  End Turn
+                </button>
+              ) : showPersistentControls && activeSlotKind ? (
+                <>
+                  <button
+                    onClick={() => sock.send({ type: 'player_finish_half', slot: activeSlotKind })}
+                    style={bottomBarBtn(false)}
+                  >
+                    Skip
+                  </button>
+                  <button
+                    onClick={() =>
+                      sock.send({ type: 'player_confirm_persistent_half', slot: activeSlotKind })
+                    }
+                    style={bottomBarBtn(true)}
+                  >
+                    Confirm
+                  </button>
+                </>
+              ) : null}
+            </div>
+          )}
+          </div>
+        </div>
       )}
 
       <ModifierFlipOverlay draws={ct.lastModifierDraws} />
     </div>
-  );
-}
-
-function ItemTray({
-  gameState,
-  myPlayerId,
-  firstPending,
-  activeSlotKind,
-  you,
-}: {
-  gameState: PublicGameState;
-  myPlayerId: string;
-  firstPending: PendingAction | null;
-  activeSlotKind: 'top' | 'bottom' | null;
-  you: PrivatePlayerState | null;
-}) {
-  const sock = useSocket();
-  const [aimingItemId, setAimingItemId] = useState<string | null>(null);
-  const character: CharacterInstance | undefined = gameState.characters.find(
-    (c) => c.claimedByPlayerId === myPlayerId,
-  );
-  if (!character || character.broughtItemIds.length === 0) return null;
-
-  const hasPendingAttack =
-    firstPending != null &&
-    !firstPending.done &&
-    (firstPending.type === 'attack' || firstPending.type === 'attack-aoe');
-  // Poison Dagger is melee-only: an attack action with range 1, or any AOE.
-  const hasPendingMeleeAttack =
-    firstPending != null &&
-    !firstPending.done &&
-    ((firstPending.type === 'attack' && firstPending.range <= 1) ||
-      firstPending.type === 'attack-aoe');
-  // Simple Bow is ranged-only: an attack action with range > 1.
-  const hasPendingRangedAttack =
-    firstPending != null &&
-    !firstPending.done &&
-    firstPending.type === 'attack' &&
-    firstPending.range > 1;
-  const livingMonsters = gameState.units.filter(
-    (u) => u.kind === 'monster' && u.hp > 0,
-  );
-  const myUnit = gameState.units.find((u) => u.ownerPlayerId === myPlayerId) ?? null;
-  const atFullHp = myUnit != null && myUnit.hp >= myUnit.hpMax;
-  // Focusing Rod: gated on having performed a Lost-disposition action this turn,
-  // then heals one figure (self or ally) within range that actually needs it.
-  const performedLostAction = gameState.currentTurn?.performedLostAction ?? false;
-  const healableInRange = (range: number) =>
-    myUnit == null
-      ? []
-      : gameState.units.filter(
-          (u) =>
-            u.kind === 'player' &&
-            hexDistance(u.hex, myUnit.hex) <= range &&
-            (u.hp < u.hpMax ||
-              u.conditions.some((c) => c.kind === 'poison' || c.kind === 'wound')),
-        );
-  // Stamina Potion: cards of the matching level sitting in the discard pile
-  // that can be retrieved to hand (X cards count as level 1).
-  const discardedAtLevel = (level: number) =>
-    (you?.discard ?? []).filter((c) => cardMatchesLevel(c.level, level));
-
-  return (
-    <section
-      style={{
-        marginTop: 12,
-        padding: 10,
-        background: theme.panel,
-        border: `1px solid ${theme.border}`,
-        borderRadius: 4,
-      }}
-    >
-      <h3
-        style={{
-          margin: '0 0 8px',
-          fontSize: 11,
-          color: theme.muted,
-          textTransform: 'uppercase',
-          letterSpacing: 1.5,
-          fontFamily: theme.headingFont,
-        }}
-      >
-        Items
-      </h3>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {character.broughtItemIds.map((id) => {
-          const item = ALL_ITEMS[id];
-          if (!item) return null;
-          const spent = character.spentItemIds.includes(id);
-          const active = character.activeItems.find((ai) => ai.itemId === id);
-          const hasPendingMove =
-            firstPending != null && !firstPending.done && activeSlotKind != null
-              ? firstPending.type === 'move'
-              : false;
-          // move-bonus must be applied to an in-flight move action; jump and
-          // shield-on-attack are usable anytime during your turn (shield only
-          // if not already active).
-          const usable =
-            !spent &&
-            (item.effect.kind === 'move-bonus'
-              ? hasPendingMove
-              : item.effect.kind === 'jump-this-turn'
-                ? true
-                : item.effect.kind === 'shield-on-attack'
-                  ? !active
-                  : item.effect.kind === 'pierce-one-attack'
-                    ? hasPendingAttack
-                    : item.effect.kind === 'poison-one-attack'
-                      ? hasPendingMeleeAttack
-                      : item.effect.kind === 'advantage-one-attack'
-                        ? hasPendingRangedAttack
-                        : item.effect.kind === 'heal-self'
-                          ? !atFullHp
-                          : item.effect.kind === 'heal-after-lost'
-                            ? performedLostAction &&
-                              healableInRange(item.effect.range).length > 0
-                            : item.effect.kind === 'retrieve-discarded-card'
-                              ? discardedAtLevel(item.effect.cardLevel).length > 0
-                              : item.effect.kind === 'infuse-element'
-                                ? true
-                                : false);
-          const buttonLabel = spent
-            ? 'Spent'
-            : active
-              ? `Active · ${active.usesRemaining}`
-              : item.effect.kind === 'shield-on-attack'
-                ? 'Activate'
-                : item.effect.kind === 'disadvantage-when-attacked' ||
-                    item.effect.kind === 'shield-when-attacked'
-                  ? 'Reactive'
-                  : item.effect.kind === 'pierce-one-attack'
-                    ? 'Aim'
-                    : item.effect.kind === 'poison-one-attack'
-                      ? 'Aim'
-                      : item.effect.kind === 'advantage-one-attack'
-                        ? 'Aim'
-                        : item.effect.kind === 'heal-self'
-                          ? atFullHp
-                            ? 'Full HP'
-                            : `Heal ${item.effect.amount}`
-                          : item.effect.kind === 'heal-after-lost'
-                            ? performedLostAction
-                              ? 'Aim'
-                              : 'Needs Lost'
-                            : item.effect.kind === 'retrieve-discarded-card'
-                              ? discardedAtLevel(item.effect.cardLevel).length > 0
-                                ? 'Retrieve'
-                                : 'Empty'
-                              : item.effect.kind === 'infuse-element'
-                                ? 'Infuse'
-                                : 'Use';
-          const aiming = aimingItemId === id;
-          // Aim picker targets: allies in range for heal-after-lost, else enemies.
-          const pickTargets =
-            item.effect.kind === 'heal-after-lost'
-              ? healableInRange(item.effect.range)
-              : livingMonsters;
-          return (
-            <div key={id} style={{ opacity: spent ? 0.5 : 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <strong style={{ fontSize: 13 }}>{item.name}</strong>
-                  <span style={{ marginLeft: 8, fontSize: 11, color: theme.muted }}>
-                    {item.description}
-                  </span>
-                </div>
-                <button
-                  disabled={!usable}
-                  onClick={() => {
-                    if (!usable) return;
-                    if (item.effect.kind === 'move-bonus') {
-                      if (!firstPending || !activeSlotKind) return;
-                      sock.send({
-                        type: 'player_use_item',
-                        itemId: id,
-                        slot: activeSlotKind,
-                        actionId: firstPending.id,
-                      });
-                    } else if (
-                      item.effect.kind === 'pierce-one-attack' ||
-                      item.effect.kind === 'poison-one-attack' ||
-                      item.effect.kind === 'advantage-one-attack' ||
-                      item.effect.kind === 'heal-after-lost' ||
-                      item.effect.kind === 'retrieve-discarded-card'
-                    ) {
-                      setAimingItemId(aiming ? null : id);
-                    } else {
-                      sock.send({ type: 'player_use_item', itemId: id });
-                    }
-                  }}
-                  style={{
-                    fontSize: 12,
-                    padding: '6px 12px',
-                    background: aiming ? theme.border : usable ? theme.accent : 'transparent',
-                    color: usable ? '#0e1612' : theme.muted,
-                    border: usable ? 'none' : `1px solid ${theme.border}`,
-                    borderRadius: 3,
-                    fontFamily: theme.headingFont,
-                    letterSpacing: 1,
-                    textTransform: 'uppercase',
-                    cursor: usable ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  {aiming ? 'Cancel' : buttonLabel}
-                </button>
-              </div>
-              {aiming && item.effect.kind === 'retrieve-discarded-card' && (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: 6,
-                    marginTop: 6,
-                    paddingLeft: 4,
-                  }}
-                >
-                  {discardedAtLevel(item.effect.cardLevel).length === 0 ? (
-                    <span style={{ fontSize: 11, color: theme.muted }}>No cards to retrieve.</span>
-                  ) : (
-                    discardedAtLevel(item.effect.cardLevel).map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => {
-                          sock.send({
-                            type: 'player_use_item',
-                            itemId: id,
-                            targetCardId: c.id,
-                          });
-                          setAimingItemId(null);
-                        }}
-                        style={{
-                          fontSize: 11,
-                          padding: '4px 8px',
-                          background: 'transparent',
-                          color: theme.text,
-                          border: `1px solid ${theme.border}`,
-                          borderRadius: 3,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {c.name}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-              {aiming && item.effect.kind !== 'retrieve-discarded-card' && (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: 6,
-                    marginTop: 6,
-                    paddingLeft: 4,
-                  }}
-                >
-                  {pickTargets.length === 0 ? (
-                    <span style={{ fontSize: 11, color: theme.muted }}>No targets.</span>
-                  ) : (
-                    pickTargets.map((m) => (
-                      <button
-                        key={m.id}
-                        onClick={() => {
-                          sock.send({
-                            type: 'player_use_item',
-                            itemId: id,
-                            targetUnitId: m.id,
-                          });
-                          setAimingItemId(null);
-                        }}
-                        style={{
-                          fontSize: 11,
-                          padding: '4px 8px',
-                          background: 'transparent',
-                          color: theme.text,
-                          border: `1px solid ${theme.border}`,
-                          borderRadius: 3,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {m.name} ({m.hp})
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </section>
   );
 }
 
@@ -824,97 +756,6 @@ function bottomBarBtn(primary: boolean): CSSProperties {
     alignItems: 'center',
     justifyContent: 'center',
   };
-}
-
-function EndTurnBar({ onEndTurn }: { onEndTurn: () => void }) {
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        left: 0,
-        right: 0,
-        bottom: BOTTOM_BAR_HEIGHT,
-        background: theme.bgSolid,
-        borderTop: `1px solid ${theme.border}`,
-        zIndex: 55,
-      }}
-    >
-      <div style={{ padding: '6px 14px', display: 'flex' }}>
-        <button onClick={onEndTurn} style={bottomBarBtn(true)}>
-          End Turn
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ActionBottomBar({
-  summary,
-  show,
-  confirmDisabled = false,
-  onConfirm,
-  onSkip,
-}: {
-  summary: ReactNode;
-  show: boolean;
-  /** Disable Confirm while the selected action has no legal/staged target.
-   *  Skip stays available so the player can always move past the action. */
-  confirmDisabled?: boolean;
-  onConfirm: () => void;
-  /** Skip the underlying action entirely — sends player_skip_action and
-   *  clears any staged target. Replaces the previous "Cancel" (which only
-   *  un-staged the target). */
-  onSkip: () => void;
-}) {
-  if (!show) return null;
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        left: 0,
-        right: 0,
-        bottom: BOTTOM_BAR_HEIGHT,
-        background: theme.bgSolid,
-        borderTop: `1px solid ${theme.border}`,
-        zIndex: 55,
-      }}
-    >
-      {summary && (
-        <div
-          style={{
-            padding: '6px 14px',
-            color: theme.text,
-            fontSize: 14,
-            borderBottom: `1px solid ${theme.border}`,
-          }}
-        >
-          {summary}
-        </div>
-      )}
-      <div
-        style={{
-          padding: '6px 14px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-        }}
-      >
-        <button onClick={onSkip} style={bottomBarBtn(false)}>
-          Skip
-        </button>
-        <button
-          onClick={onConfirm}
-          disabled={confirmDisabled}
-          style={{
-            ...bottomBarBtn(true),
-            ...(confirmDisabled ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
-          }}
-        >
-          Confirm
-        </button>
-      </div>
-    </div>
-  );
 }
 
 /** Tracks which modifier draws have already been shown; pops a centered
@@ -1489,17 +1330,21 @@ function ActiveHalfPanel({
   slotKind,
   you,
   selectedActionId,
+  character,
+  chargeTags,
+  onUseItem,
 }: {
   slot: HalfSlot;
   slotKind: 'top' | 'bottom';
   you: PrivatePlayerState | null;
   selectedActionId: string | null;
+  character: CharacterInstance | null;
+  /** Armed attack-rider tags (e.g. "Poison") shown on the active attack row. */
+  chargeTags: string[];
+  onUseItem: (action: PendingAction) => void;
 }) {
   const card = slot.cardId && you ? you.hand.find((c) => c.id === slot.cardId) ?? null : null;
   const firstPendingId = slot.actions.find((a) => !a.done)?.id ?? null;
-  const cardLabel = slot.useBasic
-    ? `Basic ${slotKind === 'top' ? 'Attack 2' : 'Move 2'}`
-    : card?.name ?? '?';
   // Persistent halves with deferred-only steps (e.g. Warding Strength bottom:
   // Shield + Retaliate that fire on attack-targets-self) produce an empty
   // engage queue. Show an explicit Confirm/Skip panel instead of the empty
@@ -1515,22 +1360,26 @@ function ActiveHalfPanel({
 
   return (
     <div style={{ marginBottom: 10 }}>
-      <p style={{ margin: '0 0 6px', fontSize: 13, color: theme.text }}>
-        Performing <strong>{slotKind}</strong>: {cardLabel}
-      </p>
       {isPersistentEmpty && halfData ? (
         <PersistentConfirmPanel half={halfData} />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
-          {slot.actions.map((a) => (
-            <ActionRow
-              key={a.id}
-              action={a}
-              slotKind={slotKind}
-              isNext={a.id === firstPendingId}
-              selected={selectedActionId === a.id}
-            />
-          ))}
+          {slot.actions.map((a) => {
+            const isNext = a.id === firstPendingId;
+            const showUseItem =
+              isNext && !!character && actionHasRelevantItem(character, a);
+            return (
+              <ActionRow
+                key={a.id}
+                action={a}
+                slotKind={slotKind}
+                isNext={isNext}
+                selected={selectedActionId === a.id}
+                chargeTags={chargeTags}
+                onUseItem={showUseItem ? () => onUseItem(a) : null}
+              />
+            );
+          })}
           <InfuseRows half={halfData} />
         </div>
       )}
@@ -1619,53 +1468,29 @@ function PersistentConfirmPanel({ half }: { half: CardHalf }) {
   );
 }
 
-/** Bottom-pinned Confirm/Skip bar for a persistent-tracked half whose engage
- *  queue is empty. Mirrors ActionBottomBar so the gesture matches attack/move
- *  confirmation. Skip sends player_finish_half (no credit → card discards). */
-function PersistentConfirmBar({
-  onConfirm,
-  onSkip,
-}: {
-  onConfirm: () => void;
-  onSkip: () => void;
-}) {
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        left: 0,
-        right: 0,
-        bottom: BOTTOM_BAR_HEIGHT,
-        background: theme.bgSolid,
-        borderTop: `1px solid ${theme.border}`,
-        zIndex: 55,
-      }}
-    >
-      <div style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button onClick={onSkip} style={bottomBarBtn(false)}>
-          Skip
-        </button>
-        <button onClick={onConfirm} style={bottomBarBtn(true)}>
-          Confirm
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function ActionRow({
   action,
   slotKind,
   isNext,
   selected,
+  chargeTags,
+  onUseItem,
 }: {
   action: PendingAction;
   slotKind: 'top' | 'bottom';
   isNext: boolean;
   selected: boolean;
+  /** Armed attack-rider tags (e.g. "Poison"), shown on the active attack row. */
+  chargeTags: string[];
+  /** Opens the item modal anchored to this action. Null hides the button. */
+  onUseItem: (() => void) | null;
 }) {
   const sock = useSocket();
   const label = actionLabel(action);
+  const isAttack = action.type === 'attack' || action.type === 'attack-aoe';
+  // Armed riders (Poison Dagger, Scouting Lens, Simple Bow) attach to the next
+  // attack you perform — surface them on the active attack row as "+ Poison".
+  const rowTags = isNext && isAttack ? chargeTags : [];
   // The Perform/Skip controls live in the fixed bottom bar (ActionBottomBar)
   // for every action type; the row itself only shows the label, its done
   // checkmark, and any element-consume offers.
@@ -1699,8 +1524,16 @@ function ActionRow({
         }}
       >
         <span style={{ flex: 1, fontSize: 13 }}>
-          {label} {action.done ? '✓' : ''}
+          {label}
+          {rowTags.map((t) => (
+            <span key={t} style={{ color: theme.accent, fontWeight: 600 }}>
+              {' '}
+              + {t}
+            </span>
+          ))}
+          {action.done ? ' ✓' : ''}
         </span>
+        {onUseItem && <UseItemButton onClick={onUseItem} />}
       </div>
       {showButtons && consumeOffers.length > 0 && !consumesLocked && (
         <div
@@ -1888,7 +1721,7 @@ function AttackTargetSummary({
         {riders.map((c) => (
           <StatusChip key={`rider-${c}`} icon={c as IconKey} label={cap(c)} tone="applied" />
         ))}
-        {targetPoisoned && <StatusChip icon="poison" label="+1 dmg, cleanses poison" tone="applied" />}
+        {targetPoisoned && <StatusChip icon="poison" label="+1 dmg (poisoned)" tone="applied" />}
         {stateChips}
       </div>
       <div style={{ fontSize: 11, color: theme.muted }}>Before the attack-modifier draw.</div>
@@ -2003,7 +1836,9 @@ function BoardForTurn({
   onPickForcedMoveTarget,
   pendingTarget,
   onStageTarget,
-  onConsumeSelection,
+  movePath,
+  setMovePath,
+  isImmobilized,
   moveAnim,
   onMoveAnimDone,
 }: {
@@ -2015,22 +1850,16 @@ function BoardForTurn({
   onPickForcedMoveTarget: (unitId: string) => void;
   pendingTarget: PendingTarget | null;
   onStageTarget: (target: PendingTarget | null) => void;
-  onConsumeSelection: () => void;
+  /** Move preview path (owned by ActionDriver so the move's Confirm/Skip can
+   *  live in the shared sticky bottom area). This component mutates it as the
+   *  player traces a route on the board. */
+  movePath: Hex[];
+  setMovePath: Dispatch<SetStateAction<Hex[]>>;
+  isImmobilized: boolean;
   moveAnim: { unitId: string; steps: Hex[] } | null;
   onMoveAnimDone: () => void;
 }) {
   const sock = useSocket();
-
-  /** Preview path for a Move action — ordered hexes excluding start. Empty
-      while the player hasn't picked a destination yet; cleared on cancel,
-      confirm, or when the selected action changes. */
-  const [movePath, setMovePath] = useState<Hex[]>([]);
-  // Reset preview when the action being driven changes.
-  const moveActionSig =
-    selectedAction?.type === 'move' ? `${selectedAction.id}|${selectedAction.amount}` : null;
-  useEffect(() => {
-    setMovePath([]);
-  }, [moveActionSig]);
 
   const forcedMoveTarget = useMemo(
     () => (forcedMoveTargetId ? gameState.units.find((u) => u.id === forcedMoveTargetId) ?? null : null),
@@ -2044,15 +1873,27 @@ function BoardForTurn({
   const movePredicates = useMemo(() => {
     if (!myUnit) return null;
     const tilePassable = new Set<string>();
-    for (const t of gameState.tiles) if (t.kind !== 'wall') tilePassable.add(hexKey(t));
+    const difficult = new Set<string>();
+    for (const t of gameState.tiles) {
+      if (t.kind !== 'wall') tilePassable.add(hexKey(t));
+      if (t.kind === 'difficult') difficult.add(hexKey(t));
+    }
     const occupied = new Set<string>();
+    const enemyOccupied = new Set<string>();
     for (const u of gameState.units) {
       if (u.id === myUnit.id) continue;
       occupied.add(hexKey(u.hex));
+      // A figure can move through its allies (same kind) but not its enemies.
+      if (u.kind !== myUnit.kind) enemyOccupied.add(hexKey(u.hex));
     }
+    // Jump traversal: only walls block. Ground traversal: walls + enemy figures
+    // block, but allies can be passed through. Neither can end on an occupied hex.
     const walkable = (h: Hex) => tilePassable.has(hexKey(h));
+    const walkableGround = (h: Hex) => tilePassable.has(hexKey(h)) && !enemyOccupied.has(hexKey(h));
     const canEnd = (h: Hex) => tilePassable.has(hexKey(h)) && !occupied.has(hexKey(h));
-    return { walkable, canEnd };
+    // Difficult terrain costs 2 movement to enter; everything else costs 1.
+    const enterCost = (h: Hex) => (difficult.has(hexKey(h)) ? 2 : 1);
+    return { walkable, walkableGround, canEnd, enterCost };
   }, [gameState.tiles, gameState.units, myUnit]);
 
 
@@ -2064,7 +1905,13 @@ function BoardForTurn({
       if (myUnit.conditions.some((c) => c.kind === 'immobilize')) return new Set<string>();
       const reach = selectedAction.jump
         ? bfsReachableJump(myUnit.hex, selectedAction.amount, movePredicates.walkable, movePredicates.canEnd)
-        : bfsReachable(myUnit.hex, selectedAction.amount, movePredicates.canEnd);
+        : bfsReachable(
+            myUnit.hex,
+            selectedAction.amount,
+            movePredicates.walkableGround,
+            movePredicates.canEnd,
+            movePredicates.enterCost,
+          );
       reach.delete(hexKey(myUnit.hex));
       return new Set(reach.keys());
     }
@@ -2148,7 +1995,9 @@ function BoardForTurn({
   const targetableUnitIds = useMemo(() => {
     if (!myUnit || !selectedAction) return [];
     if (selectedAction.type === 'attack') {
-      return gameState.units.filter((u) => inRangeWithLOS(selectedAction, u)).map((u) => u.id);
+      // A multi-target attack can't hit the same enemy twice — already-hit
+      // enemies are excluded by attackableEnemyIds.
+      return attackableEnemyIds(gameState, myUnit, selectedAction);
     }
     if ((selectedAction.type === 'push' || selectedAction.type === 'pull') && !forcedMoveTargetId) {
       return gameState.units.filter((u) => inRangeWithLOS(selectedAction, u)).map((u) => u.id);
@@ -2164,7 +2013,10 @@ function BoardForTurn({
     if (!myUnit || !movePredicates || selectedAction?.type !== 'move') return;
     const budget = selectedAction.amount;
     const isJump = selectedAction.jump === true;
-    const { walkable, canEnd } = movePredicates;
+    const { walkable, walkableGround, canEnd, enterCost } = movePredicates;
+    // Traversal predicate for this move: a jump only cares about walls; a walk
+    // can pass through allies but not enemies.
+    const traverse = isJump ? walkable : walkableGround;
     // Tap on own hex → clear preview.
     if (hexEqual(h, myUnit.hex)) {
       setMovePath([]);
@@ -2176,48 +2028,22 @@ function BoardForTurn({
       // Backtrack: hex already in path → truncate to it.
       const idx = current.findIndex((p) => hexEqual(p, h));
       if (idx >= 0) return current.slice(0, idx + 1);
-      // Extend by one step if hex is adjacent to current end and walkable.
-      // Path display permits passing through enemies on a jump; the dest
-      // is validated at confirm-time.
+      // Extend by one step if hex is adjacent to current end and traversable.
+      // The destination is validated at confirm-time. A jump ignores difficult
+      // terrain, so its cost is the hex count; a walk pays 2 to enter difficult.
       const tail = last ?? myUnit.hex;
-      if (hexDistance(tail, h) === 1 && walkable(h) && current.length + 1 <= budget) {
-        return [...current, h];
+      const candidate = [...current, h];
+      const candidateCost = isJump ? candidate.length : pathCost(candidate, enterCost);
+      if (hexDistance(tail, h) === 1 && traverse(h) && candidateCost <= budget) {
+        return candidate;
       }
       // Otherwise (initial tap / fast drag): snap to shortest path.
       const path = isJump
         ? bfsPathJump(myUnit.hex, h, budget, walkable, canEnd)
-        : bfsPath(myUnit.hex, h, budget, canEnd);
+        : bfsPath(myUnit.hex, h, budget, walkableGround, canEnd, enterCost);
       if (!path) return current;
       return path.slice(1);
     });
-  };
-
-  const confirmMove = () => {
-    if (!activeSlotKind || selectedAction?.type !== 'move') return;
-    const dest = movePath[movePath.length - 1];
-    if (!dest) return;
-    sock.send({
-      type: 'player_perform_action',
-      slot: activeSlotKind,
-      actionId: selectedAction.id,
-      target: { hex: dest, path: movePath },
-    });
-    setMovePath([]);
-    onConsumeSelection();
-  };
-
-  const skipMove = () => {
-    // Skip the underlying Move action entirely (replaces the old "Clear",
-    // which only un-staged the path while keeping you in the action).
-    if (selectedAction?.type === 'move' && activeSlotKind) {
-      sock.send({
-        type: 'player_skip_action',
-        slot: activeSlotKind,
-        actionId: selectedAction.id,
-      });
-    }
-    setMovePath([]);
-    onConsumeSelection();
   };
 
   const handleTapHex = (h: Hex) => {
@@ -2288,9 +2114,8 @@ function BoardForTurn({
     selectedAction?.type === 'push' || selectedAction?.type === 'pull';
   const isAoeMode = selectedAction?.type === 'attack-aoe';
   // An immobilized figure can't move, so don't let the player trace a path the
-  // server will only reject. The Move bar's Confirm is disabled and relabeled
-  // "Immobilized"; the player skips the move instead.
-  const isImmobilized = !!myUnit?.conditions.some((c) => c.kind === 'immobilize');
+  // server will only reject (`isImmobilized` arrives as a prop). The move's
+  // Confirm is disabled and relabeled "Immobilized"; the player skips instead.
   const canTapHex =
     (isForcedMove && !!forcedMoveTargetId) ||
     isAoeMode ||
@@ -2362,6 +2187,7 @@ function BoardForTurn({
         tiles={gameState.tiles}
         units={gameState.units}
         moneyTokens={gameState.moneyTokens}
+        doors={gameState.doors}
         size={22}
         maxWidthPx={500}
         activeUnitIds={myUnit ? [myUnit.id] : []}
@@ -2385,45 +2211,6 @@ function BoardForTurn({
         onMoveAnimDone={onMoveAnimDone}
         monsterTurnAnim={gameState.monsterTurnAnim}
       />
-      {isMoveMode && (
-        <div
-          style={{
-            position: 'fixed',
-            left: 0,
-            right: 0,
-            bottom: BOTTOM_BAR_HEIGHT,
-            background: theme.bgSolid,
-            borderTop: `1px solid ${theme.border}`,
-            padding: '6px 14px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            zIndex: 55,
-          }}
-        >
-          <button
-            onClick={skipMove}
-            style={{ ...btn.ghost(), flex: 1, padding: '6px 14px', fontSize: 13 }}
-          >
-            Skip
-          </button>
-          <button
-            onClick={confirmMove}
-            disabled={isImmobilized || moveStepsUsed === 0}
-            style={{
-              ...btn.primary(false),
-              flex: 1,
-              padding: '6px 18px',
-              fontSize: 14,
-              ...(isImmobilized || moveStepsUsed === 0
-                ? { opacity: 0.4, cursor: 'not-allowed' }
-                : {}),
-            }}
-          >
-            {isImmobilized ? 'Immobilized' : 'Confirm'}
-          </button>
-        </div>
-      )}
     </>
   );
 }

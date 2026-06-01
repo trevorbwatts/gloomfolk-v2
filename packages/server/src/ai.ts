@@ -8,7 +8,6 @@ import type {
 } from '@gloomfolk/shared';
 import {
   hexDistance,
-  hexEqual,
   hexKey,
   hexNeighbors,
 } from '@gloomfolk/shared';
@@ -122,18 +121,21 @@ export function determineFocus(
   board: BoardView,
   enemyInitiative: Map<string, number>,
 ): FocusResult | null {
+  // A monster can move through its allies (same kind) but not its enemies, and
+  // can't stop on any occupied hex.
+  const occupied = new Set<string>();
+  const enemyOccupied = new Set<string>();
+  for (const u of board.units) {
+    if (u.id === monster.id) continue;
+    occupied.add(hexKey(u.hex));
+    if (u.kind !== monster.kind) enemyOccupied.add(hexKey(u.hex));
+  }
   const passable = (h: Hex) => {
-    // Walls block
+    // Walls block; enemy figures block; allies can be passed through.
     const tile = board.tiles.find((t) => t.q === h.q && t.r === h.r);
     if (!tile) return false;
     if (tile.kind === 'wall') return false;
-    // Other units block (we won't end on them; we also don't pass through them
-    // for v1 — Gloomhaven allows passing through allies, but monster has no allies on the player board).
-    for (const u of board.units) {
-      if (u.id === monster.id) continue;
-      if (hexEqual(u.hex, h)) return false;
-    }
-    return true;
+    return !enemyOccupied.has(hexKey(h));
   };
 
   const { dist, prev } = bfsAll(monster.hex, passable);
@@ -148,16 +150,19 @@ export function determineFocus(
     // Candidate attack hexes for this enemy.
     let bestForE: { hex: Hex; cost: number } | null = null;
     if (attackRange <= 1) {
-      // Melee — adjacent hexes to the enemy.
+      // Melee — adjacent hexes to the enemy. Skip hexes occupied by another
+      // figure (passable to move through, but not to stand on).
       for (const adj of hexNeighbors(e.hex)) {
         const k = hexKey(adj);
+        if (occupied.has(k)) continue;
         const d = dist.get(k);
         if (d === undefined) continue;
         if (!bestForE || d < bestForE.cost) bestForE = { hex: adj, cost: d };
       }
     } else {
-      // Ranged — any reachable hex within range of enemy (no LOS).
+      // Ranged — any reachable, unoccupied hex within range of enemy (no LOS).
       for (const [k, d] of dist) {
+        if (occupied.has(k)) continue;
         const [qs, rs] = k.split(',');
         const h = { q: Number(qs), r: Number(rs) };
         if (hexDistance(h, e.hex) > attackRange) continue;
@@ -305,15 +310,21 @@ export function determineMovement(
 ): MovementPlan {
   const tileAt = new Map<string, Tile>();
   for (const t of board.tiles) tileAt.set(hexKey({ q: t.q, r: t.r }), t);
+  // A figure can move *through* its allies (same kind) but not its enemies, and
+  // can't *stop* on any occupied hex. `passable` governs traversal; `occupied`
+  // marks hexes that are illegal destinations.
+  const occupied = new Set<string>();
+  const enemyOccupied = new Set<string>();
+  for (const u of board.units) {
+    if (u.id === monster.id) continue;
+    occupied.add(hexKey(u.hex));
+    if (u.kind !== monster.kind) enemyOccupied.add(hexKey(u.hex));
+  }
   const passable = (h: Hex) => {
     const tile = tileAt.get(hexKey(h));
     if (!tile) return false;
     if (tile.kind === 'wall') return false;
-    for (const u of board.units) {
-      if (u.id === monster.id) continue;
-      if (hexEqual(u.hex, h)) return false;
-    }
-    return true;
+    return !enemyOccupied.has(hexKey(h));
   };
   const enterCost = (h: Hex) => (tileAt.get(hexKey(h))?.kind === 'difficult' ? 2 : 1);
   const isNegative = (h: Hex) => tileAt.get(hexKey(h))?.kind === 'hazard';
@@ -325,6 +336,7 @@ export function determineMovement(
   const attackers: Cand[] = [];
   for (const [k, v] of search) {
     if (v.cost > budget) continue;
+    if (occupied.has(k)) continue; // can pass through allies but not stop on them
     const [qs, rs] = k.split(',');
     const hex = { q: Number(qs), r: Number(rs) };
     const ev = evaluateFrom(hex);
@@ -356,6 +368,7 @@ export function determineMovement(
   let best = { hex: monster.hex, cost: 0, neg: 0, d: hexDistance(monster.hex, focus.enemy.hex) };
   for (const [k, v] of search) {
     if (v.cost > budget) continue;
+    if (occupied.has(k)) continue; // can pass through allies but not stop on them
     const [qs, rs] = k.split(',');
     const hex = { q: Number(qs), r: Number(rs) };
     const d = hexDistance(hex, focus.enemy.hex);

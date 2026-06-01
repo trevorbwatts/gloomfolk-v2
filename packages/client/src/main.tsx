@@ -5,6 +5,7 @@ import { useSocketBootstrap } from './net/useSocket.js';
 import { HostScreen } from './host/HostScreen.js';
 import { PlayerScreen } from './player/PlayerScreen.js';
 import { BuilderScreen } from './builder/BuilderScreen.js';
+import { TilesScreen } from './builder/TilesScreen.js';
 
 function App() {
   useSocketBootstrap();
@@ -14,6 +15,7 @@ function App() {
         <Route path="/" element={<HostScreen />} />
         <Route path="/p" element={<PlayerScreen />} />
         <Route path="/builder" element={<BuilderScreen />} />
+        <Route path="/builder/tiles" element={<TilesScreen />} />
       </Routes>
     </BrowserRouter>
   );

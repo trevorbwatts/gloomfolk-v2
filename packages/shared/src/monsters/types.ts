@@ -20,6 +20,7 @@ import type {
   ElementSelector,
   MoveTrait,
   NegativeCondition,
+  PositiveCondition,
 } from '../cards/types.js';
 
 export type MonsterRank = 'normal' | 'elite' | 'named' | 'boss';
@@ -141,6 +142,24 @@ export type MonsterAbilityStep =
       readonly kind: 'consume';
       readonly element: ElementSelector;
       readonly effect: MonsterConsumeEffect;
+    }
+  | {
+      /** Gain Shield N for the turn (granted by the card, on top of any
+          persistent shield on the stat block). */
+      readonly kind: 'shield';
+      readonly amount: number;
+    }
+  | {
+      /** Gain Retaliate N (with optional range) for the turn. */
+      readonly kind: 'retaliate';
+      readonly amount: number;
+      readonly range?: number;
+    }
+  | {
+      /** Apply a positive condition to the acting monster itself
+          (e.g. Strengthen self). */
+      readonly kind: 'grant-condition';
+      readonly condition: PositiveCondition;
     };
 
 /** A bonus a monster set picks up by consuming an element at block start. */

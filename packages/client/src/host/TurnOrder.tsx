@@ -7,7 +7,14 @@ import type {
   TurnOrderEntry,
   Unit,
 } from '@gloomfolk/shared';
-import { archerDeck, banditArcher, banditScout, scoutDeck } from '@gloomfolk/shared';
+import {
+  archerDeck,
+  banditArcher,
+  banditScout,
+  cityGuard,
+  guardDeck,
+  scoutDeck,
+} from '@gloomfolk/shared';
 import { Fragment, type ReactNode } from 'react';
 import { classAvatarUrl, monsterAvatarUrl, onAvatarError } from '../avatars.js';
 import { theme } from '../theme.js';
@@ -15,21 +22,24 @@ import { theme } from '../theme.js';
 const SET_AVATAR_DEFID: Record<string, string> = {
   archer: 'bandit-archer',
   scout: 'bandit-scout',
+  guard: 'city-guard',
 };
 
 const SET_NAMES: Record<string, string> = {
   archer: 'Bandit Archers',
   scout: 'Bandit Scouts',
+  guard: 'City Guards',
 };
 
 const STAT_CARDS_BY_DEFID: Record<string, MonsterStatCard> = {
   'bandit-archer': banditArcher,
   'bandit-scout': banditScout,
+  'city-guard': cityGuard,
 };
 
 const CARD_BY_ID: Map<string, MonsterAbilityCard> = (() => {
   const m = new Map<string, MonsterAbilityCard>();
-  for (const deck of [archerDeck, scoutDeck]) {
+  for (const deck of [archerDeck, scoutDeck, guardDeck]) {
     for (const c of deck.cards) m.set(c.id, c);
   }
   return m;
@@ -149,6 +159,12 @@ function renderStep(
             : `Shield ${eff.amount >= 0 ? `+${eff.amount}` : eff.amount}`;
       return `Consume ${step.element} → ${label}`;
     }
+    case 'shield':
+      return `Shield ${step.amount}`;
+    case 'retaliate':
+      return `Retaliate ${step.amount}${step.range != null ? ` (Range ${step.range})` : ''}`;
+    case 'grant-condition':
+      return `${step.condition} (self)`;
   }
 }
 

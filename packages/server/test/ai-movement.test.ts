@@ -187,3 +187,31 @@ describe('determineMovement — terrain', () => {
     );
   });
 });
+
+describe('determineMovement — moving through allies', () => {
+  // A single-file corridor along r=0 (q in [0..3]); everything off it is void,
+  // so the only route is straight down the row.
+  const corridor: Tile[] = [];
+  for (let q = 0; q <= 3; q++) corridor.push({ q, r: 0, kind: 'floor' });
+
+  it('passes through an ally monster to reach the only attack hex', () => {
+    const focus = unit('focus', 'player', { q: 0, r: 0 });
+    const ally = unit('ally', 'monster', { q: 2, r: 0 }); // blocks the corridor
+    const monster = unit('m', 'monster', { q: 3, r: 0 });
+    const board = { tiles: corridor, units: [monster, ally, focus] };
+    const focusResult = determineFocus(monster, /*range*/ 1, board, new Map());
+    assert.ok(focusResult, 'expected a focus');
+    const evaluateFrom = makeEvaluate(focus, [focus], /*range*/ 1, /*targets*/ 1);
+    const result = determineMovement(monster, focusResult, 1, /*budget*/ 2, board, evaluateFrom);
+
+    // (1,0) is the only hex adjacent to the focus; reaching it means walking
+    // straight through the ally at (2,0).
+    assert.deepEqual(result.destination, { q: 1, r: 0 }, 'must reach the attack hex');
+    assert.ok(
+      result.path.some((h) => h.q === 2 && h.r === 0),
+      'path runs through the ally hex',
+    );
+    assert.equal(result.pointsSpent, 2, 'two normal steps, ally not a wall');
+    assert.notDeepEqual(result.destination, { q: 2, r: 0 }, 'never stops on the ally');
+  });
+});

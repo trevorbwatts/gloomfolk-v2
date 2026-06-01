@@ -13,7 +13,7 @@ import type {
 import type { MonsterRank } from './monsters/types.js';
 import type { Hex } from './hex.js';
 import type { ModifierCard, ModifierCardInstance } from './modifiers/index.js';
-import type { Tile } from './scenarios/types.js';
+import type { NarrativeEntry, Tile } from './scenarios/types.js';
 
 export type Role = 'host' | 'player';
 
@@ -175,6 +175,10 @@ export interface LobbyPlayer {
   connected: boolean;
   /** True if this player has locked in a card selection (or long rest) for the current round. */
   submitted: boolean;
+  /** During the `placement` phase: true once this player has placed their
+   *  figure on a starting hex and tapped Ready. The host can't begin the
+   *  scenario until every connected character-player is placed and ready. */
+  placementReady: boolean;
 }
 
 export type CardSelection =
@@ -205,7 +209,7 @@ export type TurnOrderEntry =
 export interface PublicGameState {
   campaignId: string;
   campaignName: string;
-  phase: 'lobby' | 'card_select' | 'turn_resolution' | 'victory' | 'defeat';
+  phase: 'lobby' | 'placement' | 'card_select' | 'turn_resolution' | 'victory' | 'defeat';
   round: number;
   characters: CharacterInstance[];
   players: LobbyPlayer[];
@@ -266,6 +270,40 @@ export interface PublicGameState {
   /** Revealed battle-goal outcomes, populated only once the scenario ends
    *  (victory or defeat). Null/empty during play, since goals are secret. */
   battleGoalResults: BattleGoalScenarioResult[] | null;
+  /** Story text currently demanding the players' attention (scenario intro,
+   *  a door's section text, victory text). Shown as a modal everyone dismisses.
+   *  Null when nothing is queued. */
+  narrative: NarrativeEntry | null;
+  /** Doors the party can open right now (unlock condition met, not yet opened,
+   *  and their near room is visible). Drives the "Open door" affordance. */
+  openableDoors: OpenableDoor[];
+  /** Visible, unopened doors on the map (with their token numbers), so the
+   *  board can draw a door icon + numbered token on each. */
+  doors: DoorView[];
+  /** Available starting hexes for the `placement` phase — every player-start
+   *  overlay in the revealed starting room. Players each claim a distinct one
+   *  before play begins. Empty outside the placement phase. Occupancy is
+   *  derived from player units' hexes. */
+  startingPositions: Hex[];
+}
+
+/** A door the party may currently open. */
+export interface OpenableDoor {
+  id: string;
+  hex: Hex;
+}
+
+/** A visible, not-yet-opened door on the map — drives the door icon + numbered
+ *  token the board draws on its hex. A player opens it by moving onto the hex
+ *  once `openable` is true. */
+export interface DoorView {
+  id: string;
+  hex: Hex;
+  /** 1-based token number shown on the door (①, ②, …). */
+  number: number;
+  /** True once its unlock condition is met (e.g. its room is cleared) — the
+   *  board highlights it to invite a player to step onto it. */
+  openable: boolean;
 }
 
 /** Per-step view-state for the currently-resolving monster group turn.
@@ -418,6 +456,10 @@ export type PendingAction =
       /** Number of enemies actually hit by this attack so far. Drives
        *  per-enemy-targeted XP triggers (whirlwind, trample, etc.). */
       hitsLanded: number;
+      /** Ids of enemies already hit by this multi-target attack. Each shot of
+       *  a `Target N` ability must land on a distinct enemy, so these are
+       *  excluded from the remaining shots' valid targets. */
+      hitTargetIds: readonly string[];
       /** Element-rider opt-ins the player may toggle before targeting.
        *  Empty when the printed step has no riders, or all rider elements
        *  are unavailable / already consumed this turn. Locked once the
@@ -627,18 +669,16 @@ export interface CurrentTurn {
   /** True when a used item (e.g. Winged Shoes) has granted Jump to all of
    *  this turn's move abilities. Applied to move actions as they are built. */
   jumpAllMoves: boolean;
-  /** Set when a used item (e.g. Scouting Lens) has designated a single target
-   *  unit to gain Pierce on one attack against it this turn. Cleared once that
-   *  pierce is applied to a resolving attack. */
-  pierceCharge: { unitId: string; amount: number } | null;
-  /** Set when a used item (e.g. Poison Dagger) has designated a single enemy
-   *  to gain Poison on one melee attack against it this turn. Cleared once
-   *  that attack resolves. */
-  poisonCharge: { unitId: string } | null;
-  /** Set when a used item (e.g. Simple Bow) has designated a single target so
-   *  one ranged attack against it draws with Advantage. Cleared once that
-   *  attack resolves. */
-  advantageCharge: { unitId: string } | null;
+  /** Armed when a used item (e.g. Scouting Lens) grants Pierce to the next
+   *  attack you perform this turn. Rides along with whatever target that
+   *  attack hits; cleared once it's applied to a resolving attack. */
+  pierceCharge: { amount: number } | null;
+  /** Armed when a used item (e.g. Poison Dagger) grants Poison to the next
+   *  melee attack you perform this turn. Cleared once that attack resolves. */
+  poisonCharge: boolean;
+  /** Armed when a used item (e.g. Simple Bow) grants Advantage to the next
+   *  ranged attack you perform this turn. Cleared once that attack resolves. */
+  advantageCharge: boolean;
   /** True once this turn the actor has performed an action from a card half
    *  with the Lost disposition. Gates items like Focusing Rod. */
   performedLostAction: boolean;
@@ -743,7 +783,17 @@ export type ClientToServer =
     }
   /** Answer an outstanding pendingReactiveItem prompt during a monster attack. */
   | { type: 'player_respond_reactive_item'; spend: boolean }
-  | { type: 'host_start_scenario'; scenarioId: string }
+  /** Start a scenario. `level` (0–7) overrides the recommended scenario level
+   *  chosen by the host in the lobby; omitted falls back to the recommended
+   *  value derived from the party's character levels. */
+  | { type: 'host_start_scenario'; scenarioId: string; level?: number }
+  /** Placement phase: claim (or move to) a starting hex. Allowed only while the
+   *  player hasn't tapped Ready. */
+  | { type: 'player_place'; hex: Hex }
+  /** Placement phase: lock in (or unlock) this player's chosen starting hex. */
+  | { type: 'player_set_placement_ready'; ready: boolean }
+  /** Placement phase: host begins play once everyone is placed and ready. */
+  | { type: 'host_begin_scenario' }
   /** Keep one of the three dealt battle goals for this scenario. */
   | { type: 'player_choose_battle_goal'; goalId: string }
   | { type: 'player_select_cards'; leadingId: string; secondId: string }
@@ -756,6 +806,8 @@ export type ClientToServer =
   | { type: 'player_short_rest_accept' }
   | { type: 'player_unsubmit' }
   | { type: 'end_turn' }
+  | { type: 'player_open_door'; doorId: string }
+  | { type: 'dismiss_narrative' }
   | { type: 'host_skip_monster_anim' }
   | {
       type: 'player_perform_action';

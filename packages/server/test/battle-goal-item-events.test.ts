@@ -86,7 +86,7 @@ describe('battle goals — Poison Dagger emits condition_applied (Tormentor)', (
         currentTurn: {
           topSlot: unknown;
           bottomSlot: { status: string };
-          poisonCharge: unknown;
+          poisonCharge: boolean;
         };
       }
     ).currentTurn;
@@ -105,6 +105,7 @@ describe('battle goals — Poison Dagger emits condition_applied (Tormentor)', (
           targets: 1,
           targetsRemaining: 1,
           hitsLanded: 0,
+          hitTargetIds: [],
           consumeOffers: [],
           acceptedConsumeIndices: [],
           lockedRiderAttack: 0,
@@ -116,7 +117,7 @@ describe('battle goals — Poison Dagger emits condition_applied (Tormentor)', (
     };
     // Skip the auto-finishHalf path: leave the other slot already done.
     ct.bottomSlot.status = 'done';
-    ct.poisonCharge = { unitId: 'mon' };
+    ct.poisonCharge = true;
 
     const res = fx.room.performAction(fx.player.playerId, 'top', 'a1', { unitId: 'mon' });
     assert.ok(res.ok, JSON.stringify(res));

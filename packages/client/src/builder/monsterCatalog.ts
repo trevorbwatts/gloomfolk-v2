@@ -15,6 +15,7 @@ export interface MonsterCatalogEntry {
 export const MONSTER_CATALOG: MonsterCatalogEntry[] = [
   { id: 'bandit-archer', name: 'Bandit Archer', short: 'BA' },
   { id: 'bandit-scout',  name: 'Bandit Scout',  short: 'BS' },
+  { id: 'city-guard',    name: 'City Guard',    short: 'CG' },
 ];
 
 export function monsterEntry(id: string): MonsterCatalogEntry | undefined {

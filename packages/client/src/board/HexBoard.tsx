@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Hex, MoneyToken, MonsterTurnAnim, Tile, Unit } from '@gloomfolk/shared';
+import type { DoorView, Hex, MoneyToken, MonsterTurnAnim, Tile, Unit } from '@gloomfolk/shared';
 import { GameIcon } from '../icons.js';
 
 const SQRT3 = Math.sqrt(3);
@@ -37,6 +37,9 @@ export interface HexBoardProps {
   units: Unit[];
   /** Money tokens dropped on the map, awaiting pickup. */
   moneyTokens?: MoneyToken[];
+  /** Visible, unopened doors — drawn as a door icon + numbered token on their
+   *  hex. An `openable` door also gets a pulsing highlight. */
+  doors?: DoorView[];
   size?: number;
   maxWidthPx?: number;
   activeUnitIds?: string[];
@@ -81,6 +84,7 @@ export function HexBoard({
   tiles,
   units,
   moneyTokens = [],
+  doors = [],
   size = 40,
   maxWidthPx = 900,
   activeUnitIds = [],
@@ -319,7 +323,9 @@ export function HexBoard({
       viewBox={`${minX - pad} ${minY - pad} ${vbW} ${vbH}`}
       style={{
         width: '100%',
-        maxWidth: maxWidthPx,
+        // A non-finite cap (e.g. Infinity) means "fill the container" — leave
+        // maxWidth unset so the board can span its whole column.
+        ...(Number.isFinite(maxWidthPx) ? { maxWidth: maxWidthPx } : {}),
         background: '#0e0e10',
         borderRadius: 8,
         touchAction: onHexEnter ? 'none' : 'manipulation',
@@ -392,6 +398,69 @@ export function HexBoard({
           );
         })}
       </g>
+      {doors.length > 0 && (
+        <g style={{ pointerEvents: 'none' }}>
+          {doors.map((d) => {
+            const { x, y } = axialToPx(d.hex.q, d.hex.r, size);
+            const dw = size * 0.5;
+            const dh = size * 0.84;
+            const top = y - dh / 2;
+            return (
+              <g key={`door-${d.id}`}>
+                {d.openable && (
+                  <circle cx={x} cy={y} r={size * 0.82} fill="none" stroke="#a4d96c" strokeWidth={3}>
+                    <animate attributeName="opacity" values="0.25;1;0.25" dur="1.4s" repeatCount="indefinite" />
+                  </circle>
+                )}
+                {/* Door slab */}
+                <rect
+                  x={x - dw / 2}
+                  y={top}
+                  width={dw}
+                  height={dh}
+                  rx={dw * 0.16}
+                  fill="#5b4427"
+                  stroke="#caa86a"
+                  strokeWidth={2}
+                />
+                {/* Inset panel + knob */}
+                <rect
+                  x={x - dw / 2 + dw * 0.16}
+                  y={top + dh * 0.1}
+                  width={dw * 0.68}
+                  height={dh * 0.8}
+                  rx={dw * 0.1}
+                  fill="none"
+                  stroke="#caa86a"
+                  strokeWidth={1}
+                  opacity={0.55}
+                />
+                <circle cx={x + dw * 0.24} cy={y} r={size * 0.05} fill="#caa86a" />
+                {/* Numbered token (corner badge, matching the standee number) */}
+                <circle
+                  cx={x + size * 0.46}
+                  cy={y - size * 0.46}
+                  r={size * 0.3}
+                  fill="#1b1b1b"
+                  stroke="#caa86a"
+                  strokeWidth={1.5}
+                />
+                <text
+                  x={x + size * 0.46}
+                  y={y - size * 0.46}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fontSize={size * 0.34}
+                  fontWeight={700}
+                  fill="#fff"
+                >
+                  {d.number}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      )}
       {pathHexes && pathHexes.length > 0 && (
         <g style={{ pointerEvents: 'none' }}>
           {pathHexes.map((h, i) => {
