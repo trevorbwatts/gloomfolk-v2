@@ -223,6 +223,7 @@ export function startTurn(
     activeSlot: null,
     lastModifierDraws: [],
     hexesMovedThisTurn: 0,
+    trapHexesEnteredThisMove: [],
     damageDealtThisTurn: 0,
     turnStartElementBoard: freshElementBoard(),
     pendingInfusions: [],

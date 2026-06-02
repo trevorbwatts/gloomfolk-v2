@@ -1,7 +1,18 @@
 import type { Hex } from '../hex.js';
 import type { MonsterRank } from '../monsters/types.js';
 
-export type TileKind = 'floor' | 'wall' | 'difficult' | 'hazard' | 'door';
+export type TileKind =
+  | 'floor'
+  | 'wall'
+  | 'difficult'
+  | 'hazard'
+  | 'trap'
+  | 'door'
+  // Corridors and pressure plates are both "empty hexes" for movement (passable,
+  // 1 movement point, no trap spring). A corridor connects map tiles into one
+  // room; a pressure plate's trigger lives in the scenario's special rules.
+  | 'corridor'
+  | 'pressure-plate';
 
 export interface Tile {
   q: number;

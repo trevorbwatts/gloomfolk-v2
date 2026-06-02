@@ -33,6 +33,8 @@ export type OverlayKind =
   | 'treasure'
   | 'coin'
   | 'door'
+  | 'corridor'
+  | 'pressure-plate'
   | 'starting-position'
   | `token-${TokenLetter}`
   | `token-${TokenNumber}`;

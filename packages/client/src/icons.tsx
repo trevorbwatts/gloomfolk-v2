@@ -6,7 +6,6 @@ import {
   BowArrow,
   ChevronsRight,
   CircleDashed,
-  Coins,
   Cross,
   Droplet,
   Feather,
@@ -23,6 +22,7 @@ import {
   SportShoe,
   Sword,
   Target,
+  Upload,
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -60,7 +60,7 @@ const ICONS: Record<IconKey, LucideIcon> = {
   pull: ArrowLeftFromLine,
   range: BowArrow,
   target: Target,
-  loot: Coins,
+  loot: Upload,
   safeguard: ShieldCog,
   ward: ShieldHalf,
   invisible: CircleDashed,

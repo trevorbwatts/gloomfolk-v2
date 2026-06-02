@@ -9,7 +9,7 @@ import type {
   ElementSelector,
 } from '@gloomfolk/shared';
 import { Fragment } from 'react';
-import { Flame, Snowflake, Wind, Stone, SunMedium, Moon } from 'lucide-react';
+import { Flame, Snowflake, Wind, Stone, SunMedium, Moon, RotateCw, Infinity as InfinityIcon, Trash2, Import as ImportIcon } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { theme } from '../theme.js';
 import { GameIcon, type IconKey } from '../icons.js';
@@ -145,24 +145,56 @@ function finalPileOf(half: CardHalf): 'lost' | 'discard' {
   return half.finalPile ?? (d === 'persistent-round' ? 'discard' : 'lost');
 }
 
-function LostBadge({ children }: { children: React.ReactNode }) {
+function LostBadge() {
   return (
-    <span style={{ color: theme.bad, fontWeight: 700, opacity: 1 }}>{children}</span>
+    <span style={{ color: theme.bad, fontWeight: 700, opacity: 1 }}>
+      <Trash2
+        size={14}
+        strokeWidth={1.75}
+        aria-label="Lost"
+        style={{ verticalAlign: 'text-bottom' }}
+      />
+    </span>
+  );
+}
+
+function DiscardBadge() {
+  return (
+    <ImportIcon
+      size={14}
+      strokeWidth={1.75}
+      aria-label="Discard"
+      style={{ verticalAlign: 'text-bottom' }}
+    />
   );
 }
 
 function DispositionLabel({ half }: { half: CardHalf }) {
   const d = half.disposition;
-  if (d === 'discard') return <>Discard</>;
-  if (d === 'lost') return <LostBadge>Lost</LostBadge>;
+  if (d === 'discard') return <DiscardBadge />;
+  if (d === 'lost') return <LostBadge />;
   const finalPile = finalPileOf(half);
   const base =
-    d === 'persistent-round' ? 'Persistent Round' :
-    d === 'persistent-tracked' ? 'Persistent Tracked' :
+    d === 'persistent-round' ? (
+      <RotateCw
+        size={14}
+        strokeWidth={1.75}
+        aria-label="Persistent Round"
+        style={{ verticalAlign: 'text-bottom' }}
+      />
+    ) :
+    d === 'persistent-tracked' ? (
+      <InfinityIcon
+        size={14}
+        strokeWidth={1.75}
+        aria-label="Persistent Tracked"
+        style={{ verticalAlign: 'text-bottom' }}
+      />
+    ) :
     'Persistent Scenario';
   return (
     <>
-      {base} · {finalPile === 'lost' ? <LostBadge>Lost</LostBadge> : 'Discard'}
+      {base} · {finalPile === 'lost' ? <LostBadge /> : <DiscardBadge />}
     </>
   );
 }
@@ -205,15 +237,21 @@ type TargetCondBonusT = NonNullable<AttackModifiersT['targetConditionalBonuses']
 type TargetCondT = TargetCondBonusT['condition'];
 type CauseT = Extract<Step, { type: 'when' }>['cause'];
 
-function targetConditionText(c: TargetCondT): string {
+/** Condition worded as a clause for "Add … if {clause}" rider lines, matching
+ *  the printed card phrasing. An `all-of` reads as "both/all are true" — it
+ *  rides after the individual conditions it bundles (e.g. Sinister Opportunity),
+ *  so naming them again would be redundant. */
+function targetConditionClause(c: TargetCondT): string {
   switch (c.kind) {
-    case 'target-undamaged': return 'undamaged targets';
-    case 'target-adjacent-to-your-ally': return 'targets adjacent to one of your allies';
-    case 'target-isolated-from-allies': return 'isolated targets';
-    case 'all-of': return c.conditions.map(targetConditionText).join(' and ');
+    case 'target-undamaged': return 'the target is undamaged';
+    case 'target-adjacent-to-your-ally': return 'the target is adjacent to any of your allies';
+    case 'target-isolated-from-allies': return 'the target is adjacent to none of its allies';
+    case 'all-of': return c.conditions.length === 2 ? 'both are true' : 'all are true';
   }
 }
 
+/** Plain-text bonus list (no icons) — used for the element "Consume" effect
+ *  row, which has its own layout. */
 function bonusParts(r: {
   attackBonus?: number | string;
   pierce?: { amount: number };
@@ -229,25 +267,78 @@ function bonusParts(r: {
   return parts.join(', ');
 }
 
-function conditionRiderLine(r: ConditionRiderT): string {
-  return `If ${causeText(r.when)}: ${bonusParts(r)}`;
+/** Bonus list rendered with game icons, in printed-card phrasing
+ *  (e.g. "+2 [attack] and gain 1 XP"). */
+function bonusNodes(r: {
+  attackBonus?: number | string;
+  pierce?: { amount: number };
+  gainExp?: number;
+  advantage?: boolean;
+}): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  if (typeof r.attackBonus === 'number')
+    parts.push(<>+{r.attackBonus} <GameIcon kind="attack" /></>);
+  else if (r.attackBonus) parts.push(<>+X <GameIcon kind="attack" /></>);
+  if (r.pierce) parts.push(<>+{r.pierce.amount} <GameIcon kind="pierce" /> Pierce</>);
+  if (r.advantage) parts.push('Advantage');
+  if (r.gainExp) parts.push(`gain ${r.gainExp} XP`);
+  return parts;
 }
-function targetCondBonusLine(r: TargetCondBonusT): string {
-  return `Against ${targetConditionText(r.condition)}: ${bonusParts(r)}`;
+
+function conditionRiderLine(r: ConditionRiderT): React.ReactNode {
+  return <>Add {joinNodes(bonusNodes(r), ' and ')} if {causeText(r.when)}.</>;
+}
+
+/** Join clause nodes into one sentence: "a", "a and b", or "a, b, and c". */
+function joinClauses(nodes: readonly React.ReactNode[]): React.ReactNode {
+  if (nodes.length <= 1) return nodes[0] ?? null;
+  if (nodes.length === 2) return <>{nodes[0]} and {nodes[1]}</>;
+  return nodes.map((n, i) => (
+    <Fragment key={i}>
+      {i === 0 ? null : i === nodes.length - 1 ? ', and ' : ', '}
+      {n}
+    </Fragment>
+  ));
+}
+
+/** All of an attack's target-conditional bonuses as one printed sentence, e.g.
+ *  Sinister Opportunity: "Add +1 [atk] if the target is adjacent to any of your
+ *  allies, add +1 [atk] if the target is adjacent to none of its allies, and
+ *  gain advantage and +1 XP if both are true." A bonus that grants an
+ *  attack/pierce value reads "Add …"; one that only grants advantage/XP reads
+ *  "gain …". */
+function targetCondBonusesLine(bonuses: readonly TargetCondBonusT[]): React.ReactNode {
+  const clauses = bonuses.map((b, i) => {
+    const hasValue = typeof b.attackBonus === 'number' || !!b.pierce;
+    const parts: React.ReactNode[] = [];
+    if (typeof b.attackBonus === 'number') parts.push(<>+{b.attackBonus} <GameIcon kind="attack" /></>);
+    if (b.pierce) parts.push(<>+{b.pierce.amount} <GameIcon kind="pierce" /> Pierce</>);
+    if (b.advantage) parts.push('advantage');
+    if (b.gainExp) parts.push(hasValue ? `gain ${b.gainExp} XP` : `+${b.gainExp} XP`);
+    const verb = i === 0 ? (hasValue ? 'Add' : 'Gain') : hasValue ? 'add' : 'gain';
+    return (
+      <>
+        {verb} {joinNodes(parts, ' and ')} if {targetConditionClause(b.condition)}
+      </>
+    );
+  });
+  return <>{joinClauses(clauses)}.</>;
 }
 
 /** Non-element rider text (element riders surface in the chip block above
  *  with their own effect row, so they're excluded here to avoid duplication). */
-function attackRiderLines(mods: AttackModifiersT | undefined): string[] {
+function attackRiderLines(mods: AttackModifiersT | undefined): React.ReactNode[] {
   if (!mods) return [];
-  const lines: string[] = [];
+  const lines: React.ReactNode[] = [];
   for (const r of mods.conditionRiders ?? []) lines.push(conditionRiderLine(r));
-  for (const r of mods.targetConditionalBonuses ?? []) lines.push(targetCondBonusLine(r));
+  if (mods.targetConditionalBonuses && mods.targetConditionalBonuses.length > 0) {
+    lines.push(targetCondBonusesLine(mods.targetConditionalBonuses));
+  }
   return lines;
 }
 
-function stepExtras(step: AbilityStep): string[] {
-  const lines: string[] = [];
+function stepExtras(step: AbilityStep): React.ReactNode[] {
+  const lines: React.ReactNode[] = [];
   if (step.type === 'attack' || step.type === 'move' || step.type === 'heal' ||
       step.type === 'shield' || step.type === 'retaliate' ||
       step.type === 'push' || step.type === 'pull') {
@@ -255,11 +346,17 @@ function stepExtras(step: AbilityStep): string[] {
     if (ref) lines.push(ref);
   }
   if (step.type === 'attack') lines.push(...attackRiderLines(step.modifiers));
+  if (step.type === 'move' && step.lootEnteredHexes) {
+    lines.push(withIcon('loot', 'Loot each hex you entered with the move ability.'));
+  }
+  if (step.type === 'move' && step.mayBypassTraps) {
+    lines.push('You may choose not to spring traps in hexes you enter with this movement.');
+  }
   if (step.type === 'when') lines.push(...step.effects.flatMap(stepExtras));
   return lines;
 }
 
-function abilityExtras(a: Ability): string[] {
+function abilityExtras(a: Ability): React.ReactNode[] {
   return a.steps.flatMap(stepExtras);
 }
 
@@ -331,9 +428,9 @@ function attackTargetText(t: AttackTargetT): React.ReactNode {
     case 'ranged': {
       const targets =
         t.targets && t.targets > 1 ? (
-          <>, <GameIcon kind="target" /> Target {t.targets}</>
+          <><GameIcon kind="target" /> Target {t.targets}, </>
         ) : null;
-      return <><GameIcon kind="range" /> Range {t.range}{targets}</>;
+      return <>{targets}<GameIcon kind="range" /> Range {t.range}</>;
     }
     case 'enemies-moved-through': return 'each enemy moved through';
     case 'all-within-range':
@@ -395,13 +492,9 @@ function stepLabel(step: AbilityStep): React.ReactNode {
       const traits = step.traits ?? [];
       const isJump = traits.includes('jump');
       const verb = isJump ? 'Jump' : 'Move';
-      const extras: string[] = [];
-      if (step.lootEnteredHexes) extras.push('loot hexes entered');
-      if (step.mayBypassTraps) extras.push('may bypass traps');
-      return withParen(
-        withIcon(isJump ? 'jump' : 'move', `${verb} ${amountStr(step.amount)}`),
-        extras.join(', '),
-      );
+      // lootEnteredHexes and mayBypassTraps surface as their own indented
+      // lines (see stepExtras).
+      return withIcon(isJump ? 'jump' : 'move', `${verb} ${amountStr(step.amount)}`);
     }
     case 'heal': return withIcon('heal', `Heal ${step.amount} (self)`);
     case 'shield': return withIcon('shield', `Shield ${step.amount}`);
@@ -437,7 +530,7 @@ function stepLabel(step: AbilityStep): React.ReactNode {
       return `+${step.amount} XP`;
     }
     case 'loot':
-      return step.range === 0 ? 'Loot your hex' : `Loot within ${step.range}`;
+      return withIcon('loot', step.range === 0 ? 'Loot your hex' : `Loot ${step.range}`);
     case 'create-element': return `Create ${elementSelectorText(step.element)}`;
     case 'when': {
       const inner = step.effects
@@ -482,8 +575,10 @@ function stepLabel(step: AbilityStep): React.ReactNode {
       const end = step.endConstraint === 'adjacent-to-actor' ? ', ending adjacent to you' : '';
       return `Force a target enemy to Move ${step.moveAmount}${end}`;
     }
-    case 'destroy-trap':
-      return 'Destroy a trap in a hex you entered this move';
+    case 'destroy-trap': {
+      const xp = step.gainExp ? ` to gain ${step.gainExp} XP` : '';
+      return `Destroy one trap in a hex you entered with the move ability${xp}.`;
+    }
     case 'negate-damage':
       return 'Negate one source of damage';
     case 'redirect-attack': {
@@ -496,11 +591,22 @@ function stepLabel(step: AbilityStep): React.ReactNode {
   }
 }
 
-function abilityLabel(a: Ability): React.ReactNode {
+function abilityLabel(a: Ability, disposition?: Disposition): React.ReactNode {
   // create-element steps are surfaced as their own "INFUSE [icon]" block
   // below the ability, so we drop them from the inline label to avoid
   // duplication.
-  return joinNodes(a.steps.filter((s) => s.type !== 'create-element').map(stepLabel));
+  // A round-scoped negate (Trickster's Reversal bottom) reads as the printed
+  // sentence; the generic per-source wording is kept for tracked/other halves.
+  const roundNegate = disposition === 'persistent-round';
+  return joinNodes(
+    a.steps
+      .filter((s) => s.type !== 'create-element')
+      .map((s) =>
+        roundNegate && s.type === 'negate-damage'
+          ? 'Negate the next damage you would suffer this round.'
+          : stepLabel(s),
+      ),
+  );
 }
 
 /** Element references on an ability: create-element steps and elementRiders
@@ -533,23 +639,94 @@ function abilityElements(a: Ability): AbilityElementEntry[] {
 }
 
 type PersistentTriggerT = NonNullable<CardHalf['persistentTrigger']>;
-function triggerNoun(t: PersistentTriggerT): string {
+/** The trigger worded as a noun phrase, singular or plural (the shielded-enemy
+ *  case carries a Shield icon, so this returns a node). */
+function triggerPhrase(t: PersistentTriggerT, singular: boolean): React.ReactNode {
   switch (t.kind) {
-    case 'attack-targets-self': return 'attacks targeting you';
-    case 'damage-suffered': return 'sources of damage you suffer';
-    case 'move-ability-performed': return 'move abilities you perform';
-    case 'attack-against-isolated-enemy': return 'attacks you make against an isolated enemy';
-    case 'melee-attack-against-shielded-enemy': return 'melee attacks you make against a Shielded enemy';
-    case 'attack-while-invisible': return 'attacks you make while Invisible';
+    case 'attack-targets-self':
+      return singular ? 'attack targeting you' : 'attacks targeting you';
+    case 'damage-suffered':
+      return singular ? 'source of damage you suffer' : 'sources of damage you suffer';
+    case 'move-ability-performed':
+      return singular ? 'move ability you perform' : 'move abilities you perform';
+    case 'attack-against-isolated-enemy':
+      return singular
+        ? 'attack you make against an isolated enemy'
+        : 'attacks you make against an isolated enemy';
+    case 'melee-attack-against-shielded-enemy':
+      return (
+        <>
+          melee attack{singular ? '' : 's'} targeting an enemy that has{' '}
+          <GameIcon kind="shield" /> Shield
+        </>
+      );
+    case 'attack-while-invisible':
+      return (
+        <>
+          attack{singular ? '' : 's'} while you have <GameIcon kind="invisible" /> Invisible
+        </>
+      );
   }
+}
+
+/** The lone `modify-future-attack` step across the given abilities, if that's
+ *  all they carry (Trickster's Reversal, Single Out, Smoke Bomb's bonus) — so
+ *  the bonus can be worded as "add … " / "double …" rather than the step label. */
+function soleModifyFutureAttack(
+  abilities: readonly Ability[],
+): Extract<AbilityStep, { type: 'modify-future-attack' }> | null {
+  if (abilities.length !== 1) return null;
+  const steps = abilities[0]!.steps;
+  if (steps.length !== 1) return null;
+  const s = steps[0]!;
+  return s.type === 'modify-future-attack' ? s : null;
+}
+
+/** The bonus value of a tracked modify-future-attack, plus an optional
+ *  "where X is …" clause when the amount is a turn-state reference. */
+function trackedAttackBonus(
+  step: Extract<AbilityStep, { type: 'modify-future-attack' }>,
+): { bonus: React.ReactNode; where: React.ReactNode } {
+  const amt = step.bonusAmount;
+  if (typeof amt === 'number') return { bonus: <>+{amt}</>, where: null };
+  if (amt && typeof amt === 'object' && amt.kind === 'target-shield-value') {
+    const off = amt.offset ?? 0;
+    return {
+      bonus: off ? <>+(X+{off})</> : <>+X</>,
+      where: (
+        <>
+          , where X is the <GameIcon kind="shield" /> Shield value of the target
+        </>
+      ),
+    };
+  }
+  return { bonus: <>+X</>, where: null };
 }
 
 function trackedSentence(half: CardHalf): React.ReactNode {
   const n = half.trackedUses ?? 0;
   const trigger = half.persistentTrigger;
-  const body = joinNodes(half.abilities.map(abilityLabel), '; ');
-  if (!trigger || n <= 0) return body;
-  return <>On the next {n} {triggerNoun(trigger)}, gain {body}.</>;
+  // oneShot abilities are the on-play effects (rendered as their own blocks);
+  // the persistent active bonus is everything else.
+  const bonus = half.abilities.filter((a) => !a.oneShot);
+  const body = () => joinNodes(bonus.map((a) => abilityLabel(a, half.disposition)), '; ');
+  if (!trigger || n <= 0) return body();
+  const lead =
+    n === 1 ? (
+      <>On your next {triggerPhrase(trigger, true)}</>
+    ) : (
+      <>On the next {n} {triggerPhrase(trigger, false)}</>
+    );
+  const mfa = soleModifyFutureAttack(bonus);
+  if (mfa) {
+    // Smoke Bomb: a pure doubling reads "double the value of the attack."
+    if (mfa.doubleAttack && mfa.bonusAmount === undefined && !mfa.pierceBonus) {
+      return <>{lead}, double the value of the attack.</>;
+    }
+    const { bonus: bonusNode, where } = trackedAttackBonus(mfa);
+    return <>{lead}, add {bonusNode} <GameIcon kind="attack" />{where}.</>;
+  }
+  return <>{lead}, gain {body()}.</>;
 }
 
 function UseTrack({ half }: { half: CardHalf }) {
@@ -618,8 +795,99 @@ function UseTrack({ half }: { half: CardHalf }) {
           textTransform: 'uppercase',
         }}
       >
-        {finalPile === 'lost' ? <LostBadge>Lost</LostBadge> : 'Discard'}
+        {finalPile === 'lost' ? <LostBadge /> : <DiscardBadge />}
       </span>
+    </div>
+  );
+}
+
+/** Indented, left-bordered block used for an ability's element entries and,
+ *  separately, its rider/conditional lines. */
+const indentBlock: React.CSSProperties = {
+  paddingLeft: 14,
+  paddingTop: 6,
+  marginLeft: 2,
+  marginTop: 6,
+  borderLeft: `2px solid ${theme.border}`,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+};
+
+/** One ability's rendered block: its inline label (+ AOE diagram), an indented
+ *  element (Infuse/Consume) block, and an indented rider/conditional block. */
+function AbilityBlock({
+  ability,
+  half,
+  elementContext,
+  divider,
+}: {
+  ability: Ability;
+  half: CardHalf;
+  elementContext: CardElementContext | null;
+  divider: boolean;
+}) {
+  const extras = abilityExtras(ability);
+  const patterns = abilityAoePatterns(ability);
+  const ele = abilityElements(ability);
+  return (
+    <div
+      style={{
+        padding: '8px 0',
+        ...(divider ? { borderTop: `1px solid ${theme.border}` } : {}),
+      }}
+    >
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', justifyContent: 'space-between' }}>
+        <div style={{ flex: '1 1 auto' }}>{abilityLabel(ability, half.disposition)}</div>
+        {patterns.length > 0 && (
+          <div style={{ display: 'flex', gap: 6, flex: '0 0 auto', alignItems: 'center' }}>
+            {patterns.map((p, j) => <AoePattern key={j} pattern={p} />)}
+          </div>
+        )}
+      </div>
+      {/* Element entries (Consume/Infuse) get their own indented block, kept
+          separate from the rider lines below so a conditional bonus isn't read
+          as gated by a consume it has nothing to do with. */}
+      {ele.length > 0 && (
+        <div style={indentBlock}>
+          {ele.map((entry, j) => (
+            <div key={`ele-${j}`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: theme.muted,
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.5,
+                  }}
+                >
+                  {entry.kind === 'create' ? 'Infuse' : 'Consume'}
+                </span>
+                {entry.elements.map((e, k) => (
+                  <ElementChip
+                    key={k}
+                    element={e}
+                    context={elementContext}
+                    consumeIntent={entry.kind === 'consume'}
+                  />
+                ))}
+              </div>
+              {entry.kind === 'consume' && entry.effects && (
+                <div style={{ fontSize: 14, opacity: 0.85 }}>{entry.effects}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {extras.length > 0 && (
+        <div style={indentBlock}>
+          {extras.map((line, j) => (
+            <div key={`ex-${j}`} style={{ fontSize: 14, opacity: 0.85 }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -655,78 +923,42 @@ export function HalfView({
       {half.abilities.length === 0 ? (
         <div style={{ padding: '8px 0' }}>—</div>
       ) : isTracked ? (
-        <div style={{ padding: '8px 0' }}>{trackedSentence(half)}</div>
-      ) : (
-        half.abilities.map((a, i) => {
-          const extras = abilityExtras(a);
-          const patterns = abilityAoePatterns(a);
-          const ele = abilityElements(a);
+        // Persistent-tracked: oneShot abilities are on-play effects (rendered as
+        // their own blocks); the rest form the "On your next … " active bonus.
+        (() => {
+          const onPlay = half.abilities.filter((a) => a.oneShot);
           return (
-            <div
-              key={i}
-              style={{
-                padding: '8px 0',
-                ...(i > 0 ? { borderTop: `1px solid ${theme.border}` } : {}),
-              }}
-            >
-              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', justifyContent: 'space-between' }}>
-                <div style={{ flex: '1 1 auto' }}>{abilityLabel(a)}</div>
-                {patterns.length > 0 && (
-                  <div style={{ display: 'flex', gap: 6, flex: '0 0 auto', alignItems: 'center' }}>
-                    {patterns.map((p, j) => <AoePattern key={j} pattern={p} />)}
-                  </div>
-                )}
+            <>
+              {onPlay.map((a, i) => (
+                <AbilityBlock
+                  key={`os-${i}`}
+                  ability={a}
+                  half={half}
+                  elementContext={elementContext}
+                  divider={i > 0}
+                />
+              ))}
+              <div
+                style={{
+                  padding: '8px 0',
+                  ...(onPlay.length > 0 ? { borderTop: `1px solid ${theme.border}` } : {}),
+                }}
+              >
+                {trackedSentence(half)}
               </div>
-              {(ele.length > 0 || extras.length > 0) && (
-                <div
-                  style={{
-                    paddingLeft: 14,
-                    paddingTop: 6,
-                    marginLeft: 2,
-                    marginTop: 6,
-                    borderLeft: `2px solid ${theme.border}`,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 6,
-                  }}
-                >
-                  {ele.map((entry, j) => (
-                    <div key={`ele-${j}`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                        <span
-                          style={{
-                            fontSize: 10,
-                            color: theme.muted,
-                            textTransform: 'uppercase',
-                            letterSpacing: 0.5,
-                          }}
-                        >
-                          {entry.kind === 'create' ? 'Infuse' : 'Consume'}
-                        </span>
-                        {entry.elements.map((e, k) => (
-                          <ElementChip
-                            key={k}
-                            element={e}
-                            context={elementContext}
-                            consumeIntent={entry.kind === 'consume'}
-                          />
-                        ))}
-                      </div>
-                      {entry.kind === 'consume' && entry.effects && (
-                        <div style={{ fontSize: 14, opacity: 0.85 }}>{entry.effects}</div>
-                      )}
-                    </div>
-                  ))}
-                  {extras.map((line, j) => (
-                    <div key={`ex-${j}`} style={{ fontSize: 14, opacity: 0.85 }}>
-                      {line}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            </>
           );
-        })
+        })()
+      ) : (
+        half.abilities.map((a, i) => (
+          <AbilityBlock
+            key={i}
+            ability={a}
+            half={half}
+            elementContext={elementContext}
+            divider={i > 0}
+          />
+        ))
       )}
       {half.disposition === 'persistent-tracked' && <UseTrack half={half} />}
       <div
@@ -739,10 +971,10 @@ export function HalfView({
           paddingTop: 4,
         }}
       >
-        <DispositionLabel half={half} />
         {typeof half.expOnPerform === 'number' && (
-          <span style={{ marginLeft: 6 }}>· +{half.expOnPerform} XP</span>
+          <span style={{ marginRight: 6 }}>+{half.expOnPerform} XP ·</span>
         )}
+        <DispositionLabel half={half} />
       </div>
     </>
   );

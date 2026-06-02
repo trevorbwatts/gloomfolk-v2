@@ -237,6 +237,10 @@ export interface PublicGameState {
    *  wild/mixed element selector that needs a concrete element picked
    *  before infusion or consumption can resolve. */
   pendingElementChoice: PendingElementChoice | null;
+  /** An outstanding spring-or-bypass decision for a trap the active unit just
+   *  entered during a move (cards with `mayBypassTraps`). Blocks turn flow
+   *  until resolved via `player_resolve_trap_choice`. */
+  pendingTrapChoice: PendingTrapChoice | null;
   /** A reactive item prompt blocking an in-progress monster attack — the
    *  target may spend it (e.g. Leather Armor) before the modifier is drawn.
    *  The monster animation is paused while this is set. */
@@ -402,6 +406,22 @@ export interface PendingElementChoice {
 }
 
 /**
+ * An outstanding "you may choose not to spring this trap" decision. Raised when
+ * the active unit enters a trap hex during a move ability that allows bypassing.
+ * The player answers spring (take the damage, remove the trap) or bypass (leave
+ * the trap; the hex becomes eligible for a later destroy-trap).
+ */
+export interface PendingTrapChoice {
+  id: string;
+  /** The unit standing on / having entered the trap. */
+  unitId: string;
+  /** The trap hex being decided. */
+  hex: Hex;
+  /** Free-text hint for the UI. */
+  prompt: string;
+}
+
+/**
  * One offered consume on the current attack action — surfaces an opt-in
  * button on the player's UI. The player chooses to apply or skip; chosen
  * consumes mark elements inert and apply the rider's bonuses to the
@@ -439,6 +459,9 @@ export type PendingAction =
       /** Move has the Jump trait: enemies in pass-through hexes are ignored
        *  (walls still block; the destination hex must be empty). */
       jump?: boolean;
+      /** Move may bypass traps: the player is prompted per entered trap hex
+       *  whether to spring it. Without this, entered traps spring automatically. */
+      mayBypassTraps?: boolean;
       done: boolean;
     }
   | {
@@ -530,6 +553,14 @@ export type PendingAction =
   | { id: string; type: 'become-invisible'; done: boolean }
   | {
       id: string;
+      /** Arm a persistent negate (Trickster's Reversal bottom): the next damage
+       *  the owner would suffer within `expires` is negated. */
+      type: 'negate-damage';
+      expires: 'end-round' | 'end-scenario';
+      done: boolean;
+    }
+  | {
+      id: string;
       type: 'modify-future-move';
       amount: number;
       expires: 'end-round' | 'end-scenario';
@@ -539,6 +570,13 @@ export type PendingAction =
       id: string;
       type: 'modify-future-attack';
       amount: number;
+      /** When set, the bonus value is a turn-state reference resolved at attack
+       *  time (e.g. Trickster's Reversal: X+2 where X is the target's Shield).
+       *  Added on top of the flat `amount`. */
+      amountRef?: AmountRef;
+      /** When true, the bonus only applies while the attacker is Invisible
+       *  (Smoke Bomb: "your next attack while you have Invisible"). */
+      requiresInvisible?: boolean;
       pierceBonus: number;
       /** When true, the attack value is doubled before flat `amount` bonus
        *  is added. See cards/types.ts modify-future-attack.doubleAttack. */
@@ -558,6 +596,18 @@ export type PendingAction =
       expires: 'end-round' | 'end-scenario';
       done: boolean;
     }
+  | {
+      id: string;
+      type: 'destroy-trap';
+      /** XP granted when a trap is destroyed (0 if the card prints none). */
+      gainExp: number;
+      /** Trap hexes the actor entered (and bypassed) during this turn's move
+       *  ability that still hold a trap — the hexes the player may tap to
+       *  destroy. Recomputed on each broadcast; empty = nothing to destroy
+       *  (the step may be skipped). */
+      eligibleHexes: Hex[];
+      done: boolean;
+    }
   | { id: string; type: 'unsupported'; description: string; done: boolean };
 
 /** A persistent self-effect granted by a performed half. */
@@ -574,6 +624,15 @@ export type ActiveEffect =
       sourceCardId: string;
       kind: 'attack-bonus';
       amount: number;
+      /** Turn-state reference for the bonus value, resolved per target at attack
+       *  time and added on top of `amount`. A `target-shield-value` ref only
+       *  applies against a target that actually has Shield (Trickster's
+       *  Reversal). */
+      amountRef?: AmountRef;
+      /** When true, the bonus only applies while the attacker is Invisible
+       *  (Smoke Bomb). The effect is left unconsumed by attacks made without
+       *  Invisible. */
+      requiresInvisible?: boolean;
       pierceBonus: number;
       /** When true, the attack value is doubled before flat `amount` is added.
        *  Stacks via OR across all matching attack-bonus effects on a single
@@ -592,6 +651,15 @@ export type ActiveEffect =
       kind: 'retaliate';
       amount: number;
       range: number;
+      expires: 'end-round' | 'end-scenario';
+    }
+  | {
+      id: string;
+      sourceCardId: string;
+      /** Armed by a persistent negate-damage half (Trickster's Reversal bottom).
+       *  Consumed by the next source of damage the owner would suffer, zeroing
+       *  it. Expires unused at the scope bound. */
+      kind: 'negate-next-damage';
       expires: 'end-round' | 'end-scenario';
     };
 
@@ -652,6 +720,10 @@ export interface CurrentTurn {
    *  Move ability distances actually traveled). Drives "Attack X" / "Move X"
    *  cards where X = hexes moved this turn. */
   hexesMovedThisTurn: number;
+  /** Trap hexes the unit entered during its most recent move ability and chose
+   *  to bypass (so the trap is still on the board). These are the hexes a
+   *  `destroy-trap` step may target. Reset at the start of each move action. */
+  trapHexesEnteredThisMove: Hex[];
   /** Total damage actually dealt by this unit's attacks this turn (after
    *  modifier card, shield, pierce). Drives cards where X = damage dealt
    *  this turn (e.g. Balanced Measure bottom: Move X). */
@@ -826,6 +898,9 @@ export type ClientToServer =
       riderIndex: number;
     }
   | { type: 'player_resolve_element_choice'; choiceId: string; element: Element }
+  /** Answer an outstanding trap spring-or-bypass prompt. `spring: true` springs
+   *  the trap (take damage, remove it); `false` bypasses it. */
+  | { type: 'player_resolve_trap_choice'; choiceId: string; spring: boolean }
   | { type: 'player_engage_half'; slot: 'top' | 'bottom'; cardId: string; useBasic: boolean }
   /** Reverse an engaged half before anything has been performed — refunds any
    *  required element cost and returns the slot to unlocked so the player can

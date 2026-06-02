@@ -27,6 +27,7 @@ export interface ShapePreviewProps {
   fill?: string;
   stroke?: string;
   showCoords?: boolean;
+  maxWidth?: number;
 }
 
 export function ShapePreview({
@@ -35,6 +36,7 @@ export function ShapePreview({
   fill = theme.panelRaised,
   stroke = theme.accent,
   showCoords = false,
+  maxWidth = 480,
 }: ShapePreviewProps) {
   if (footprint.length === 0) {
     return <p style={{ color: theme.muted }}>(empty footprint)</p>;
@@ -60,7 +62,7 @@ export function ShapePreview({
       viewBox={`${minX - pad} ${minY - pad} ${vbW} ${vbH}`}
       style={{
         width: '100%',
-        maxWidth: 480,
+        maxWidth,
         background: theme.bgSolid,
         borderRadius: 6,
         border: `1px solid ${theme.border}`,

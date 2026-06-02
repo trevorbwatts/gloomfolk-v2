@@ -22,16 +22,17 @@ const DB_VERSION = 1;
  * positions the *image* underneath it (the crop-frame model).
  *
  * Offsets are stored as a fraction of the footprint's bounding box so they stay
- * correct at any render size. The identity transform (all zeros, scale 1)
- * reproduces the old "stretch to cover the footprint" behaviour exactly, so
- * images saved before this feature existed render unchanged.
+ * correct at any render size. At the identity transform (all zeros, scale 1) the
+ * whole image is fit inside the footprint's bounding box; the hex grid then
+ * clips it. Scale up / pan to crop into the part you want.
  */
 export interface TileImageTransform {
   /** Horizontal offset, as a fraction of the footprint bounding-box width. */
   offsetX: number;
   /** Vertical offset, as a fraction of the footprint bounding-box height. */
   offsetY: number;
-  /** Scale multiplier relative to the cover-fit baseline (1 = fills footprint). */
+  /** Scale multiplier relative to the fit-whole-image baseline (1 = whole image
+      fit inside the footprint box). */
   scale: number;
   /** Rotation in degrees, applied around the footprint centre. */
   rotation: number;

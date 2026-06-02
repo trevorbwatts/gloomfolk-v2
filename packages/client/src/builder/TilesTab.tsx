@@ -186,6 +186,20 @@ export function TilesTab() {
     transform.scale !== savedTransform.scale ||
     transform.rotation !== savedTransform.rotation;
 
+  // Shared look for the muted controls (Reset / Replace / Remove): same style and
+  // a common min-width so they read as one uniform row.
+  const mutedBtn: React.CSSProperties = {
+    ...btn.ghost(),
+    minWidth: 140,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textAlign: 'center',
+  };
+
+  // Width of the preview area — 70% larger than the original 480px.
+  const previewMaxWidth = 816;
+
   return (
     <div style={layoutStyle}>
       <aside style={sidebarStyle}>
@@ -221,7 +235,7 @@ export function TilesTab() {
           <div>
             <h2
               style={{
-                margin: '0 0 4px',
+                margin: '0 0 16px',
                 fontFamily: theme.headingFont,
                 color: theme.accent,
                 fontWeight: 500,
@@ -231,38 +245,21 @@ export function TilesTab() {
             >
               {selectedSide.id}
             </h2>
-            <div style={{ color: theme.muted, fontSize: 13, marginBottom: 16 }}>
-              Shape: <strong style={{ color: theme.text }}>{selectedShape.name}</strong> ·{' '}
-              {selectedShape.footprint.length} hexes ·{' '}
-              {selectedSide.hasWalls ? 'walled' : 'open (no walls)'}
-            </div>
 
-            <p style={{ marginTop: 0, marginBottom: 16 }}>{selectedSide.artNotes}</p>
-            <p style={{ color: theme.muted, fontSize: 12, marginTop: 0 }}>
-              {selectedShape.description}
-            </p>
-
-            <div style={{ marginTop: 20, maxWidth: 520 }}>
-              <div
-                style={{
-                  color: theme.muted,
-                  fontSize: 11,
-                  textTransform: 'uppercase',
-                  letterSpacing: 1,
-                  marginBottom: 6,
-                }}
-              >
-                {currentImage ? 'Background image' : 'Tile shape'}
-              </div>
+            <div style={{ maxWidth: previewMaxWidth }}>
               {currentImage ? (
                 <TileImagePlacer
                   footprint={selectedShape.footprint}
                   href={currentImage}
                   transform={transform}
                   onChange={setTransform}
+                  maxWidth={previewMaxWidth}
                 />
               ) : (
-                <ShapePreview footprint={selectedShape.footprint} />
+                <ShapePreview
+                  footprint={selectedShape.footprint}
+                  maxWidth={previewMaxWidth}
+                />
               )}
               {currentImage && (
                 <p style={{ color: theme.muted, fontSize: 11, margin: '10px 0 0' }}>
@@ -270,8 +267,18 @@ export function TilesTab() {
                   sliders to scale and rotate. Save to keep this placement.
                 </p>
               )}
-              <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <label style={{ ...btn.outline(), opacity: busy ? 0.6 : 1 }}>
+
+              {/* Muted controls: add/replace, reset, remove. */}
+              <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {currentImage && !busy && (
+                  <button
+                    style={mutedBtn}
+                    onClick={() => setTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM })}
+                  >
+                    Reset to fit
+                  </button>
+                )}
+                <label style={{ ...mutedBtn, opacity: busy ? 0.6 : 1 }}>
                   {busy ? 'Saving…' : currentImage ? 'Replace image' : 'Add image'}
                   <input
                     type="file"
@@ -282,20 +289,24 @@ export function TilesTab() {
                   />
                 </label>
                 {currentImage && !busy && (
-                  <button style={btn.ghost()} onClick={handleClear}>
+                  <button style={mutedBtn} onClick={handleClear}>
                     Remove
                   </button>
                 )}
-                {currentImage && !busy && (
+              </div>
+
+              {/* Primary save action, left-aligned on its own row. */}
+              {currentImage && !busy && (
+                <div style={{ marginTop: 12 }}>
                   <button
-                    style={{ ...btn.outline(), marginLeft: 'auto', opacity: placementDirty ? 1 : 0.5 }}
+                    style={btn.primary(!placementDirty)}
                     onClick={handleSavePlacement}
                     disabled={!placementDirty}
                   >
                     {placementDirty ? 'Save placement' : 'Placement saved'}
                   </button>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           </div>
         )}

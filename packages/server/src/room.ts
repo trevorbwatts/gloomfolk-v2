@@ -43,6 +43,7 @@ import type {
   NegativeCondition,
   PendingAction,
   PendingElementChoice,
+  PendingTrapChoice,
   PendingForcedMove,
   PendingReactiveItem,
   PersistentTrigger,
@@ -81,6 +82,7 @@ import {
   getBattleGoal,
   getScenario,
   goldConversionFor,
+  trapDamageFor,
   MAX_SCENARIO_LEVEL,
   MIN_SCENARIO_LEVEL,
   recommendedScenarioLevel,
@@ -266,6 +268,14 @@ function activeMoveBonus(p: PlayerEntry): number {
 export function consumeAttackBonus(
   p: PlayerEntry,
   attackKind: 'melee' | 'ranged',
+  /** Resolves a ref-valued bonus against the current target. Return `null` to
+   *  signal the bonus doesn't apply to this attack (e.g. a target-Shield bonus
+   *  vs an unshielded enemy) — the effect is then left unconsumed. Omitted at
+   *  call sites with no single target (AOE), where ref bonuses simply skip. */
+  resolveRef?: (ref: AmountRef) => number | null,
+  /** Whether the attacker is currently Invisible — gates `requiresInvisible`
+   *  bonuses (Smoke Bomb). */
+  attackerInvisible = false,
 ): { amount: number; pierce: number; double: boolean } {
   let amount = 0;
   let pierce = 0;
@@ -280,13 +290,30 @@ export function consumeAttackBonus(
       keep.push(e);
       continue;
     }
+    // Invisible-gated bonus (Smoke Bomb): only applies while Invisible; left
+    // unconsumed otherwise so it waits for an attack made while Invisible.
+    if (e.requiresInvisible && !attackerInvisible) {
+      keep.push(e);
+      continue;
+    }
     // Target-gated bonuses (e.g. Single Out's +3 vs isolated) are applied
     // per-target by targetConditionalActiveBonus — never consumed here.
     if (e.targetCondition) {
       keep.push(e);
       continue;
     }
-    amount += e.amount;
+    // Ref-valued bonus (e.g. Trickster's Reversal: X+2 from target Shield).
+    // A null resolution means it doesn't apply to this attack — keep it.
+    let refValue = 0;
+    if (e.amountRef) {
+      const r = resolveRef ? resolveRef(e.amountRef) : null;
+      if (r === null) {
+        keep.push(e);
+        continue;
+      }
+      refValue = r;
+    }
+    amount += e.amount + refValue;
     pierce += e.pierceBonus;
     if (e.doubleAttack) double = true;
     if (e.expires !== 'next-attack') keep.push(e);
@@ -536,8 +563,9 @@ function buildActionQueue(
       if (step.type === 'create-element') continue;
       if (step.type === 'move') {
         const jump = step.traits?.includes('jump') ? { jump: true as const } : {};
+        const bypass = step.mayBypassTraps ? { mayBypassTraps: true as const } : {};
         if (typeof step.amount === 'number') {
-          out.push({ id: nextId(), type: 'move', amount: step.amount, ...jump, done: false });
+          out.push({ id: nextId(), type: 'move', amount: step.amount, ...jump, ...bypass, done: false });
         } else if (isSupportedAmountRef(step.amount)) {
           out.push({
             id: nextId(),
@@ -545,6 +573,7 @@ function buildActionQueue(
             amount: 0,
             amountRef: step.amount,
             ...jump,
+            ...bypass,
             done: false,
           });
         } else {
@@ -661,10 +690,21 @@ function buildActionQueue(
               ? 'end-round'
               : 'end-scenario'; // 'while-persistent-active' — cleared by fireTrackedTrigger on card expiry
         const amount = typeof step.bonusAmount === 'number' ? step.bonusAmount : 0;
+        // A non-numeric bonus (e.g. Trickster's Reversal: X+2 from the target's
+        // Shield) is carried as a ref and resolved per target at attack time.
+        const refAmount =
+          typeof step.bonusAmount !== 'number' && isSupportedAmountRef(step.bonusAmount)
+            ? step.bonusAmount
+            : null;
+        // A while-active bonus on an "attack while Invisible" half only applies
+        // while the attacker is Invisible (Smoke Bomb).
+        const requiresInvisible = half.persistentTrigger?.kind === 'attack-while-invisible';
         out.push({
           id: nextId(),
           type: 'modify-future-attack',
           amount,
+          ...(refAmount ? { amountRef: refAmount } : {}),
+          ...(requiresInvisible ? { requiresInvisible: true as const } : {}),
           pierceBonus: step.pierceBonus ?? 0,
           expires,
           ...(step.attackKind ? { attackKind: step.attackKind } : {}),
@@ -713,6 +753,24 @@ function buildActionQueue(
         out.push({ id: nextId(), type: 'become-invisible', done: false });
       } else if (step.type === 'loot') {
         out.push({ id: nextId(), type: 'loot', range: step.range, done: false });
+      } else if (step.type === 'negate-damage') {
+        // Reaches here only for non-tracked persistent halves (a tracked half
+        // defers negate-damage to its damage-suffered trigger). Arm a
+        // round/scenario-scoped negate the player confirms like any action.
+        out.push({
+          id: nextId(),
+          type: 'negate-damage',
+          expires: half.disposition === 'persistent-scenario' ? 'end-scenario' : 'end-round',
+          done: false,
+        });
+      } else if (step.type === 'destroy-trap') {
+        out.push({
+          id: nextId(),
+          type: 'destroy-trap',
+          gainExp: step.gainExp ?? 0,
+          eligibleHexes: [],
+          done: false,
+        });
       } else if (step.type === 'gain-exp' || step.type === 'when') {
         // Auto-resolved at half-finish (see Room.awardHalfXp); skip emitting
         // a PendingAction so they don't appear in the user-facing queue.
@@ -840,6 +898,21 @@ export class Room {
    *  whatever follow-up the prompt was blocking (queue the infusion, mark
    *  consume, etc.). */
   private pendingChoiceFollowup: ((picked: Element) => void) | null = null;
+  /** Outstanding trap spring-or-bypass prompt (cards with `mayBypassTraps`). */
+  pendingTrapChoice: PendingTrapChoice | null = null;
+  /** Continuation invoked when `pendingTrapChoice` is resolved with the
+   *  player's spring/bypass decision; resumes walking the move's trap hexes. */
+  private pendingTrapFollowup: ((spring: boolean) => void) | null = null;
+  private nextTrapChoiceN = 1;
+  /** Trap hexes that have been sprung (or destroyed) this scenario, by hexKey.
+   *  The scenario tile definition is a shared singleton, so per-room trap
+   *  removal is tracked here and applied in `scenarioTiles()` rather than by
+   *  mutating the scenario. */
+  private sprungTraps = new Set<string>();
+  /** Move actions (keyed `slot:actionId`) whose trap tracking has been reset
+   *  this turn. Lets a multi-confirm move accumulate entered trap hexes while a
+   *  brand-new move ability starts fresh. Cleared each turn in openTurn. */
+  private movesStartedThisTurn = new Set<string>();
   /** Battle goals dealt this scenario, keyed by characterId. Secret — only
    *  surfaced to the owning player via PrivatePlayerState, and revealed to
    *  everyone at scenario end. */
@@ -1119,6 +1192,10 @@ export class Room {
     this.elementBoard = freshElementBoard();
     this.pendingElementChoice = null;
     this.pendingChoiceFollowup = null;
+    this.pendingTrapChoice = null;
+    this.pendingTrapFollowup = null;
+    this.sprungTraps = new Set();
+    this.movesStartedThisTurn = new Set();
     // Fresh shared monster modifier deck for the scenario.
     this.monsterModifierDeck = createMonsterModifierDeck();
     this.monsterModifierDiscard = [];
@@ -1680,6 +1757,61 @@ export class Room {
   }
 
   /**
+   * Apply non-attack damage to a unit (traps, hazards). Mirrors the tail of the
+   * monster-attack flow without the modifier-draw/attack-only bits: existing
+   * shield reduces it, the `damage-suffered` tracked trigger may negate it, the
+   * battle-goal signals fire (`fromAttack: false`), and a unit reduced to 0 HP
+   * is exhausted/killed. Returns the damage actually dealt.
+   */
+  private sufferDamage(unit: Unit, amount: number, source: string): number {
+    if (amount <= 0) return 0;
+    const playerEntry = unit.ownerPlayerId ? this.players.get(unit.ownerPlayerId) : null;
+    let effShield = Math.max(0, unit.shield);
+    if (playerEntry) effShield += this.consumeActiveItemShield(playerEntry);
+    let dmg = Math.max(0, amount - effShield);
+    if (dmg > 0 && playerEntry) {
+      const result = this.fireTrackedTrigger(playerEntry, 'damage-suffered');
+      if (result.damageNegated || this.consumeNegateNextDamage(playerEntry)) dmg = 0;
+    }
+    unit.hp -= dmg;
+    const cid = this.charIdForUnit(unit);
+    if (dmg > 0 && cid) {
+      this.emitBG({ kind: 'damage_suffered', characterId: cid, amount: dmg, fromAttack: false });
+      this.emitBG({
+        kind: 'hp_changed',
+        characterId: cid,
+        currentHp: Math.max(0, unit.hp),
+        maxHp: unit.hpMax,
+      });
+    }
+    this.pushEvent(`${unit.name} suffers ${dmg} damage from ${source}.`);
+    if (unit.hp <= 0) {
+      if (cid) {
+        this.emitBG({ kind: 'character_exhausted', characterId: cid, cause: 'hp' });
+      }
+      this.units = this.units.filter((u) => u.id !== unit.id);
+      this.pushEvent(`${unit.name} is exhausted!`);
+    }
+    return dmg;
+  }
+
+  /** Consume one armed `negate-next-damage` effect (Trickster's Reversal
+   *  bottom), if any. Returns true when a source of damage should be negated. */
+  private consumeNegateNextDamage(p: PlayerEntry): boolean {
+    const idx = p.activeEffects.findIndex((e) => e.kind === 'negate-next-damage');
+    if (idx < 0) return false;
+    p.activeEffects.splice(idx, 1);
+    return true;
+  }
+
+  /** Spring the trap on `hex`: remove it and deal trap damage to `unit`. */
+  private springTrapAt(unit: Unit, hex: Hex): void {
+    this.removeTrapAt(hex);
+    this.pushEvent(`${unit.name} springs a trap!`);
+    this.sufferDamage(unit, trapDamageFor(this.scenarioLevel), 'a trap');
+  }
+
+  /**
    * Fire a persistent-tracked trigger for every active card whose trigger
    * matches. Advances the use-slot, awards `useSlotExp` if any, and expires
    * the card (to `finalPile`) when slots are exhausted. Also clears any
@@ -1905,10 +2037,17 @@ export class Room {
    *   - `on-next-retaliate-this-round` — queued onto `pendingRetaliateXp` and
    *     granted the next time the player retaliates this round.
    *
+   * Awarded elsewhere (at attack-resolution time, not here):
+   *   - Element-rider XP — granted in `lockConsumeOffers`.
+   *   - Target-conditional XP (adjacent-to-ally / isolated / undamaged, incl.
+   *     `all-of`) — granted per landed target in the attack handler.
+   *   - `destroy-trap.gainExp` — granted when the trap is destroyed in
+   *     `performAction`.
+   *
    * Not yet awarded:
-   *   - Element/condition/target-conditional XP riders on attacks.
+   *   - Non-element condition-rider XP (`conditionRiders[].gainExp`, e.g.
+   *     "if you moved this turn") on attacks.
    *   - `useSlotExp` on persistent-tracked halves.
-   *   - `destroy-trap.gainExp`.
    */
   private awardHalfXp(
     p: PlayerEntry,
@@ -2423,13 +2562,28 @@ export class Room {
     const unit = this.units.find((u) => u.id === ct.unitId);
     if (!unit) return { ok: false, reason: 'no_unit' };
 
+    // Set when a move pauses for a per-hex trap spring/bypass prompt. The
+    // post-switch bookkeeping is then deferred to the trap-resolution
+    // continuation (finalizeMoveAction).
+    let pausedForTrap = false;
     switch (action.type) {
       case 'move': {
         if (hasCondition(unit, 'immobilize')) return { ok: false, reason: 'immobilized' };
         if (hasCondition(unit, 'stun')) return { ok: false, reason: 'stunned' };
         if (!target?.hex) return { ok: false, reason: 'need_hex' };
         if (hexEqual(unit.hex, target.hex)) return { ok: false, reason: 'already_there' };
+        // First confirm of this move ability → reset the entered-trap tracking
+        // that a later destroy-trap step reads. Subsequent partial confirms of
+        // the same action accumulate onto it.
+        const moveKey = `${slotKind}:${actionId}`;
+        if (!this.movesStartedThisTurn.has(moveKey)) {
+          this.movesStartedThisTurn.add(moveKey);
+          ct.trapHexesEnteredThisMove = [];
+        }
         const startHex = { q: unit.hex.q, r: unit.hex.r };
+        // Ordered hexes entered this confirm (excludes the start hex), used to
+        // spring/bypass traps after the move commits.
+        let enteredHexes: Hex[] = [];
         const moveBonus = activeMoveBonus(guard.p);
         const budget = action.amount + moveBonus;
         const isJump = action.jump === true;
@@ -2466,6 +2620,7 @@ export class Room {
             prev = step;
           }
           stepsTaken = path.length;
+          enteredHexes = path.map((h) => ({ q: h.q, r: h.r }));
         } else {
           const reachable = isJump
             ? this.reachableFromJump(unit.hex, budget, unit.id)
@@ -2480,6 +2635,8 @@ export class Room {
             ? bfsPathJump(unit.hex, target.hex, budget, this.walkableForJump(), canEnd)
             : bfsPath(unit.hex, target.hex, budget, this.walkableForUnit(unit), canEnd, enterCost);
           stepsTaken = path ? path.length - 1 : reachable.get(hexKey(target.hex))!;
+          // bfsPath returns [start, …steps]; drop the start to get entered hexes.
+          enteredHexes = path ? path.slice(1).map((h) => ({ q: h.q, r: h.r })) : [target.hex];
         }
         unit.hex = target.hex;
         ct.hexesMovedThisTurn += stepsTaken;
@@ -2555,6 +2712,19 @@ export class Room {
         // The move-ability trigger represents finishing the whole move, so it
         // fires once the action is actually done — not on each partial confirm.
         if (action.done) this.fireTrackedTrigger(guard.p, 'move-ability-performed');
+        // Traps in entered hexes. A move that may bypass traps prompts per hex
+        // (spring or leave it); otherwise entered traps spring automatically.
+        const trapHexes = enteredHexes.filter((h) => this.isTrapHex(h));
+        if (trapHexes.length > 0) {
+          if (action.mayBypassTraps) {
+            pausedForTrap = true;
+            this.resolveTrapHexes(playerId, slotKind, actionId, unit, trapHexes, 0);
+          } else {
+            for (const h of trapHexes) {
+              if (unit.hp > 0) this.springTrapAt(unit, h);
+            }
+          }
+        }
         break;
       }
       case 'attack': {
@@ -2574,7 +2744,17 @@ export class Room {
           return { ok: false, reason: 'no_line_of_sight' };
         }
         const attackKind: 'melee' | 'ranged' = action.range > 1 ? 'ranged' : 'melee';
-        const { amount: bonusAmt, pierce: bonusPierce, double } = consumeAttackBonus(guard.p, attackKind);
+        const { amount: bonusAmt, pierce: bonusPierce, double } = consumeAttackBonus(
+          guard.p,
+          attackKind,
+          (ref) =>
+            // A target-Shield bonus only applies against a Shielded target;
+            // other refs resolve normally.
+            ref.kind === 'target-shield-value' && tgt.shield <= 0
+              ? null
+              : resolveAmountRef(ref, ct, tgt),
+          unit.invisible === true,
+        );
         // Reset draw reveal at the start of a fresh attack action (i.e. when
         // this is the first target for this multi-target action).
         if (action.targetsRemaining === action.targets) ct.lastModifierDraws = [];
@@ -2763,7 +2943,12 @@ export class Room {
         // Most AOE patterns target hexes adjacent to the actor (melee). LOS check
         // is per-hex; for v1 we only enforce LOS to the anchor (target.hex).
         // (Adjacent hexes effectively pass.)
-        const { amount: bonusAmt, pierce: bonusPierce, double } = consumeAttackBonus(guard.p, 'melee');
+        const { amount: bonusAmt, pierce: bonusPierce, double } = consumeAttackBonus(
+          guard.p,
+          'melee',
+          undefined,
+          unit.invisible === true,
+        );
         ct.lastModifierDraws = [];
         if (!action.consumesLocked) {
           this.lockConsumeOffers(action, guard.p);
@@ -2964,6 +3149,8 @@ export class Room {
           sourceCardId: slot.cardId ?? '',
           kind: 'attack-bonus',
           amount: action.amount,
+          ...(action.amountRef ? { amountRef: action.amountRef } : {}),
+          ...(action.requiresInvisible ? { requiresInvisible: true as const } : {}),
           pierceBonus: action.pierceBonus,
           expires: action.expires,
           ...(action.attackKind ? { attackKind: action.attackKind } : {}),
@@ -2998,11 +3185,43 @@ export class Room {
         action.done = true;
         break;
       }
+      case 'negate-damage': {
+        guard.p.activeEffects.push({
+          id: `e${guard.p.activeEffects.length + 1}`,
+          sourceCardId: slot.cardId ?? '',
+          kind: 'negate-next-damage',
+          expires: action.expires,
+        });
+        this.pushEvent(
+          `${unit.name} prepares to negate the next damage ${
+            action.expires === 'end-scenario' ? 'this scenario' : 'this round'
+          }.`,
+        );
+        action.done = true;
+        break;
+      }
       case 'loot': {
         const n = this.lootTokensInRange(unit, action.range, 'ability');
         if (n === 0) {
           this.pushEvent(`${unit.name} finds no money tokens to loot.`);
         }
+        action.done = true;
+        break;
+      }
+      case 'destroy-trap': {
+        if (!target?.hex) return { ok: false, reason: 'need_hex' };
+        // Eligible: a still-present trap the actor entered (and bypassed)
+        // during this turn's move ability.
+        const entered = ct.trapHexesEnteredThisMove.some((h) => hexEqual(h, target.hex!));
+        if (!entered || !this.isTrapHex(target.hex)) {
+          return { ok: false, reason: 'no_eligible_trap' };
+        }
+        this.removeTrapAt(target.hex);
+        ct.trapHexesEnteredThisMove = ct.trapHexesEnteredThisMove.filter(
+          (h) => !hexEqual(h, target.hex!),
+        );
+        this.pushEvent(`${unit.name} destroys a trap.`);
+        if (action.gainExp > 0) this.grantXp(guard.p, action.gainExp, 'destroy trap');
         action.done = true;
         break;
       }
@@ -3012,12 +3231,34 @@ export class Room {
         break;
       }
     }
+    // A move paused for a trap prompt defers this bookkeeping to
+    // finalizeActionPerformed, called from the trap-resolution continuation.
+    if (pausedForTrap) return { ok: true };
+    this.finalizeActionPerformed(playerId, slotKind, slot, action);
+    return { ok: true };
+  }
+
+  /** Post-action bookkeeping shared by the normal path and the deferred
+   *  trap-resolution continuation: credit the performance, track Lost-action
+   *  usage, then auto-finish the half (or broadcast). */
+  private finalizeActionPerformed(
+    playerId: string,
+    slotKind: 'top' | 'bottom',
+    slot: HalfSlot,
+    action: PendingAction,
+  ): void {
+    const ct = this.currentTurn;
+    if (!ct) {
+      this.broadcastState();
+      return;
+    }
+    const p = this.players.get(playerId);
     if (action.type !== 'unsupported') slot.performedCount += 1;
     // Track whether an action from a Lost-disposition half was performed this
     // turn (gates items like Focusing Rod). The top slot plays the leading
     // card's top half; the bottom slot plays the second card's bottom half.
-    if (action.type !== 'unsupported' && !slot.useBasic && slot.cardId) {
-      const card = guard.p.hand.find((c) => c.id === slot.cardId);
+    if (action.type !== 'unsupported' && !slot.useBasic && slot.cardId && p) {
+      const card = p.hand.find((c) => c.id === slot.cardId);
       const half = card ? (slotKind === 'top' ? card.top : card.bottom) : null;
       if (half?.disposition === 'lost') ct.performedLostAction = true;
     }
@@ -3029,6 +3270,73 @@ export class Room {
     } else {
       this.broadcastState();
     }
+  }
+
+  /**
+   * Walk the trap hexes a bypass-capable move entered, prompting per hex. For
+   * each hex with a live trap, raise a `pendingTrapChoice` and suspend until the
+   * player answers via `resolveTrapChoice`: spring (take damage, remove trap) or
+   * bypass (leave it, mark it destroy-eligible). When no trap hexes remain, run
+   * the deferred post-action bookkeeping.
+   */
+  private resolveTrapHexes(
+    playerId: string,
+    slotKind: 'top' | 'bottom',
+    actionId: string,
+    unit: Unit,
+    hexes: readonly Hex[],
+    index: number,
+  ): void {
+    const ct = this.currentTurn;
+    if (!ct) return;
+    for (let i = index; i < hexes.length; i++) {
+      const h = hexes[i]!;
+      if (unit.hp <= 0) break;
+      if (!this.isTrapHex(h)) continue;
+      const choiceId = `trap-${this.nextTrapChoiceN++}`;
+      this.pendingTrapChoice = {
+        id: choiceId,
+        unitId: unit.id,
+        hex: { q: h.q, r: h.r },
+        prompt: `${unit.name} entered a trap. Spring it (take ${trapDamageFor(
+          this.scenarioLevel,
+        )} damage) or bypass it?`,
+      };
+      this.pendingTrapFollowup = (spring: boolean) => {
+        this.pendingTrapChoice = null;
+        this.pendingTrapFollowup = null;
+        if (spring) {
+          this.springTrapAt(unit, h);
+        } else {
+          ct.trapHexesEnteredThisMove.push({ q: h.q, r: h.r });
+        }
+        this.resolveTrapHexes(playerId, slotKind, actionId, unit, hexes, i + 1);
+      };
+      this.broadcastState();
+      return;
+    }
+    // No more trap prompts — finish the move action now.
+    const slot = slotKind === 'top' ? ct.topSlot : ct.bottomSlot;
+    const action = slot.actions.find((a) => a.id === actionId);
+    if (action) this.finalizeActionPerformed(playerId, slotKind, slot, action);
+    else this.broadcastState();
+  }
+
+  /** Resolve an outstanding trap spring-or-bypass prompt. */
+  resolveTrapChoice(
+    playerId: string,
+    choiceId: string,
+    spring: boolean,
+  ): { ok: true } | { ok: false; reason: string } {
+    const choice = this.pendingTrapChoice;
+    if (!choice || choice.id !== choiceId) return { ok: false, reason: 'no_pending_choice' };
+    // Only the acting player may answer (it's their move).
+    const cur = this.turnOrder[this.activeTurnIndex];
+    if (!cur || cur.kind !== 'player' || cur.playerId !== playerId) {
+      return { ok: false, reason: 'not_your_choice' };
+    }
+    const followup = this.pendingTrapFollowup;
+    if (followup) followup(spring);
     return { ok: true };
   }
 
@@ -3468,6 +3776,7 @@ export class Room {
         activeSlot: null,
         lastModifierDraws: [],
         hexesMovedThisTurn: 0,
+        trapHexesEnteredThisMove: [],
         damageDealtThisTurn: 0,
         // Consume eligibility is evaluated against the start-of-turn board,
         // not live state — so snapshot it here.
@@ -3482,6 +3791,8 @@ export class Room {
       };
       // New turn → fresh rider-source map (the previous turn's are stale).
       this.riderSources = new Map();
+      // New turn → no move ability has reset its trap tracking yet.
+      this.movesStartedThisTurn = new Set();
     } else {
       this.currentTurn = null;
       this.pendingForcedMove = null;
@@ -3770,7 +4081,7 @@ export class Room {
     let dmg = Math.max(0, finalAmount - effShield);
     if (dmg > 0 && targetPlayerEntry) {
       const result = this.fireTrackedTrigger(targetPlayerEntry, 'damage-suffered');
-      if (result.damageNegated) dmg = 0;
+      if (result.damageNegated || this.consumeNegateNextDamage(targetPlayerEntry)) dmg = 0;
     }
     tgtUnit.hp -= dmg;
     // Battle goals: the character actually suffered attack damage.
@@ -4179,9 +4490,28 @@ export class Room {
     const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
     if (!scenario) return [];
     // No room gating: single-room maps (no `rooms`) show every tile.
-    if (!scenario.rooms || scenario.rooms.length === 0) return scenario.tiles;
-    // Otherwise only tiles in revealed rooms (room-less tiles always show).
-    return scenario.tiles.filter((t) => !t.room || this.revealedRooms.has(t.room));
+    const visible =
+      !scenario.rooms || scenario.rooms.length === 0
+        ? scenario.tiles
+        : // Otherwise only tiles in revealed rooms (room-less tiles always show).
+          scenario.tiles.filter((t) => !t.room || this.revealedRooms.has(t.room));
+    // Sprung/destroyed traps revert to floor. The scenario is a shared
+    // singleton, so apply per-room trap removal here without mutating it.
+    if (this.sprungTraps.size === 0) return visible;
+    return visible.map((t) =>
+      t.kind === 'trap' && this.sprungTraps.has(hexKey(t)) ? { ...t, kind: 'floor' as const } : t,
+    );
+  }
+
+  /** A live trap sits on this hex (a 'trap' tile in a revealed room that has not
+   *  yet been sprung or destroyed). */
+  private isTrapHex(hex: Hex): boolean {
+    return this.scenarioTiles().some((t) => t.kind === 'trap' && hexEqual(t, hex));
+  }
+
+  /** Mark a trap removed (sprung or destroyed) for the rest of the scenario. */
+  private removeTrapAt(hex: Hex): void {
+    this.sprungTraps.add(hexKey(hex));
   }
 
   private pushEvent(text: string): void {
@@ -5083,6 +5413,21 @@ export class Room {
     }
   }
 
+  /** Recompute the tappable hexes for any pending `destroy-trap` action: trap
+   *  hexes the actor entered (and bypassed) this move that still hold a trap. */
+  private refreshTrapEligibility(): void {
+    const ct = this.currentTurn;
+    if (!ct) return;
+    const eligible = ct.trapHexesEnteredThisMove.filter((h) => this.isTrapHex(h));
+    for (const slot of [ct.topSlot, ct.bottomSlot]) {
+      for (const a of slot.actions) {
+        if (a.type === 'destroy-trap') {
+          a.eligibleHexes = eligible.map((h) => ({ q: h.q, r: h.r }));
+        }
+      }
+    }
+  }
+
   /** First-sub-target lock-in. Walks accepted offers, marks each element
    *  inert, appends to consumedThisTurn, sums attack/pierce contributions,
    *  grants any rider XP. Subsequent sub-targets read the locked totals. */
@@ -5181,6 +5526,7 @@ export class Room {
   publicState(): PublicGameState {
     this.refreshAmountRefs();
     this.refreshConsumeOffers();
+    this.refreshTrapEligibility();
     this.syncUnitRetaliate();
     const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
     return {
@@ -5199,6 +5545,7 @@ export class Room {
       turnOrder: this.turnOrder,
       activeTurnIndex: this.activeTurnIndex,
       elementBoard: this.elementBoard,
+      pendingTrapChoice: this.pendingTrapChoice,
       monsterModifierDeck: this.monsterModifierDeck,
       monsterModifierDiscard: this.monsterModifierDiscard,
       monsterModifierNeedsReshuffle: this.monsterModifierNeedsReshuffle,

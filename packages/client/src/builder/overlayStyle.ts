@@ -46,6 +46,19 @@ const MAP_PIN_CHECK_INSIDE: string[] = [
 /** lucide-react `Mountain`. */
 const MOUNTAIN: string[] = ['m8 3 4 8 5-5 5 15H2L8 3z'];
 
+/** lucide-react `MoveHorizontal` — a passage connecting two rooms. */
+const MOVE_HORIZONTAL: string[] = [
+  'm18 8 4 4-4 4',
+  'M6 8 2 12l4 4',
+  'M2 12h20',
+];
+
+/** lucide-react `Disc2` — a plate with a centred sensor. */
+const DISC2: string[] = [
+  'M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20',
+  'M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8',
+];
+
 /** lucide-react `Cuboid` (the cube-shaped icon). */
 const CUBOID: string[] = [
   'M10 22v-8',
@@ -78,14 +91,16 @@ for (const n of TOKEN_NUMBERS) {
 }
 
 export const OVERLAY_STYLES: Record<OverlayKind, OverlayStyle> = {
-  'difficult-terrain': { color: '#a07840', symbol: 'D', label: 'Difficult' },
-  'hazardous-terrain': { color: '#c25040', symbol: 'H', label: 'Hazardous' },
-  trap:                { color: '#7a1f2a', symbol: 'T', label: 'Trap', iconPaths: MOUNTAIN },
-  obstacle:            { color: '#555555', symbol: '■', label: 'Obstacle', iconPaths: CUBOID },
+  'difficult-terrain': { color: '#9b3fd4', symbol: 'D', label: 'Difficult' },
+  'hazardous-terrain': { color: '#e8902e', symbol: 'H', label: 'Hazardous' },
+  trap:                { color: '#e23b3b', symbol: 'T', label: 'Trap', iconPaths: MOUNTAIN },
+  obstacle:            { color: '#3fb84d', symbol: '■', label: 'Obstacle', iconPaths: CUBOID },
   objective:           { color: '#d9a441', symbol: '◯', label: 'Objective', iconPaths: MAP_PIN_CHECK_INSIDE },
   treasure:            { color: '#a87a30', symbol: '✦', label: 'Treasure', iconPaths: GEM },
   coin:                { color: '#d9a441', symbol: '$', label: 'Coin' },
   door:                { color: '#6a4a2a', symbol: '▮', label: 'Door', iconPaths: DOOR_CLOSED },
+  corridor:            { color: '#5a6a7a', symbol: '=', label: 'Corridor', iconPaths: MOVE_HORIZONTAL },
+  'pressure-plate':    { color: '#9a9a9a', symbol: '◉', label: 'Pressure Plate', iconPaths: DISC2 },
   'starting-position': {
     color: '#5a8ab8',
     symbol: '↧',
@@ -106,5 +121,7 @@ export const OVERLAY_KINDS: OverlayKind[] = [
   'treasure',
   'coin',
   'door',
+  'corridor',
+  'pressure-plate',
   'starting-position',
 ];

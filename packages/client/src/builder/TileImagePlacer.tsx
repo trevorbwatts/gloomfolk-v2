@@ -1,10 +1,7 @@
 import { useRef } from 'react';
 import type { Hex } from '@gloomfolk/shared';
 import { theme } from '../theme.js';
-import {
-  DEFAULT_TILE_IMAGE_TRANSFORM,
-  type TileImageTransform,
-} from './tileImages.js';
+import type { TileImageTransform } from './tileImages.js';
 
 const SQRT3 = Math.sqrt(3);
 
@@ -80,6 +77,8 @@ interface Props {
   transform: TileImageTransform;
   onChange: (next: TileImageTransform) => void;
   size?: number;
+  /** Max rendered width of the preview area in px. */
+  maxWidth?: number;
 }
 
 /**
@@ -95,6 +94,7 @@ export function TileImagePlacer({
   transform,
   onChange,
   size = 40,
+  maxWidth = 480,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const drag = useRef<{
@@ -165,7 +165,7 @@ export function TileImagePlacer({
         onPointerCancel={onPointerUp}
         style={{
           width: '100%',
-          maxWidth: 480,
+          maxWidth,
           background: theme.bgSolid,
           borderRadius: 6,
           border: `1px solid ${theme.border}`,
@@ -175,7 +175,8 @@ export function TileImagePlacer({
         }}
       >
         {/* The art, transformed exactly as it will render on the map. Drawn
-            centred at the origin so scale/rotate pivot on the footprint centre. */}
+            centred at the origin so scale/rotate pivot on the footprint centre.
+            "meet" shows the whole image; the hex grid does the cropping. */}
         <g transform={imageTransform} style={{ pointerEvents: 'none' }}>
           <image
             href={href}
@@ -183,7 +184,7 @@ export function TileImagePlacer({
             y={-H / 2}
             width={W}
             height={H}
-            preserveAspectRatio="xMidYMid slice"
+            preserveAspectRatio="xMidYMid meet"
           />
         </g>
         {/* Dim everything outside the footprint so the playable hexes stand out.
@@ -253,24 +254,6 @@ export function TileImagePlacer({
           onChange={(e) => patch({ rotation: Number(e.target.value) })}
           style={numberInputStyle}
         />
-      </div>
-
-      <div style={{ marginTop: 8 }}>
-        <button
-          onClick={() => onChange({ ...DEFAULT_TILE_IMAGE_TRANSFORM })}
-          style={{
-            background: 'transparent',
-            color: theme.muted,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 3,
-            padding: '4px 10px',
-            fontSize: 12,
-            fontFamily: theme.font,
-            cursor: 'pointer',
-          }}
-        >
-          Reset to fit
-        </button>
       </div>
     </div>
   );

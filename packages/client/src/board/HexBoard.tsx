@@ -63,7 +63,10 @@ const TILE_FILL: Record<Tile['kind'], string> = {
   wall: '#0a0a0c',
   difficult: '#3a2a1a',
   hazard: '#5a1a1a',
+  trap: '#4a3410',
   door: '#3a3a2a',
+  corridor: '#2f2f38',
+  'pressure-plate': '#33303a',
 };
 
 export interface HexBoardProps {
@@ -556,6 +559,43 @@ export function HexBoard({
           );
         })}
       </g>
+      {tiles.some((t) => t.kind === 'trap') && (
+        <g style={{ pointerEvents: 'none' }}>
+          {tiles
+            .filter((t) => t.kind === 'trap')
+            .map((t) => {
+              const { x, y } = axialToPx(t.q, t.r, size);
+              const r = size * 0.42;
+              // Warning triangle: a trap to be sprung or destroyed.
+              const pts = [
+                `${x},${y - r}`,
+                `${x - r * 0.92},${y + r * 0.7}`,
+                `${x + r * 0.92},${y + r * 0.7}`,
+              ].join(' ');
+              return (
+                <g key={`trap-${t.q},${t.r}`}>
+                  <polygon
+                    points={pts}
+                    fill="#caa052"
+                    stroke="#6b4a12"
+                    strokeWidth={1.5}
+                    strokeLinejoin="round"
+                  />
+                  <text
+                    x={x}
+                    y={y + r * 0.42}
+                    textAnchor="middle"
+                    fontSize={size * 0.5}
+                    fontWeight={800}
+                    fill="#2a1d05"
+                  >
+                    !
+                  </text>
+                </g>
+              );
+            })}
+        </g>
+      )}
       {doors.length > 0 && (
         <g style={{ pointerEvents: 'none' }}>
           {doors.map((d) => {

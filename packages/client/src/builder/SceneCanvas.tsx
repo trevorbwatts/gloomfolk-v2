@@ -12,6 +12,20 @@ import {
   type TileImageTransform,
 } from './tileImages.js';
 
+// Overlay kinds drawn as a bold coloured hex outline (rulebook-marker style),
+// layered on top of everything, instead of a fill tint or a badge/symbol. The
+// outline colour comes from OVERLAY_STYLES. Order = draw order when a hex
+// carries more than one of these.
+const OUTLINE_OVERLAY_KINDS = [
+  'difficult-terrain',
+  'hazardous-terrain',
+  'obstacle',
+  'objective',
+  'trap',
+  'pressure-plate',
+] as const satisfies readonly Overlay['kind'][];
+const OUTLINE_OVERLAY_KIND_SET = new Set<Overlay['kind']>(OUTLINE_OVERLAY_KINDS);
+
 const SQRT3 = Math.sqrt(3);
 
 function axialToPx(q: number, r: number, size: number) {
@@ -92,8 +106,8 @@ function TileBackground({
   const origin = axialToPx(placed.origin.q, placed.origin.r, size);
   const clipId = `tile-clip-${placed.id}`;
   // The user-set placement, mirroring TileImagePlacer: pan by a fraction of the
-  // footprint box, then scale/rotate about its centre. The identity transform
-  // reproduces the plain cover-fit.
+  // footprint box, then scale/rotate about its centre. At the identity transform
+  // the whole image is fit inside the footprint box (then clipped to the hexes).
   const imageTransform =
     `translate(${cx + transform.offsetX * W} ${cy + transform.offsetY * H}) ` +
     `rotate(${transform.rotation}) scale(${transform.scale})`;
@@ -117,7 +131,7 @@ function TileBackground({
             y={-H / 2}
             width={W}
             height={H}
-            preserveAspectRatio="xMidYMid slice"
+            preserveAspectRatio="xMidYMid meet"
           />
         </g>
       </g>
@@ -138,32 +152,13 @@ function HexContents({
   overlays: Overlay[];
   monster: MonsterSpawn | undefined;
 }) {
-  // Non-terrain overlays render as small symbols stacked horizontally at the
-  // bottom of the hex. Terrain tints the hex itself (handled by the caller).
-  const nonTerrain = overlays.filter(
-    (o) => o.kind !== 'difficult-terrain' && o.kind !== 'hazardous-terrain',
-  );
-  const terrain = overlays.find(
-    (o) => o.kind === 'difficult-terrain' || o.kind === 'hazardous-terrain',
-  );
+  // Badge overlays render as small symbols stacked horizontally at the bottom
+  // of the hex. The "outline" kinds (terrain, obstacles, objectives, traps,
+  // pressure plates) are instead shown as a coloured hex outline drawn by the
+  // canvas, so they're excluded here.
+  const nonTerrain = overlays.filter((o) => !OUTLINE_OVERLAY_KIND_SET.has(o.kind));
   return (
     <g style={{ pointerEvents: 'none' }}>
-      {/* Terrain symbol in the upper portion of the hex when terrain is set. */}
-      {terrain && (
-        <text
-          x={cx}
-          y={cy - size * 0.25}
-          textAnchor="middle"
-          fontSize={size * 0.45}
-          fontWeight={700}
-          fill="#fff"
-          stroke="#000"
-          strokeWidth={0.5}
-          paintOrder="stroke"
-        >
-          {OVERLAY_STYLES[terrain.kind].symbol}
-        </text>
-      )}
       {/* Monster marker in the center: avatar image clipped to a circle. */}
       {monster && (() => {
         const entry = monsterEntry(monster.monsterType);
@@ -334,6 +329,15 @@ export function SceneCanvas({
   const monsterByHex = new Map<string, MonsterSpawn>();
   for (const m of monsterSpawns) monsterByHex.set(hexKey(m.hex), m);
 
+  // Hexes carrying each "outline" overlay kind, drawn as a bold coloured hex
+  // outline layered on top of everything (see OUTLINE_OVERLAY_KINDS).
+  const outlineHexKeysByKind = new Map<Overlay['kind'], Set<string>>();
+  for (const kind of OUTLINE_OVERLAY_KINDS) outlineHexKeysByKind.set(kind, new Set());
+  for (const o of overlays) {
+    const set = outlineHexKeysByKind.get(o.kind);
+    if (set) for (const h of o.hexes) set.add(hexKey(h));
+  }
+
   // Off-tile hexes we still need to render: overlay hexes + selected hexes.
   const extraHexes: Hex[] = [];
   const extraSeen = new Set<string>();
@@ -442,14 +446,10 @@ export function SceneCanvas({
                 ? theme.accent
                 : theme.border;
               const strokeWidth = isHexSelected ? 3 : isTileSelected ? 2 : 1;
-              // Tint the hex if a terrain overlay is present; otherwise tile color.
-              const terrain = hexOverlays.find(
-                (o) => o.kind === 'difficult-terrain' || o.kind === 'hazardous-terrain',
-              );
-              // With tile art the hex shows the image through a transparent
-              // fill; terrain still tints (semi-transparent over the art).
-              const hexFill = terrain ? OVERLAY_STYLES[terrain.kind].color : fill;
-              const hexFillOpacity = terrain ? 0.85 : art ? 0 : 1;
+              // Overlay markers are drawn as hex outlines (later pass), so the
+              // fill just shows the tile art (transparent) or its flat colour.
+              const hexFill = fill;
+              const hexFillOpacity = art ? 0 : 1;
               return (
                 <g
                   key={key}
@@ -482,21 +482,6 @@ export function SceneCanvas({
                 </g>
               );
             })}
-            {(() => {
-              const { x, y } = axialToPx(placed.origin.q, placed.origin.r, size);
-              return (
-                <text
-                  x={x}
-                  y={y + size * 1.05}
-                  textAnchor="middle"
-                  fontSize={size * 0.32}
-                  fill={isTileSelected ? theme.accent : theme.muted}
-                  style={{ pointerEvents: 'none' }}
-                >
-                  {placed.tileSideId}
-                </text>
-              );
-            })()}
           </g>
         );
       })}
@@ -510,14 +495,8 @@ export function SceneCanvas({
         const { x, y } = axialToPx(h.q, h.r, size);
         const stroke = isHexSelected ? theme.accent : theme.border;
         const strokeWidth = isHexSelected ? 3 : 1;
-        const terrain = hexOverlays.find(
-          (o) => o.kind === 'difficult-terrain' || o.kind === 'hazardous-terrain',
-        );
-        const hexFill = terrain
-          ? OVERLAY_STYLES[terrain.kind].color
-          : hexOverlays.length > 0 || monster
-          ? theme.panelRaised
-          : 'transparent';
+        const hexFill =
+          hexOverlays.length > 0 || monster ? theme.panelRaised : 'transparent';
         return (
           <g
             key={`extra-${key}`}
@@ -535,7 +514,6 @@ export function SceneCanvas({
             <polygon
               points={hexCorners(x, y, size)}
               fill={hexFill}
-              fillOpacity={terrain ? 0.85 : 1}
               stroke={stroke}
               strokeWidth={strokeWidth}
               strokeDasharray={
@@ -551,6 +529,30 @@ export function SceneCanvas({
             />
           </g>
         );
+      })}
+
+      {/* Overlay markers: a bold hex outline in the marker's colour. Drawn last
+          so each reads as a full, unbroken hexagon on top of tile art and
+          neighbouring borders. Skipped for selected hexes so the selection ring
+          stays visible. */}
+      {OUTLINE_OVERLAY_KINDS.flatMap((kind) => {
+        const color = OVERLAY_STYLES[kind].color;
+        return [...(outlineHexKeysByKind.get(kind) ?? [])].map((key) => {
+          if (selectedHexKeys.has(key)) return null;
+          const [q, r] = key.split(',').map(Number) as [number, number];
+          const { x, y } = axialToPx(q, r, size);
+          return (
+            <polygon
+              key={`${kind}-${key}`}
+              points={hexCorners(x, y, size)}
+              fill="none"
+              stroke={color}
+              strokeWidth={2.25}
+              strokeLinejoin="round"
+              style={{ pointerEvents: 'none' }}
+            />
+          );
+        });
       })}
     </svg>
   );

@@ -61,8 +61,14 @@ function overlayTileKind(kind: string): TileKind | null {
       return 'difficult';
     case 'hazardous-terrain':
       return 'hazard';
+    case 'trap':
+      return 'trap';
     case 'door':
       return 'door';
+    case 'corridor':
+      return 'corridor';
+    case 'pressure-plate':
+      return 'pressure-plate';
     default:
       return null;
   }

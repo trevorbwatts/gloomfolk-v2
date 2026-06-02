@@ -37,6 +37,9 @@ const data: ScenarioData = {
     { id: 'o-mpta22w7-h24h', kind: 'token-1', hexes: [{ q: 0, r: -1 }] },
     { id: 'o-mpta5237-12k7', kind: 'door', hexes: [{ q: 6, r: -5 }] },
     { id: 'o-mpta57j8-oe5n', kind: 'token-2', hexes: [{ q: 6, r: -5 }] },
+    // Test trap on the path out of the starting room — lets Practiced Reflexes'
+    // bottom half (Move 3 with bypass; destroy a trap) be exercised in-app.
+    { id: 'o-trap-test-1', kind: 'trap', hexes: [{ q: -2, r: 4 }] },
     { id: 'o-mpta8i1e-lh9f', kind: 'difficult-terrain', hexes: [{ q: 2, r: -2 }, { q: 2, r: -3 }] },
     { id: 'o-mpta8m40-r1nm', kind: 'difficult-terrain', hexes: [{ q: 5, r: -4 }, { q: 5, r: -3 }] },
     { id: 'o-mpta9iqg-mw22', kind: 'obstacle', hexes: [{ q: 5, r: -7 }] },

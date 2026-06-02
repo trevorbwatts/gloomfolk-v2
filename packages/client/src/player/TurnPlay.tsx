@@ -149,7 +149,8 @@ function isTargetedActionType(t: PendingAction['type']): boolean {
     t === 'attack-aoe' ||
     t === 'push' ||
     t === 'pull' ||
-    t === 'apply-condition'
+    t === 'apply-condition' ||
+    t === 'destroy-trap'
   );
 }
 
@@ -677,6 +678,8 @@ function ActionDriver({
         myPlayerId={myPlayerId}
       />
 
+      <TrapChoicePrompt choice={gameState.pendingTrapChoice} />
+
       {/* ActiveArea has moved up under the sticky PlayerHeader (see
           PlayerScreen.tsx) so the persistent state is always visible. */}
 
@@ -693,6 +696,13 @@ function ActionDriver({
           {selectedAction?.type === 'apply-condition' && !pendingTarget && (
             <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
               Tap an enemy to apply <strong><GameIcon kind={selectedAction.condition} /> {cap(selectedAction.condition)}</strong>.
+            </p>
+          )}
+          {selectedAction?.type === 'destroy-trap' && (
+            <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
+              {selectedAction.eligibleHexes.length > 0
+                ? <>Tap a highlighted <GameIcon kind="loot" /> trap to destroy it{selectedAction.gainExp > 0 ? <> (+{selectedAction.gainExp} XP)</> : null}, or Skip.</>
+                : 'No trap to destroy here — Skip this action.'}
             </p>
           )}
           {selectedAction?.type === 'attack-aoe' && !pendingTarget && (
@@ -1231,10 +1241,15 @@ function effectLabel(e: PrivatePlayerState['activeEffects'][number]): string {
             : 'this round';
       const k = e.attackKind ? ` ${e.attackKind}` : '';
       const p = e.pierceBonus > 0 ? ` +${e.pierceBonus} pierce` : '';
-      return `+${e.amount} atk${k} (${exp})${p}`;
+      // A ref-valued bonus (e.g. Trickster's Reversal: X from target Shield)
+      // resolves at attack time, so show "+X" rather than its flat part.
+      const value = e.amountRef ? '+X' : `+${e.amount}`;
+      return `${value} atk${k} (${exp})${p}`;
     }
     case 'retaliate':
       return `Retaliate ${e.amount}${e.range > 1 ? ` r${e.range}` : ''}`;
+    case 'negate-next-damage':
+      return `Negate next damage (${e.expires === 'end-scenario' ? 'scenario' : 'this round'})`;
   }
 }
 
@@ -1302,6 +1317,52 @@ function ElementChoicePrompt({
             {e}
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function TrapChoicePrompt({
+  choice,
+}: {
+  choice: PublicGameState['pendingTrapChoice'];
+}) {
+  const sock = useSocket();
+  if (!choice) return null;
+  return (
+    <div
+      style={{
+        margin: '8px 0',
+        padding: '10px 12px',
+        background: 'rgba(217, 164, 65, 0.10)',
+        border: `1px solid ${theme.accent}`,
+        borderRadius: 4,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 12,
+          color: theme.accent,
+          marginBottom: 6,
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
+        }}
+      >
+        {choice.prompt}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <button
+          onClick={() => sock.send({ type: 'player_resolve_trap_choice', choiceId: choice.id, spring: true })}
+          style={{ ...btn.ghost(), padding: '6px 10px', fontSize: 12 }}
+        >
+          Spring it
+        </button>
+        <button
+          onClick={() => sock.send({ type: 'player_resolve_trap_choice', choiceId: choice.id, spring: false })}
+          style={{ ...btn.ghost(), padding: '6px 10px', fontSize: 12 }}
+        >
+          Bypass
+        </button>
       </div>
     </div>
   );
@@ -2050,6 +2111,10 @@ function actionLabel(a: PendingAction): ReactNode {
       );
     case 'become-invisible':
       return withActionIcon('invisible', 'Become Invisible');
+    case 'negate-damage':
+      return `Negate the next damage you would suffer ${a.expires === 'end-scenario' ? 'this scenario' : 'this round'}`;
+    case 'destroy-trap':
+      return `Destroy a trap${a.gainExp > 0 ? ` (+${a.gainExp} XP)` : ''}`;
     case 'unsupported':
       return `${a.description} (not supported yet)`;
   }
@@ -2185,6 +2250,10 @@ function BoardForTurn({
       }
       return out;
     }
+    if (selectedAction.type === 'destroy-trap') {
+      // Highlight the trap hexes entered (and bypassed) this move.
+      return new Set(selectedAction.eligibleHexes.map((h) => hexKey(h)));
+    }
     return new Set<string>();
   }, [myUnit, selectedAction, forcedMoveTarget, gameState.tiles, gameState.units]);
 
@@ -2297,6 +2366,17 @@ function BoardForTurn({
       onStageTarget({ kind: 'aoe', hex: h });
       return;
     }
+    if (selectedAction.type === 'destroy-trap') {
+      // Tap one of the eligible trap hexes to destroy it.
+      if (!reachableKeys.has(hexKey(h))) return;
+      sock.send({
+        type: 'player_perform_action',
+        slot: activeSlotKind,
+        actionId: selectedAction.id,
+        target: { hex: h },
+      });
+      return;
+    }
     if (
       (selectedAction.type === 'push' || selectedAction.type === 'pull') &&
       forcedMoveTarget &&
@@ -2359,6 +2439,7 @@ function BoardForTurn({
   const canTapHex =
     (isForcedMove && !!forcedMoveTargetId) ||
     isAoeMode ||
+    selectedAction?.type === 'destroy-trap' ||
     (!pendingTarget && selectedAction?.type === 'move' && !isImmobilized);
   const canTapUnit =
     !pendingTarget &&

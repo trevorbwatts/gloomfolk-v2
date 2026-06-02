@@ -490,6 +490,15 @@ async function handle(
       return;
     }
 
+    case 'player_resolve_trap_choice': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.resolveTrapChoice(conn.playerId, msg.choiceId, msg.spring);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
     case 'player_engage_half': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
