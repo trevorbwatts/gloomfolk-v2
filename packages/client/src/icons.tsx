@@ -22,6 +22,7 @@ import {
   Sparkle,
   SportShoe,
   Sword,
+  Target,
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -40,6 +41,7 @@ export type IconKey =
   | 'push'
   | 'pull'
   | 'range'
+  | 'target'
   | 'loot';
 
 const ICONS: Record<IconKey, LucideIcon> = {
@@ -57,6 +59,7 @@ const ICONS: Record<IconKey, LucideIcon> = {
   push: ArrowRightToLine,
   pull: ArrowLeftFromLine,
   range: BowArrow,
+  target: Target,
   loot: Coins,
   safeguard: ShieldCog,
   ward: ShieldHalf,

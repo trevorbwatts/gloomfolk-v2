@@ -6,7 +6,11 @@ import type { MonsterSpawn, Overlay, PlacedTile } from './scenarios.js';
 import { OVERLAY_STYLES } from './overlayStyle.js';
 import { monsterEntry } from './monsterCatalog.js';
 import { monsterAvatarUrl } from '../avatars.js';
-import { getTileImage } from './tileImages.js';
+import {
+  getTileImageRecord,
+  type TileImageRecord,
+  type TileImageTransform,
+} from './tileImages.js';
 
 const SQRT3 = Math.sqrt(3);
 
@@ -61,11 +65,13 @@ function TileBackground({
   footprint,
   size,
   href,
+  transform,
 }: {
   placed: PlacedTile;
   footprint: readonly Hex[];
   size: number;
   href: string;
+  transform: TileImageTransform;
 }) {
   if (footprint.length === 0) return null;
   // Local pixel geometry of the unrotated footprint.
@@ -79,8 +85,18 @@ function TileBackground({
     if (x + size > maxX) maxX = x + size;
     if (y + size > maxY) maxY = y + size;
   }
+  const W = maxX - minX;
+  const H = maxY - minY;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
   const origin = axialToPx(placed.origin.q, placed.origin.r, size);
   const clipId = `tile-clip-${placed.id}`;
+  // The user-set placement, mirroring TileImagePlacer: pan by a fraction of the
+  // footprint box, then scale/rotate about its centre. The identity transform
+  // reproduces the plain cover-fit.
+  const imageTransform =
+    `translate(${cx + transform.offsetX * W} ${cy + transform.offsetY * H}) ` +
+    `rotate(${transform.rotation}) scale(${transform.scale})`;
   return (
     <g
       transform={`translate(${origin.x} ${origin.y}) rotate(${60 * placed.rotation})`}
@@ -93,15 +109,18 @@ function TileBackground({
           ))}
         </clipPath>
       </defs>
-      <image
-        href={href}
-        x={minX}
-        y={minY}
-        width={maxX - minX}
-        height={maxY - minY}
-        clipPath={`url(#${clipId})`}
-        preserveAspectRatio="xMidYMid slice"
-      />
+      <g clipPath={`url(#${clipId})`}>
+        <g transform={imageTransform}>
+          <image
+            href={href}
+            x={-W / 2}
+            y={-H / 2}
+            width={W}
+            height={H}
+            preserveAspectRatio="xMidYMid slice"
+          />
+        </g>
+      </g>
     </g>
   );
 }
@@ -263,8 +282,9 @@ export function SceneCanvas({
 }: SceneCanvasProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
 
-  // Uploaded background art for the tile sides in play, loaded from IndexedDB.
-  const [tileImages, setTileImages] = useState<Record<string, string>>({});
+  // Uploaded background art (with placement) for the tile sides in play, loaded
+  // from IndexedDB.
+  const [tileImages, setTileImages] = useState<Record<string, TileImageRecord>>({});
   const sideKey = Array.from(new Set(placedTiles.map((p) => p.tileSideId)))
     .sort()
     .join(',');
@@ -272,12 +292,12 @@ export function SceneCanvas({
     let cancelled = false;
     const ids = sideKey ? sideKey.split(',') : [];
     Promise.all(
-      ids.map(async (id) => [id, await getTileImage(id)] as const),
+      ids.map(async (id) => [id, await getTileImageRecord(id)] as const),
     )
       .then((entries) => {
         if (cancelled) return;
-        const next: Record<string, string> = {};
-        for (const [id, img] of entries) if (img) next[id] = img;
+        const next: Record<string, TileImageRecord> = {};
+        for (const [id, rec] of entries) if (rec) next[id] = rec;
         setTileImages(next);
       })
       .catch(() => {
@@ -406,7 +426,8 @@ export function SceneCanvas({
                 placed={placed}
                 footprint={footprint}
                 size={size}
-                href={art}
+                href={art.dataUrl}
+                transform={art.transform}
               />
             )}
             {hexes.map((h) => {

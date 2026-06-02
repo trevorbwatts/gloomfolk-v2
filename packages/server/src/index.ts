@@ -194,11 +194,23 @@ async function handle(
         send(ws, { type: 'error', message: 'campaign_not_found' });
         return;
       }
-      const playerId = room.attachPlayer(ws, msg.playerId);
+      const playerId = room.attachPlayer(ws, msg.playerId, msg.deviceId);
       if (!playerId) return;
       conn.role = 'player';
       conn.campaignId = room.campaign.id;
       conn.playerId = playerId;
+      return;
+    }
+
+    case 'player_leave': {
+      // Mirror the socket-close cleanup: drops an unclaimed lobby slot so a
+      // player who taps Back and rejoins doesn't leave a duplicate behind.
+      if (conn.role === 'player' && conn.campaignId && conn.playerId) {
+        rooms.get(conn.campaignId)?.detachPlayer(conn.playerId);
+      }
+      conn.role = null;
+      conn.campaignId = null;
+      conn.playerId = null;
       return;
     }
 

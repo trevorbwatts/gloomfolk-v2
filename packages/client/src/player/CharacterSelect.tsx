@@ -26,7 +26,7 @@ const h1Style: React.CSSProperties = {
   marginBottom: 12,
   fontFamily: theme.headingFont,
   fontWeight: 500,
-  fontSize: 28,
+  fontSize: 20,
   color: theme.accent,
   letterSpacing: 0.5,
 };
@@ -70,6 +70,21 @@ export function CharacterSelect({
   const available = characters.filter(
     (c) => !c.claimedByPlayerId || c.claimedByPlayerId === myPlayerId || reclaimable(c),
   );
+
+  // Each step (roster → pick-class → name) is its own screen; always start at
+  // the top when moving forward or back between them.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [step]);
+
+  // The roster is the root of the player flow. Clear any stale `gf` history
+  // flag left over from a previous claim/loadout cycle so the header Back
+  // button reliably leaves the campaign instead of popping a dead entry.
+  useEffect(() => {
+    if (step === 'roster') {
+      try { history.replaceState(null, ''); } catch { /* noop */ }
+    }
+  }, [step]);
 
   useEffect(() => {
     if (step === 'roster') return;
@@ -178,7 +193,7 @@ export function CharacterSelect({
 
   return (
     <div>
-      <h1 style={h1Style}>Pick your character</h1>
+      <h1 style={h1Style}>Pick your Character</h1>
       {available.length > 0 && (
         <>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

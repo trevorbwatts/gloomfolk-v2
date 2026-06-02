@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from 'react';
+import { ChevronLeft } from 'lucide-react';
 import type {
   AttackConsumeOffer,
   Card,
@@ -25,6 +26,7 @@ import type {
   Unit,
 } from '@gloomfolk/shared';
 import {
+  ALL_ITEMS,
   bfsForcedMove,
   bfsForcedMovePath,
   bfsPath,
@@ -213,6 +215,18 @@ function ActionDriver({
    *  in the relevant target mode; cleared on Cancel, Confirm, or when the
    *  active action changes. */
   const [pendingTarget, setPendingTarget] = useState<PendingTarget | null>(null);
+  /** Target N (multi-target) attack staging. The player taps every enemy they
+   *  want to hit up front (ordered), optionally attaches items to specific
+   *  ones, then confirms once — instead of confirming each shot in turn.
+   *  Only meaningful while a `targets > 1` attack is selected. */
+  const [stagedTargets, setStagedTargets] = useState<Unit[]>([]);
+  /** Items attached to staged enemies for the multi-target attack, in the order
+   *  attached. Deferred: nothing is sent to the server until Confirm, so a
+   *  Cancel needs no rollback. Multiple items may target one or several enemies. */
+  const [itemBindings, setItemBindings] = useState<{ itemId: string; targetUnitId: string }[]>([]);
+  /** While set, the next tap on a (staged) enemy attaches this item to it,
+   *  rather than toggling its staging. Set from the item modal. */
+  const [bindingItemId, setBindingItemId] = useState<string | null>(null);
   /** Open the item modal anchored to a specific action row (its relevant items
    *  surface at the top). Null when closed. */
   const [itemContext, setItemContext] = useState<ItemActionContext | null>(null);
@@ -234,6 +248,9 @@ function ActionDriver({
     setSelectedActionId(null);
     setForcedMoveTargetId(null);
     setPendingTarget(null);
+    setStagedTargets([]);
+    setItemBindings([]);
+    setBindingItemId(null);
   }, [slotSig]);
 
   // Engaging a top/bottom half (and entering your turn at all) swaps in a fresh
@@ -256,6 +273,9 @@ function ActionDriver({
     setSelectedActionId(firstPendingId);
     setForcedMoveTargetId(null);
     setPendingTarget(null);
+    setStagedTargets([]);
+    setItemBindings([]);
+    setBindingItemId(null);
   }, [firstPendingId]);
 
   const selectedAction =
@@ -270,6 +290,15 @@ function ActionDriver({
   }, [moveActionSig]);
 
   const isMoveSelected = selectedAction?.type === 'move';
+  // Target N attack: the batch-staging flow (tap all targets, attach items,
+  // confirm once) instead of confirming each shot. Single-target attacks keep
+  // the immediate stage→confirm `pendingTarget` path.
+  const isMultiAttack = selectedAction?.type === 'attack' && selectedAction.targets > 1;
+  const boundItemIds = useMemo(() => itemBindings.map((b) => b.itemId), [itemBindings]);
+  const itemBoundUnitIds = useMemo(
+    () => [...new Set(itemBindings.map((b) => b.targetUnitId))],
+    [itemBindings],
+  );
   const isImmobilized = !!myUnit?.conditions.some((c) => c.kind === 'immobilize');
   const moveStepsUsed = movePath.length;
   const clearActionSelection = () => {
@@ -277,6 +306,9 @@ function ActionDriver({
     setSelectedActionId(null);
     setForcedMoveTargetId(null);
     setPendingTarget(null);
+    setStagedTargets([]);
+    setItemBindings([]);
+    setBindingItemId(null);
   };
   const confirmMove = () => {
     if (!activeSlotKind || selectedAction?.type !== 'move') return;
@@ -306,15 +338,62 @@ function ActionDriver({
     clearActionSelection();
   };
 
-  // Mid-sequence dead end: a multi-target attack has hit at least one enemy and
-  // still has shots left, but no other enemy is in range to spend them on (each
-  // shot must hit a distinct enemy). Drives a hint so the turn doesn't look stuck.
-  const multiTargetExhausted = useMemo(() => {
-    if (!myUnit || selectedAction?.type !== 'attack') return false;
-    if (selectedAction.targets <= 1 || selectedAction.hitsLanded === 0) return false;
-    if (selectedAction.targetsRemaining <= 0) return false;
-    return attackableEnemyIds(gameState, myUnit, selectedAction).length === 0;
+  // How many distinct enemies the player could still legally hit — caps the
+  // staged list and tells the bottom bar when every reachable target is chosen.
+  const attackableCount = useMemo(() => {
+    if (!myUnit || selectedAction?.type !== 'attack') return 0;
+    return attackableEnemyIds(gameState, myUnit, selectedAction).length;
   }, [myUnit, selectedAction, gameState]);
+
+  // Tap an enemy during a Target N attack: in binding mode it attaches the
+  // armed item to that enemy (staging it if needed); otherwise it toggles the
+  // enemy in/out of the staged set, capped at the attack's target count.
+  const onTapAttackTarget = (u: Unit) => {
+    if (!selectedAction || selectedAction.type !== 'attack') return;
+    const cap = selectedAction.targets;
+    if (bindingItemId) {
+      const alreadyStaged = stagedTargets.some((t) => t.id === u.id);
+      if (!alreadyStaged && stagedTargets.length >= cap) return; // no room to add
+      if (!alreadyStaged) setStagedTargets((cur) => [...cur, u]);
+      setItemBindings((cur) => [...cur, { itemId: bindingItemId, targetUnitId: u.id }]);
+      setBindingItemId(null);
+      return;
+    }
+    if (stagedTargets.some((t) => t.id === u.id)) {
+      setStagedTargets((cur) => cur.filter((t) => t.id !== u.id));
+      setItemBindings((cur) => cur.filter((b) => b.targetUnitId !== u.id));
+    } else if (stagedTargets.length < cap) {
+      setStagedTargets((cur) => [...cur, u]);
+    }
+  };
+
+  // Resolve a Target N attack: replay one shot per staged enemy. Any items
+  // attached to an enemy are armed (player_use_item) immediately before that
+  // enemy's shot, so the turn-charge the server consumes lands on the intended
+  // target even with several riders across different enemies. If the player
+  // staged fewer than the card allows, a trailing skip closes the action.
+  const confirmMultiAttack = () => {
+    if (!selectedAction || selectedAction.type !== 'attack' || !activeSlotKind) return;
+    if (stagedTargets.length === 0) return;
+    for (const t of stagedTargets) {
+      for (const b of itemBindings.filter((b) => b.targetUnitId === t.id)) {
+        sock.send({ type: 'player_use_item', itemId: b.itemId });
+      }
+      sock.send({
+        type: 'player_perform_action',
+        slot: activeSlotKind,
+        actionId: selectedAction.id,
+        target: { unitId: t.id },
+      });
+    }
+    if (stagedTargets.length < selectedAction.targets) {
+      sock.send({ type: 'player_skip_action', slot: activeSlotKind, actionId: selectedAction.id });
+    }
+    setStagedTargets([]);
+    setItemBindings([]);
+    setBindingItemId(null);
+    setSelectedActionId(null);
+  };
 
   // End-turn bar appears when both halves are effectively done: either the
   // active half has all actions ticked off and the other half is `done`, or
@@ -461,12 +540,37 @@ function ActionDriver({
   // target is staged (and always for unsupported actions).
   const showActionBar = !!selectedAction && !isMoveSelected;
   const isUnsupported = selectedAction?.type === 'unsupported';
-  const confirmDisabled = (targetedSelected && !pendingTarget) || isUnsupported;
+  // Target N: Confirm needs at least one staged enemy (and the player isn't
+  // mid-bind). Otherwise the usual rule: a single-target action needs a staged
+  // pendingTarget, and unsupported actions can never confirm.
+  const confirmDisabled = isMultiAttack
+    ? stagedTargets.length === 0 || !!bindingItemId
+    : (targetedSelected && !pendingTarget) || isUnsupported;
 
   // Only summarize a staged target (e.g. "Attack 3 on Goblin") — that names
   // the specific target, which isn't shown above. The plain "Perform <action>"
-  // line is dropped: it just echoed the action row already on screen.
-  const bottomSummary: ReactNode = pendingTarget ? targetSummary : '';
+  // line is dropped: it just echoed the action row already on screen. Target N
+  // attacks show their own multi-target summary instead.
+  const bottomSummary: ReactNode = isMultiAttack
+    ? selectedAction?.type === 'attack'
+      ? (
+          <MultiAttackSummary
+            action={selectedAction}
+            stagedTargets={stagedTargets}
+            itemBindings={itemBindings}
+            bindingItemId={bindingItemId}
+            attackableCount={attackableCount}
+            onRemoveTarget={(id) => {
+              setStagedTargets((cur) => cur.filter((t) => t.id !== id));
+              setItemBindings((cur) => cur.filter((b) => b.targetUnitId !== id));
+            }}
+            onCancelBinding={() => setBindingItemId(null)}
+          />
+        )
+      : ''
+    : pendingTarget
+      ? targetSummary
+      : '';
 
   // The player can back out of the chosen half (to pick the other card/half)
   // only while nothing has been performed yet. The button sits above the
@@ -504,7 +608,9 @@ function ActionDriver({
   }, [showStickyArea]);
 
   const onConfirmAction = () => {
-    if (pendingTarget) {
+    if (isMultiAttack) {
+      confirmMultiAttack();
+    } else if (pendingTarget) {
       confirmPendingTarget();
     } else if (nonTargetedReady && selectedAction && activeSlotKind) {
       sock.send({
@@ -515,6 +621,20 @@ function ActionDriver({
     }
   };
   const onSkipAction = () => {
+    // Target N: Skip is a layered back-out. Cancel a pending item-bind first,
+    // then clear staged targets, and only skip the whole attack once there's
+    // nothing staged — nothing was sent to the server, so this is purely local.
+    if (isMultiAttack) {
+      if (bindingItemId) {
+        setBindingItemId(null);
+        return;
+      }
+      if (stagedTargets.length > 0 || itemBindings.length > 0) {
+        setStagedTargets([]);
+        setItemBindings([]);
+        return;
+      }
+    }
     // Skip the underlying action: send the skip message and clear any local
     // target/forced-move state so the action row updates and the bar dismisses.
     if (selectedActionId && activeSlotKind) {
@@ -527,6 +647,9 @@ function ActionDriver({
     setSelectedActionId(null);
     setForcedMoveTargetId(null);
     setPendingTarget(null);
+    setStagedTargets([]);
+    setItemBindings([]);
+    setBindingItemId(null);
   };
 
   return (
@@ -539,9 +662,12 @@ function ActionDriver({
             padding: '4px 10px',
             fontSize: 11,
             marginBottom: 10,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
           }}
         >
-          ← Back
+          <ChevronLeft size={13} /> Back
         </button>
       )}
       <h2 style={{ marginBottom: 10, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>Your turn</h2>
@@ -579,12 +705,11 @@ function ActionDriver({
               Drag to rotate the pattern, then tap Confirm.
             </p>
           )}
-          {selectedAction?.type === 'attack' && selectedAction.targets > 1 && (
+          {isMultiAttack && (
             <p style={{ fontSize: 12, color: theme.muted, margin: '4px 0' }}>
-              Multi-target: <strong>{selectedAction.targetsRemaining}</strong> of {selectedAction.targets} shots remaining.
-              {multiTargetExhausted && (
-                <> — no other target in range. Tap <strong>Skip</strong> to finish this attack.</>
-              )}
+              {bindingItemId
+                ? <>Tap a target to attach the item, then tap <strong>Confirm</strong>.</>
+                : <>Tap each enemy you want to hit ({stagedTargets.length}/{selectedAction.targets}), then tap <strong>Items</strong> or <strong>Confirm</strong>.</>}
             </p>
           )}
 
@@ -597,6 +722,10 @@ function ActionDriver({
             onPickForcedMoveTarget={(id) => setForcedMoveTargetId(id)}
             pendingTarget={pendingTarget}
             onStageTarget={setPendingTarget}
+            isMultiAttack={isMultiAttack}
+            stagedTargetIds={stagedTargets.map((t) => t.id)}
+            itemBoundUnitIds={itemBoundUnitIds}
+            onTapAttackTarget={onTapAttackTarget}
             movePath={movePath}
             setMovePath={setMovePath}
             isImmobilized={isImmobilized}
@@ -616,6 +745,8 @@ function ActionDriver({
           context={itemContext}
           isMyTurn
           onClose={() => setItemContext(null)}
+          onArmForBinding={(itemId) => setBindingItemId(itemId)}
+          boundItemIds={boundItemIds}
         />
       )}
 
@@ -695,8 +826,19 @@ function ActionDriver({
               ) : showActionBar ? (
                 <>
                   <button onClick={onSkipAction} style={bottomBarBtn(false)}>
-                    Skip
+                    {isMultiAttack &&
+                    (stagedTargets.length > 0 || itemBindings.length > 0 || bindingItemId)
+                      ? 'Cancel'
+                      : 'Skip'}
                   </button>
+                  {isMultiAttack && activeSlotKind && selectedAction && (
+                    <button
+                      onClick={() => setItemContext({ slot: activeSlotKind, action: selectedAction })}
+                      style={bottomBarBtn(false)}
+                    >
+                      Items
+                    </button>
+                  )}
                   <button
                     onClick={onConfirmAction}
                     disabled={confirmDisabled}
@@ -1729,6 +1871,92 @@ function AttackTargetSummary({
   );
 }
 
+/** Target N staging summary: the chosen enemies in order (each removable), the
+ *  items attached to each, and a hint while an item is waiting to be attached. */
+function MultiAttackSummary({
+  action,
+  stagedTargets,
+  itemBindings,
+  bindingItemId,
+  attackableCount,
+  onRemoveTarget,
+  onCancelBinding,
+}: {
+  action: Extract<PendingAction, { type: 'attack' }>;
+  stagedTargets: Unit[];
+  itemBindings: { itemId: string; targetUnitId: string }[];
+  bindingItemId: string | null;
+  attackableCount: number;
+  onRemoveTarget: (unitId: string) => void;
+  onCancelBinding: () => void;
+}) {
+  const bindingName = bindingItemId ? ALL_ITEMS[bindingItemId]?.name ?? 'item' : null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div>
+        <GameIcon kind="attack" /> <strong>Attack {action.amount}</strong>
+        {' · '}
+        {stagedTargets.length}/{action.targets} target{action.targets === 1 ? '' : 's'}
+        {stagedTargets.length >= attackableCount && attackableCount < action.targets && (
+          <span style={{ color: theme.muted }}> (all reachable enemies chosen)</span>
+        )}
+      </div>
+      {stagedTargets.length === 0 ? (
+        <div style={{ fontSize: 12, color: theme.muted }}>Tap enemies on the map to choose targets.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {stagedTargets.map((t, i) => {
+            const items = itemBindings
+              .filter((b) => b.targetUnitId === t.id)
+              .map((b) => ALL_ITEMS[b.itemId]?.name ?? b.itemId);
+            return (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                <span
+                  style={{
+                    minWidth: 18,
+                    height: 18,
+                    borderRadius: '50%',
+                    background: theme.accent,
+                    color: '#0e1612',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  {i + 1}
+                </span>
+                <strong>{t.name}</strong>
+                {items.map((name) => (
+                  <StatusChip key={name} label={name} tone="applied" />
+                ))}
+                <button
+                  onClick={() => onRemoveTarget(t.id)}
+                  style={{ ...btn.ghost(), padding: '2px 8px', fontSize: 11, marginLeft: 'auto' }}
+                >
+                  Remove
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {bindingName && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: theme.accent }}>
+          <span>Tap a target to attach <strong>{bindingName}</strong>.</span>
+          <button
+            onClick={onCancelBinding}
+            style={{ ...btn.ghost(), padding: '2px 8px', fontSize: 11 }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function actionLabel(a: PendingAction): ReactNode {
   switch (a.type) {
     case 'move':
@@ -1836,6 +2064,10 @@ function BoardForTurn({
   onPickForcedMoveTarget,
   pendingTarget,
   onStageTarget,
+  isMultiAttack,
+  stagedTargetIds,
+  itemBoundUnitIds,
+  onTapAttackTarget,
   movePath,
   setMovePath,
   isImmobilized,
@@ -1850,6 +2082,12 @@ function BoardForTurn({
   onPickForcedMoveTarget: (unitId: string) => void;
   pendingTarget: PendingTarget | null;
   onStageTarget: (target: PendingTarget | null) => void;
+  /** Target N attack: when true, enemy taps go through `onTapAttackTarget`
+   *  (stage/unstage or attach an item) rather than staging a single target. */
+  isMultiAttack: boolean;
+  stagedTargetIds: string[];
+  itemBoundUnitIds: string[];
+  onTapAttackTarget: (u: Unit) => void;
   /** Move preview path (owned by ActionDriver so the move's Confirm/Skip can
    *  live in the shared sticky bottom area). This component mutates it as the
    *  player traces a route on the board. */
@@ -2094,7 +2332,9 @@ function BoardForTurn({
     if (!activeSlotKind || !selectedAction) return;
     if (u.kind !== 'monster') return;
     if (selectedAction.type === 'attack') {
-      onStageTarget({ kind: 'attack', unit: u });
+      // Target N: stage/unstage or attach an item. Single-target: stage one.
+      if (isMultiAttack) onTapAttackTarget(u);
+      else onStageTarget({ kind: 'attack', unit: u });
       return;
     }
     if (selectedAction.type === 'apply-condition') {
@@ -2201,6 +2441,8 @@ function BoardForTurn({
         }
         targetableUnitIds={targetableUnitIds}
         selectedUnitId={selectedUnitId}
+        stagedUnitIds={isMultiAttack ? stagedTargetIds : []}
+        itemBoundUnitIds={isMultiAttack ? itemBoundUnitIds : []}
         selectedHexKey={selectedHexKey}
         aoeHexKeys={aoeHexKeys}
         onTapHex={canTapHex ? handleTapHex : undefined}

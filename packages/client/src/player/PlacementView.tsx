@@ -5,6 +5,7 @@ import { HexBoard } from '../board/HexBoard.js';
 import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
 import { useSocket } from '../net/useSocket.js';
 import { btn, theme } from '../theme.js';
+import { BOTTOM_BAR_HEIGHT } from './BottomBar.js';
 
 const unitAvatarUrl = (u: Unit) =>
   u.kind === 'monster' ? monsterAvatarUrl(u.defId) : classAvatarUrl(u.defId);
@@ -59,22 +60,8 @@ export function PlacementView({
     sock.send({ type: 'player_place', hex: h });
   };
 
-  // Party progress for the status line.
-  const party = gameState.players.filter((p) => p.characterId && p.connected);
-  const readyCount = party.filter((p) => p.placementReady).length;
-  const waiting = party.length - readyCount;
-
   return (
-    <div>
-      <p style={{ color: theme.muted, fontSize: 14, margin: '0 0 12px', lineHeight: 1.5 }}>
-        {myReady
-          ? waiting > 0
-            ? `Locked in. Waiting on ${waiting} more ${waiting === 1 ? 'player' : 'players'}…`
-            : 'Locked in. Waiting for the host to begin…'
-          : placed
-            ? 'Tap a glowing hex to move, or lock in when you’re happy.'
-            : 'Tap a glowing hex to choose where your hero starts.'}
-      </p>
+    <div style={{ paddingBottom: 80 }}>
       <HexBoard
         tiles={gameState.tiles}
         units={gameState.units}
@@ -85,11 +72,22 @@ export function PlacementView({
         {...(myReady ? {} : { onTapHex })}
         unitAvatarUrl={unitAvatarUrl}
       />
-      <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
+      <div
+        style={{
+          position: 'fixed',
+          bottom: BOTTOM_BAR_HEIGHT,
+          left: 0,
+          right: 0,
+          background: theme.bgSolid,
+          padding: '8px 16px',
+          borderTop: `1px solid ${theme.border}`,
+          zIndex: 40,
+        }}
+      >
         {myReady ? (
           <button
             onClick={() => sock.send({ type: 'player_set_placement_ready', ready: false })}
-            style={{ ...btn.outline(), fontSize: 15, padding: '12px 24px' }}
+            style={{ ...btn.outline(), width: '100%', fontSize: 15, padding: '10px 16px' }}
           >
             Change position
           </button>
@@ -97,7 +95,7 @@ export function PlacementView({
           <button
             disabled={!placed}
             onClick={() => sock.send({ type: 'player_set_placement_ready', ready: true })}
-            style={{ ...btn.primary(!placed), fontSize: 16, padding: '14px 28px' }}
+            style={{ ...btn.primary(!placed), width: '100%', fontSize: 15, padding: '10px 16px' }}
           >
             ✓ Ready
           </button>

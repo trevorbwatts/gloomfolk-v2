@@ -24,6 +24,40 @@ function hexCorners(cx: number, cy: number, size: number): string {
   return pts.join(' ');
 }
 
+const BOARD_PAD = 8;
+
+interface Bounds {
+  minX: number; minY: number; maxX: number; maxY: number;
+  /** viewBox width/height (board extent + padding on both sides). */
+  vbW: number; vbH: number;
+  /** viewBox origin — top-left corner, i.e. minX/minY minus the padding. */
+  originX: number; originY: number;
+}
+
+/** Pixel bounding box of the whole board (in axial→px space), padded. Shared by
+ *  the render (viewBox) and the zoom/pan effects so they agree on coordinates. */
+function computeBounds(tiles: Tile[], size: number): Bounds {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const t of tiles) {
+    const { x, y } = axialToPx(t.q, t.r, size);
+    if (x - size < minX) minX = x - size;
+    if (y - size < minY) minY = y - size;
+    if (x + size > maxX) maxX = x + size;
+    if (y + size > maxY) maxY = y + size;
+  }
+  return {
+    minX, minY, maxX, maxY,
+    vbW: maxX - minX + BOARD_PAD * 2,
+    vbH: maxY - minY + BOARD_PAD * 2,
+    originX: minX - BOARD_PAD,
+    originY: minY - BOARD_PAD,
+  };
+}
+
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 3;
+const ZOOM_STEP = 1.25;
+
 const TILE_FILL: Record<Tile['kind'], string> = {
   floor: '#2a2a2e',
   wall: '#0a0a0c',
@@ -42,6 +76,10 @@ export interface HexBoardProps {
   doors?: DoorView[];
   size?: number;
   maxWidthPx?: number;
+  /** When set, the board renders at a fixed hex size inside a scrollable
+   *  viewport with on-screen zoom (+/−) controls, and auto-centers on the
+   *  player figures when a scenario loads — instead of shrinking to fit. */
+  zoomable?: boolean;
   activeUnitIds?: string[];
   /** Hex keys ("q,r") to highlight as movable. */
   reachableKeys?: Set<string>;
@@ -53,6 +91,13 @@ export interface HexBoardProps {
   /** A unit currently chosen (staged) by the player; rendered with a strong
       selection ring distinct from the dashed targetable ring. */
   selectedUnitId?: string | null;
+  /** Multiple staged units (e.g. a Target N attack's chosen enemies). Each is
+      drawn with the same selection ring as `selectedUnitId`, plus a small
+      order badge; ids also present in `itemBoundUnitIds` get an item dot. */
+  stagedUnitIds?: string[];
+  /** Staged units that have an item attached to them (Target N item binding).
+      Drawn with a small filled dot so the player sees which got an item. */
+  itemBoundUnitIds?: string[];
   /** A hex currently chosen (staged) by the player (e.g. AOE anchor). */
   selectedHexKey?: string | null;
   /** Hex keys ("q,r") covered by the staged AOE pattern. Rendered with a
@@ -87,11 +132,14 @@ export function HexBoard({
   doors = [],
   size = 40,
   maxWidthPx = 900,
+  zoomable = false,
   activeUnitIds = [],
   reachableKeys,
   pathHexes,
   targetableUnitIds = [],
   selectedUnitId = null,
+  stagedUnitIds = [],
+  itemBoundUnitIds = [],
   selectedHexKey = null,
   aoeHexKeys,
   onTapHex,
@@ -103,8 +151,55 @@ export function HexBoard({
   monsterTurnAnim,
 }: HexBoardProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  // --- Zoom / pan (zoomable mode only) --------------------------------------
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  // Figma-style canvas transform (zoomable/display boards): `x`/`y` translate
+  // the content in viewport pixels, `scale` zooms. Panning is free — you can
+  // drag the board into empty space past its edges.
+  const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
+  const zoom = view.scale;
+  // Signature of the board we last auto-centered on, so we re-center when a new
+  // scenario loads (different tile extent) but not on every unit move.
+  const centeredSigRef = useRef<string | null>(null);
   const isDraggingRef = useRef(false);
   const lastEnteredKeyRef = useRef<string | null>(null);
+  // Click-drag panning for a non-interactive (display-only) board — e.g. the
+  // host screen, which has no hex tap/enter handlers to conflict with. Players
+  // interact with hexes instead and pan via native touch scrolling.
+  const isDisplayBoard = !onTapHex && !onTapUnit && !onHexEnter;
+  const panRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  const onPanDown = (e: React.PointerEvent) => {
+    if (!isDisplayBoard) return;
+    const sc = scrollerRef.current;
+    if (!sc) return;
+    panRef.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+    setPanning(true);
+    try { sc.setPointerCapture(e.pointerId); } catch { /* noop */ }
+  };
+  const onPanMove = (e: React.PointerEvent) => {
+    const start = panRef.current;
+    if (!start) return;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    setView((v) => ({ ...v, x: start.vx + dx, y: start.vy + dy }));
+  };
+  const onPanEnd = (e: React.PointerEvent) => {
+    if (!panRef.current) return;
+    panRef.current = null;
+    setPanning(false);
+    try { scrollerRef.current?.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+  };
+  // Zoom by `factor` about a viewport-relative pixel point, keeping whatever is
+  // under that point fixed (cursor for wheel, center for the +/− buttons).
+  const zoomAt = (factor: number, px: number, py: number) => {
+    setView((v) => {
+      const ns = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, v.scale * factor));
+      if (ns === v.scale) return v;
+      const k = ns / v.scale;
+      return { scale: ns, x: px - (px - v.x) * k, y: py - (py - v.y) * k };
+    });
+  };
   // Progress through `moveAnim.steps` as a float in [0, steps.length - 1].
   // Null when no animation is running.
   const [animProgress, setAnimProgress] = useState<number | null>(null);
@@ -259,6 +354,65 @@ export function HexBoard({
     };
   }, [onHexEnter]);
 
+  // Auto-center the viewport on the player figures the first time a scenario's
+  // board appears (and again whenever its extent changes). Runs after layout so
+  // the scroller has real dimensions.
+  useEffect(() => {
+    if (!zoomable) return;
+    const scroller = scrollerRef.current;
+    if (!scroller || tiles.length === 0) return;
+    const b = computeBounds(tiles, size);
+    const sig = `${tiles.length}:${b.minX.toFixed(0)}:${b.minY.toFixed(0)}:${b.maxX.toFixed(0)}:${b.maxY.toFixed(0)}`;
+    if (centeredSigRef.current === sig) return;
+    centeredSigRef.current = sig;
+
+    const players = units.filter((u) => u.kind === 'player');
+    let cx: number, cy: number;
+    if (players.length > 0) {
+      let sx = 0, sy = 0;
+      for (const u of players) {
+        const p = axialToPx(u.hex.q, u.hex.r, size);
+        sx += p.x; sy += p.y;
+      }
+      cx = sx / players.length; cy = sy / players.length;
+    } else {
+      cx = (b.minX + b.maxX) / 2; cy = (b.minY + b.maxY) / 2;
+    }
+    // Center the content point (cx,cy) in the viewport at the current scale.
+    setView((v) => ({
+      scale: v.scale,
+      x: scroller.clientWidth / 2 - (cx - b.originX) * v.scale,
+      y: scroller.clientHeight / 2 - (cy - b.originY) * v.scale,
+    }));
+  }, [zoomable, tiles, units, size]);
+
+  // Zoom buttons: zoom about the viewport center.
+  const applyZoom = (factor: number) => {
+    const sc = scrollerRef.current;
+    zoomAt(factor, (sc?.clientWidth ?? 0) / 2, (sc?.clientHeight ?? 0) / 2);
+  };
+
+  // Wheel: pinch / ctrl+wheel zooms toward the cursor; a plain wheel pans
+  // (Figma-style). Attached natively so we can preventDefault the page scroll.
+  useEffect(() => {
+    if (!zoomable || !isDisplayBoard) return;
+    const sc = scrollerRef.current;
+    if (!sc) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = sc.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      if (e.ctrlKey || e.metaKey) {
+        zoomAt(Math.exp(-e.deltaY * 0.01), px, py);
+      } else {
+        setView((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
+      }
+    };
+    sc.addEventListener('wheel', onWheel, { passive: false });
+    return () => sc.removeEventListener('wheel', onWheel);
+  }, [zoomable, isDisplayBoard]);
+
   const hitTestHex = (clientX: number, clientY: number): Hex | null => {
     const el = document.elementFromPoint(clientX, clientY) as Element | null;
     if (!el) return null;
@@ -305,23 +459,21 @@ export function HexBoard({
     pathHexes.forEach((h, i) => pathIndexByKey.set(`${h.q},${h.r}`, i + 1));
   }
 
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const t of tiles) {
-    const { x, y } = axialToPx(t.q, t.r, size);
-    if (x - size < minX) minX = x - size;
-    if (y - size < minY) minY = y - size;
-    if (x + size > maxX) maxX = x + size;
-    if (y + size > maxY) maxY = y + size;
-  }
-  const pad = 8;
-  const vbW = maxX - minX + pad * 2;
-  const vbH = maxY - minY + pad * 2;
+  const { vbW, vbH, originX, originY } = computeBounds(tiles, size);
 
-  return (
-    <svg
-      ref={svgRef}
-      viewBox={`${minX - pad} ${minY - pad} ${vbW} ${vbH}`}
-      style={{
+  // In zoomable mode the SVG renders at a fixed hex size (its viewBox extent ×
+  // the zoom factor) and the surrounding viewport scrolls; otherwise it scales
+  // to fill its column.
+  const svgStyle: React.CSSProperties = zoomable
+    ? {
+        // Intrinsic size; the surrounding wrapper applies the pan/zoom transform.
+        width: vbW,
+        height: vbH,
+        display: 'block',
+        touchAction: 'none',
+        userSelect: 'none',
+      }
+    : {
         width: '100%',
         // A non-finite cap (e.g. Infinity) means "fill the container" — leave
         // maxWidth unset so the board can span its whole column.
@@ -330,7 +482,13 @@ export function HexBoard({
         borderRadius: 8,
         touchAction: onHexEnter ? 'none' : 'manipulation',
         userSelect: 'none',
-      }}
+      };
+
+  const board = (
+    <svg
+      ref={svgRef}
+      viewBox={`${originX} ${originY} ${vbW} ${vbH}`}
+      style={svgStyle}
       onTouchStart={onHexEnter ? handleTouchStart : undefined}
       onTouchMove={onHexEnter ? handleTouchMove : undefined}
     >
@@ -585,8 +743,11 @@ export function HexBoard({
           const fill = isPlayer ? '#3a7bd5' : '#c44';
           const initial = u.name.slice(0, 1).toUpperCase();
           const isActive = activeUnitIds.includes(u.id);
+          const stagedOrder = stagedUnitIds.indexOf(u.id);
+          const isStaged = stagedOrder >= 0;
           const isTargetable = targetableUnitIds.includes(u.id);
-          const isSelected = selectedUnitId === u.id;
+          const isSelected = selectedUnitId === u.id || isStaged;
+          const isItemBound = itemBoundUnitIds.includes(u.id);
           const handler = onTapUnit ? () => onTapUnit(u) : undefined;
           const avatar = unitAvatarUrl?.(u);
           const r = size * 0.6;
@@ -619,6 +780,7 @@ export function HexBoard({
                 }
                 strokeWidth={u.rank === 'elite' || u.rank === 'named' ? 3 : 1.5}
               />
+              <HpRing x={x} y={y} size={size} hp={u.hp} hpMax={u.hpMax} color={isPlayer ? '#3fbf57' : '#e23b3b'} />
               {avatar ? (
                 <image
                   href={avatar}
@@ -654,33 +816,84 @@ export function HexBoard({
                   ...u.conditions.map((c) => c.kind),
                   ...(u.invisible ? (['invisible'] as const) : []),
                 ];
-                const iconSize = Math.max(10, size * 0.32);
-                const gap = 2;
-                const totalW = items.length * iconSize + (items.length - 1) * gap;
-                const rowY = y - size * 0.85;
+                // Each condition is shown as a circular badge that echoes the
+                // standee-number motif (dark fill, white outline) so it reads
+                // clearly on top of the monster art.
+                const badgeSize = Math.max(14, size * 0.42);
+                const iconSize = badgeSize * 0.66;
+                const gap = badgeSize * 0.18;
+                const totalW = items.length * badgeSize + (items.length - 1) * gap;
+                const rowY = y - size * 0.85 - badgeSize * 0.35;
                 return (
                   <foreignObject
                     x={x - totalW / 2}
                     y={rowY}
                     width={totalW}
-                    height={iconSize}
+                    height={badgeSize}
                   >
                     <div
                       style={{
                         display: 'flex',
                         gap,
                         alignItems: 'center',
-                        color: '#ffd84d',
                         lineHeight: 0,
                       }}
                     >
                       {items.map((k, i) => (
-                        <GameIcon key={i} kind={k} size={iconSize} color="#ffd84d" />
+                        <div
+                          key={i}
+                          style={{
+                            width: badgeSize,
+                            height: badgeSize,
+                            borderRadius: '50%',
+                            background: '#1b1b1b',
+                            border: '1px solid #fff',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flex: '0 0 auto',
+                          }}
+                        >
+                          <GameIcon kind={k} size={iconSize} color="#ffd84d" />
+                        </div>
                       ))}
                     </div>
                   </foreignObject>
                 );
               })()}
+              {isStaged && (
+                <>
+                  <circle
+                    cx={x - size * 0.52}
+                    cy={y - size * 0.52}
+                    r={size * 0.34}
+                    fill="#d9a441"
+                    stroke="#0e1612"
+                    strokeWidth={1}
+                  />
+                  <text
+                    x={x - size * 0.52}
+                    y={y - size * 0.52}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fontSize={size * 0.4}
+                    fontWeight={700}
+                    fill="#0e1612"
+                  >
+                    {stagedOrder + 1}
+                  </text>
+                  {isItemBound && (
+                    <circle
+                      cx={x - size * 0.52 + size * 0.28}
+                      cy={y - size * 0.52 + size * 0.28}
+                      r={size * 0.16}
+                      fill="#7bb96b"
+                      stroke="#0e1612"
+                      strokeWidth={1}
+                    />
+                  )}
+                </>
+              )}
             </g>
           );
         })}
@@ -740,6 +953,126 @@ export function HexBoard({
         );
       })()}
     </svg>
+  );
+
+  if (!zoomable) return board;
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div
+        ref={scrollerRef}
+        onPointerDown={onPanDown}
+        onPointerMove={onPanMove}
+        onPointerUp={onPanEnd}
+        onPointerCancel={onPanEnd}
+        style={{
+          width: '100%',
+          height: '100%',
+          overflow: 'hidden',
+          background: '#0e0e10',
+          borderRadius: 8,
+          touchAction: 'none',
+          ...(isDisplayBoard ? { cursor: panning ? 'grabbing' : 'grab' } : {}),
+        }}
+      >
+        <div
+          style={{
+            width: vbW,
+            height: vbH,
+            transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+            transformOrigin: '0 0',
+          }}
+        >
+          {board}
+        </div>
+      </div>
+      <div
+        style={{
+          position: 'absolute',
+          right: 12,
+          bottom: 12,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}
+      >
+        <ZoomButton label="+" title="Zoom in" onClick={() => applyZoom(ZOOM_STEP)} disabled={zoom >= MAX_ZOOM} />
+        <ZoomButton label="−" title="Zoom out" onClick={() => applyZoom(1 / ZOOM_STEP)} disabled={zoom <= MIN_ZOOM} />
+      </div>
+    </div>
+  );
+}
+
+/** Square +/− control for the zoomable board viewport. */
+function ZoomButton({
+  label,
+  title,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  title: string;
+  onClick: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: 40,
+        height: 40,
+        borderRadius: 8,
+        border: '1px solid #555',
+        background: 'rgba(20,20,24,0.9)',
+        color: '#fff',
+        fontSize: 24,
+        fontWeight: 700,
+        lineHeight: 1,
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        boxShadow: '0 1px 4px rgba(0,0,0,0.5)',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** A clock-style HP gauge ringing a unit's token. A faint full circle marks the
+ *  "spent" track; a bright red arc on top shows the HP still remaining, drawn
+ *  from 12 o'clock and sweeping clockwise. As the unit takes damage the arc's
+ *  trailing end recedes back toward 12 — it ticks down around the figure like a
+ *  clock hand. The arc length is CSS-transitioned so each hit animates smoothly. */
+function HpRing({ x, y, size, hp, hpMax, color = '#e23b3b' }: { x: number; y: number; size: number; hp: number; hpMax: number; color?: string }) {
+  if (hpMax <= 0) return null;
+  const r = size * 0.72;
+  const C = 2 * Math.PI * r;
+  const frac = Math.max(0, Math.min(1, hp / hpMax));
+  const arc = frac * C;
+  return (
+    <g style={{ pointerEvents: 'none' }} transform={`rotate(-90 ${x} ${y})`}>
+      {/* Spent track (full circle behind the arc). */}
+      <circle cx={x} cy={y} r={r} fill="none" stroke="rgba(0,0,0,0.45)" strokeWidth={size * 0.07} />
+      {/* Remaining HP arc. */}
+      <circle
+        cx={x}
+        cy={y}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth={size * 0.07}
+        strokeLinecap={frac > 0 && frac < 1 ? 'round' : 'butt'}
+        strokeDasharray={`${arc.toFixed(2)} ${(C - arc).toFixed(2)}`}
+        style={{ transition: 'stroke-dasharray 0.45s ease' }}
+      />
+    </g>
   );
 }
 

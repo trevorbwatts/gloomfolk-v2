@@ -8,6 +8,7 @@ import type {
 } from '@gloomfolk/shared';
 import { ALL_ITEMS, cardMatchesLevel, hexDistance } from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
+import { CardView } from './CardView.js';
 import { btn, theme } from '../theme.js';
 
 /** Which action a row-triggered item modal was opened from. Used to surface
@@ -66,6 +67,8 @@ export function ItemModal({
   context,
   isMyTurn,
   onClose,
+  onArmForBinding,
+  boundItemIds = [],
 }: {
   gameState: PublicGameState;
   myPlayerId: string;
@@ -75,9 +78,20 @@ export function ItemModal({
   context: ItemActionContext | null;
   isMyTurn: boolean;
   onClose: () => void;
+  /** Target N attack flow: when supplied and the modal is anchored to a
+   *  multi-target attack, using an attack-rider item (pierce/poison/advantage)
+   *  doesn't arm a turn charge — instead it hands the item id back so the
+   *  player can attach it to a specific staged enemy on the board. */
+  onArmForBinding?: (itemId: string) => void;
+  /** Rider items already attached to a staged target this attack — shown as
+   *  "Attached" and not re-usable. */
+  boundItemIds?: string[];
 }) {
   const sock = useSocket();
   const [aimingItemId, setAimingItemId] = useState<string | null>(null);
+  // For retrieve-discarded-card: the discarded card the player has tentatively
+  // selected (shown as full cards), pending a Confirm.
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const character: CharacterInstance | undefined = gameState.characters.find(
     (c) => c.claimedByPlayerId === myPlayerId,
   );
@@ -101,6 +115,15 @@ export function ItemModal({
   // the active half's next pending action for the global modal.
   const refAction: PendingAction | null = context?.action ?? fallbackPending;
   const refSlot: 'top' | 'bottom' | null = context?.slot ?? activeSlotKind;
+
+  // Target N binding mode: a multi-target attack is staging, so attack-rider
+  // items get attached to a chosen enemy (on the board) rather than armed as a
+  // turn-wide charge that the next attack consumes.
+  const bindingMode =
+    !!onArmForBinding &&
+    refAction != null &&
+    refAction.type === 'attack' &&
+    refAction.targets > 1;
 
   if (!character) return null;
 
@@ -236,11 +259,11 @@ export function ItemModal({
                     : item.effect.kind === 'shield-on-attack'
                       ? !active
                       : item.effect.kind === 'pierce-one-attack'
-                        ? hasPendingAttack && !ct?.pierceCharge
+                        ? hasPendingAttack && (bindingMode ? !boundItemIds.includes(id) : !ct?.pierceCharge)
                         : item.effect.kind === 'poison-one-attack'
-                          ? hasPendingMeleeAttack && !ct?.poisonCharge
+                          ? hasPendingMeleeAttack && (bindingMode ? !boundItemIds.includes(id) : !ct?.poisonCharge)
                           : item.effect.kind === 'advantage-one-attack'
-                            ? hasPendingRangedAttack && !ct?.advantageCharge
+                            ? hasPendingRangedAttack && (bindingMode ? !boundItemIds.includes(id) : !ct?.advantageCharge)
                             : item.effect.kind === 'heal-self'
                               ? !atFullHp
                               : item.effect.kind === 'heal-after-lost'
@@ -261,17 +284,17 @@ export function ItemModal({
                         item.effect.kind === 'shield-when-attacked'
                       ? 'Reactive'
                       : item.effect.kind === 'pierce-one-attack'
-                        ? ct?.pierceCharge
-                          ? 'Armed'
-                          : 'Use'
+                        ? bindingMode
+                          ? boundItemIds.includes(id) ? 'Attached' : 'Use'
+                          : ct?.pierceCharge ? 'Armed' : 'Use'
                         : item.effect.kind === 'poison-one-attack'
-                          ? ct?.poisonCharge
-                            ? 'Armed'
-                            : 'Use'
+                          ? bindingMode
+                            ? boundItemIds.includes(id) ? 'Attached' : 'Use'
+                            : ct?.poisonCharge ? 'Armed' : 'Use'
                           : item.effect.kind === 'advantage-one-attack'
-                            ? ct?.advantageCharge
-                              ? 'Armed'
-                              : 'Use'
+                            ? bindingMode
+                              ? boundItemIds.includes(id) ? 'Attached' : 'Use'
+                              : ct?.advantageCharge ? 'Armed' : 'Use'
                             : item.effect.kind === 'heal-self'
                               ? atFullHp
                                 ? 'Full HP'
@@ -347,16 +370,27 @@ export function ItemModal({
                           item.effect.kind === 'poison-one-attack' ||
                           item.effect.kind === 'advantage-one-attack'
                         ) {
-                          // Arm the rider — it attaches to the attack you then
-                          // perform; no separate target pick. Close the modal so
-                          // the player returns to targeting their attack.
-                          sock.send({ type: 'player_use_item', itemId: id });
-                          onClose();
+                          if (bindingMode && onArmForBinding) {
+                            // Target N: don't arm a turn-wide charge — hand the
+                            // item back so the player taps the specific staged
+                            // enemy it should hit. The actual use_item fires at
+                            // attack-confirm time, ordered before that enemy's
+                            // shot so the rider lands on it.
+                            onArmForBinding(id);
+                            onClose();
+                          } else {
+                            // Arm the rider — it attaches to the attack you then
+                            // perform; no separate target pick. Close the modal so
+                            // the player returns to targeting their attack.
+                            sock.send({ type: 'player_use_item', itemId: id });
+                            onClose();
+                          }
                         } else if (
                           item.effect.kind === 'heal-after-lost' ||
                           item.effect.kind === 'retrieve-discarded-card'
                         ) {
                           setAimingItemId(aiming ? null : id);
+                          setSelectedCardId(null);
                         } else {
                           sock.send({ type: 'player_use_item', itemId: id });
                           onClose();
@@ -381,35 +415,37 @@ export function ItemModal({
                   </div>
 
                   {aiming && item.effect.kind === 'retrieve-discarded-card' && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                    <div style={{ marginTop: 8 }}>
                       {discardedAtLevel(item.effect.cardLevel).length === 0 ? (
                         <span style={{ fontSize: 11, color: theme.muted }}>No cards to retrieve.</span>
                       ) : (
-                        discardedAtLevel(item.effect.cardLevel).map((c) => (
+                        <>
+                          {discardedAtLevel(item.effect.cardLevel).map((c) => (
+                            <CardView
+                              key={c.id}
+                              card={c}
+                              selected={selectedCardId === c.id}
+                              onClick={() => setSelectedCardId(c.id)}
+                            />
+                          ))}
                           <button
-                            key={c.id}
+                            disabled={selectedCardId == null}
                             onClick={() => {
+                              if (selectedCardId == null) return;
                               sock.send({
                                 type: 'player_use_item',
                                 itemId: id,
-                                targetCardId: c.id,
+                                targetCardId: selectedCardId,
                               });
                               setAimingItemId(null);
+                              setSelectedCardId(null);
                               onClose();
                             }}
-                            style={{
-                              fontSize: 11,
-                              padding: '4px 8px',
-                              background: 'transparent',
-                              color: theme.text,
-                              border: `1px solid ${theme.border}`,
-                              borderRadius: 3,
-                              cursor: 'pointer',
-                            }}
+                            style={{ ...btn.primary(selectedCardId == null), marginTop: 8 }}
                           >
-                            {c.name}
+                            Confirm
                           </button>
-                        ))
+                        </>
                       )}
                     </div>
                   )}

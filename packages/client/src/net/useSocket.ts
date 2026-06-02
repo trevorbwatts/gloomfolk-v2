@@ -25,6 +25,24 @@ export function getSavedSession(): { playerId: string; campaignId: string } | nu
   return null;
 }
 
+/** A stable id for this device/browser. Unlike the session (cleared on Back),
+ *  this persists, so the server can reattach a returning phone to its existing
+ *  player slot instead of creating a duplicate. */
+export function getDeviceId(): string {
+  try {
+    let id = localStorage.getItem('gf:deviceId');
+    if (!id) {
+      id = 'd_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      localStorage.setItem('gf:deviceId', id);
+    }
+    return id;
+  } catch {
+    // No storage (private mode / blocked): fall back to an ephemeral id so the
+    // join still works, just without cross-reload dedupe.
+    return 'd_' + Math.random().toString(36).slice(2, 10);
+  }
+}
+
 export function useSocketBootstrap(): void {
   const setCampaigns = useStore((s) => s.setCampaigns);
   const setJoined = useStore((s) => s.setJoined);
@@ -47,6 +65,7 @@ export function useSocketBootstrap(): void {
                 type: 'player_join',
                 campaignId: saved.campaignId,
                 playerId: saved.playerId,
+                deviceId: getDeviceId(),
               });
             }
           }

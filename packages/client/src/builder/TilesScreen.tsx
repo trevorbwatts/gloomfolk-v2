@@ -1,3 +1,4 @@
+import { ChevronLeft } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { theme } from '../theme.js';
 import { TilesTab } from './TilesTab.js';
@@ -30,9 +31,9 @@ export function TilesScreen() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <Link
             to="/builder"
-            style={{ color: theme.muted, fontSize: 13, textDecoration: 'none' }}
+            style={{ color: theme.muted, fontSize: 13, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}
           >
-            ← back to builder
+            <ChevronLeft size={14} /> back to builder
           </Link>
           <h1 style={h1Style}>Tiles</h1>
         </div>

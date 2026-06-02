@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Swords } from 'lucide-react';
 import {
   bruiser,
   silentKnife,
@@ -6,7 +7,7 @@ import {
   type CharacterClass,
   type CharacterPool,
 } from '@gloomfolk/shared';
-import { clearSession, getSavedSession, useSocket } from '../net/useSocket.js';
+import { clearSession, getDeviceId, getSavedSession, useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { btn, theme } from '../theme.js';
 import { NarrativeModal } from '../board/NarrativeModal.js';
@@ -36,7 +37,7 @@ function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTur
   if (!hasCharacter) return '';
   switch (phase) {
     case 'placement': return 'Choose your starting position';
-    case 'card_select': return 'Choose your cards';
+    case 'card_select': return 'Choose your Cards';
     case 'turn_resolution': return isMyTurn ? '' : 'Turn in progress';
     case 'victory': return 'Victory';
     case 'defeat': return 'Defeated';
@@ -203,7 +204,13 @@ export function PlayerScreen() {
 
   const meEarly = gameState?.players.find((p) => p.playerId === playerId);
   const phaseEarly = gameState?.phase;
-  const viewKey = !meEarly?.characterId
+  const charEarly = meEarly?.characterId
+    ? gameState?.characters.find((c) => c.id === meEarly.characterId)
+    : null;
+  // Reset scroll to the top on any meaningful view change: the active tab, the
+  // phase, entering/leaving the loadout builder, and the lobby sub-steps
+  // (pick cards → shop → ready). CharacterSelect handles its own inner steps.
+  const baseView = !meEarly?.characterId
     ? 'character-select'
     : editingLoadout
       ? 'loadout'
@@ -214,6 +221,12 @@ export function PlayerScreen() {
           : phaseEarly === 'turn_resolution'
             ? 'turn-play'
             : `phase:${phaseEarly ?? 'lobby'}`;
+  const viewKey = [
+    baseView,
+    activeTab,
+    charEarly?.loadout ? 'L' : '',
+    charEarly?.shoppingDone ? 'S' : '',
+  ].join('|');
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [viewKey]);
@@ -231,16 +244,20 @@ export function PlayerScreen() {
     }
     return (
       <div style={shellStyle}>
-        <div style={{ padding: 24, maxWidth: 480 }}>
+        <div style={{ padding: 24, maxWidth: 480, margin: '0 auto' }}>
           <h1
             style={{
               fontFamily: theme.headingFont,
               fontWeight: 500,
               letterSpacing: 1,
               color: theme.accent,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 10,
             }}
           >
-            Join Gloomfolk
+            <Swords size={28} /> Gloomfolk
           </h1>
           <label style={{ display: 'block', marginBottom: 16, color: theme.muted, fontSize: 13 }}>
             Campaign ID
@@ -254,7 +271,8 @@ export function PlayerScreen() {
           <button
             style={{
               fontSize: 16,
-              padding: '10px 20px',
+              padding: '12px 20px',
+              width: '100%',
               background: theme.accent,
               color: '#0e1612',
               border: 'none',
@@ -269,6 +287,7 @@ export function PlayerScreen() {
               sock.send({
                 type: 'player_join',
                 campaignId: campaignId.trim(),
+                deviceId: getDeviceId(),
               });
             }}
           >
@@ -312,6 +331,34 @@ export function PlayerScreen() {
         ? 'Character'
         : undefined;
 
+  // Back button: shown during character select/naming and while editing a
+  // loadout. Walks back through the CharacterSelect history steps if any,
+  // otherwise leaves the campaign entirely.
+  const goBack = () => {
+    if ((history.state as { gf?: string } | null)?.gf) {
+      history.back();
+      return;
+    }
+    // Tell the server we're leaving so an unclaimed lobby slot is dropped now
+    // — otherwise rejoining would add a second player for this same phone.
+    sock.send({ type: 'player_leave' });
+    clearSession();
+    useStore.setState({
+      role: null,
+      playerId: null,
+      campaignId: null,
+      gameState: null,
+      you: null,
+    });
+  };
+  const showBack = onPlayTab && (!myCharInstance || editingLoadout);
+  // The top header bar renders whenever there's a character, and also during
+  // the pre-character select/naming flow so the Back button and campaign name
+  // share one consistent header section.
+  const showHeader = !!myCharInstance || (onPlayTab && !showBottomBar);
+  const headerCampaignTitle =
+    headerTitle ?? (!myCharInstance ? gameState?.campaignName ?? '' : undefined);
+
   return (
     <div style={shellStyle}>
       {gameState?.narrative && (
@@ -338,7 +385,7 @@ export function PlayerScreen() {
           onClose={() => setShowItemsModal(false)}
         />
       )}
-      {myCharInstance && (
+      {showHeader && (
         <div
           style={{
             position: 'sticky',
@@ -348,13 +395,14 @@ export function PlayerScreen() {
           }}
         >
           <PlayerHeader
-            character={myCharInstance}
+            character={myCharInstance ?? null}
             unit={myUnit}
-            {...(headerTitle ? { title: headerTitle } : {})}
-            {...(phase === 'lobby' ? { gold: myCharInstance.gold } : {})}
+            {...(headerCampaignTitle != null ? { title: headerCampaignTitle } : {})}
+            {...(myCharInstance && phase === 'lobby' ? { gold: myCharInstance.gold } : {})}
             {...(showItemsButton ? { onOpenItems: () => setShowItemsModal(true) } : {})}
+            {...(showBack ? { onBack: goBack } : {})}
           />
-          {you && <ActiveArea you={you} />}
+          {myCharInstance && you && <ActiveArea you={you} />}
         </div>
       )}
       <div
@@ -367,34 +415,6 @@ export function PlayerScreen() {
           overflow: 'clip',
         }}
       >
-        {onPlayTab && (!myCharInstance || editingLoadout) && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-            <button
-              onClick={() => {
-                if ((history.state as { gf?: string } | null)?.gf) {
-                  history.back();
-                  return;
-                }
-                clearSession();
-                useStore.setState({
-                  role: null,
-                  playerId: null,
-                  campaignId: null,
-                  gameState: null,
-                  you: null,
-                });
-              }}
-              style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12 }}
-            >
-              ← Back
-            </button>
-            {!myCharInstance && (
-              <p style={{ color: theme.muted, fontSize: 12, margin: 0, letterSpacing: 1, textTransform: 'uppercase' }}>
-                {gameState?.campaignName}
-              </p>
-            )}
-          </div>
-        )}
         {onPlayTab && (() => {
           const myUnit = gameState?.units.find(
             (u) => u.kind === 'player' && u.ownerPlayerId === playerId,
@@ -412,7 +432,7 @@ export function PlayerScreen() {
             marginTop: 6,
             marginBottom: 12,
             fontWeight: 500,
-            fontSize: 28,
+            fontSize: 20,
             fontFamily: theme.headingFont,
             color: theme.accent,
             letterSpacing: 0.5,
@@ -572,19 +592,33 @@ export function PlayerScreen() {
               )}
               {hasLoadout && myCharInstance && gameState && (
                 <>
-                  <Shop character={myCharInstance} shop={gameState.shop} />
-                  <button
-                    onClick={() => sock.send({ type: 'player_finish_shopping' })}
+                  <div style={{ paddingBottom: 80 }}>
+                    <Shop character={myCharInstance} shop={gameState.shop} />
+                  </div>
+                  <div
                     style={{
-                      ...btn.primary(false),
-                      marginTop: 24,
-                      width: '100%',
-                      fontSize: 16,
-                      padding: '14px 16px',
+                      position: 'fixed',
+                      bottom: BOTTOM_BAR_HEIGHT,
+                      left: 0,
+                      right: 0,
+                      background: theme.bgSolid,
+                      padding: '8px 16px',
+                      borderTop: `1px solid ${theme.border}`,
+                      zIndex: 40,
                     }}
                   >
-                    Done shopping — I’m ready
-                  </button>
+                    <button
+                      onClick={() => sock.send({ type: 'player_finish_shopping' })}
+                      style={{
+                        ...btn.primary(false),
+                        width: '100%',
+                        fontSize: 15,
+                        padding: '10px 16px',
+                      }}
+                    >
+                      Done shopping — I’m ready
+                    </button>
+                  </div>
                 </>
               )}
             </div>

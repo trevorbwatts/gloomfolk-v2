@@ -8,7 +8,6 @@ import {
   type CharacterPool,
 } from '@gloomfolk/shared';
 import { CardView } from './CardView.js';
-import { classAvatarUrl, onAvatarError } from '../avatars.js';
 import { btn, theme } from '../theme.js';
 import { BOTTOM_BAR_HEIGHT } from './BottomBar.js';
 
@@ -101,20 +100,8 @@ export function LoadoutBuilder({
           marginBottom: 8,
         }}
       >
-        <h2 style={{ margin: 0, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
-          <img
-            src={classAvatarUrl(characterClass.id)}
-            onError={onAvatarError}
-            alt=""
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: '50%',
-              objectFit: 'cover',
-              background: theme.bgSolid,
-            }}
-          />
-          {characterClass.name} — Build your hand
+        <h2 style={{ margin: 0, fontSize: 20, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
+          Build your Hand
         </h2>
       </div>
 

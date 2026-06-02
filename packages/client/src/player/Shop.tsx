@@ -94,7 +94,9 @@ export function Shop({
 
   return (
     <section style={{ marginTop: 32 }}>
-      <h3 style={sectionHeading}>Shop</h3>
+      <h2 style={{ margin: '0 0 12px', fontSize: 20, fontFamily: theme.headingFont, color: theme.accent, fontWeight: 500 }}>
+        Item Shop
+      </h2>
 
       {character.ownedItemIds.length === 0 && (
         <p style={{ color: theme.muted, fontSize: 13, margin: '0 0 12px', lineHeight: 1.4 }}>
@@ -272,7 +274,7 @@ function OwnedItems({
                 </span>
               </span>
               <span style={{ fontSize: 11, color: bringing ? theme.accent : theme.muted }}>
-                {bringing ? '✓ Bringing' : 'Tap to bring'}
+                {bringing ? '✓ Equipped' : 'Unequipped'}
               </span>
             </button>
           );

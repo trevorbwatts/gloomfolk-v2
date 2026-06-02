@@ -752,7 +752,10 @@ export type ClientToServer =
   | { type: 'host_load_campaign'; campaignId: string }
   | { type: 'host_leave_campaign' }
   | { type: 'host_delete_campaign'; campaignId: string }
-  | { type: 'player_join'; campaignId: string; playerId?: string }
+  | { type: 'player_join'; campaignId: string; playerId?: string; deviceId?: string }
+  /** Player leaves the campaign (e.g. tapped Back to the join screen). Drops an
+   *  unclaimed lobby slot immediately instead of waiting for socket close. */
+  | { type: 'player_leave' }
   | { type: 'player_create_character'; classId: string; name: string }
   | { type: 'player_claim_character'; characterInstanceId: string }
   | { type: 'player_pick_character'; characterId: string }

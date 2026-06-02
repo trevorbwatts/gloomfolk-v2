@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { ChevronLeft } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { btn, theme } from '../theme.js';
 import {
@@ -129,9 +130,9 @@ export function BuilderScreen() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           <Link
             to="/"
-            style={{ color: theme.muted, fontSize: 13, textDecoration: 'none' }}
+            style={{ color: theme.muted, fontSize: 13, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}
           >
-            ← back to host
+            <ChevronLeft size={14} /> back to host
           </Link>
           <h1 style={h1Style}>Scenario Builder</h1>
 

@@ -15,6 +15,10 @@ export interface CampaignSave {
     playerId: string;
     name: string;
     activeCharacterId: string | null;
+    /** Stable per-device id (survives the player tapping Back / clearing their
+     *  session). Lets a returning phone reattach to its existing slot instead
+     *  of creating a duplicate. Undefined on legacy saves. */
+    deviceId?: string;
   }>;
   /** Campaign-wide shop stock. Undefined on legacy saves; restored to
    *  DEFAULT_SHOP_STOCK on load. */

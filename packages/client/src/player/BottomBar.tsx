@@ -19,6 +19,7 @@ import {
   getScenario,
   modifierLabel,
 } from '@gloomfolk/shared';
+import { ChevronLeft } from 'lucide-react';
 import { btn, theme } from '../theme.js';
 import { clearSession } from '../net/useSocket.js';
 import { useStore } from '../store.js';
@@ -102,6 +103,7 @@ export function PlayerHeader({
   title,
   gold,
   onOpenItems,
+  onBack,
 }: {
   character: CharacterInstance | null;
   unit?: Unit | null;
@@ -112,6 +114,8 @@ export function PlayerHeader({
   /** When set, show an "Items" button next to HP that opens the item modal.
    *  Supplied only during a scenario when the character brought items. */
   onOpenItems?: () => void;
+  /** When set, show a Back button on the left of the bar. */
+  onBack?: () => void;
 }) {
   const showStats = !title && !!character;
   return (
@@ -128,18 +132,32 @@ export function PlayerHeader({
         gap: 12,
       }}
     >
-      <h1
-        style={{
-          margin: 0,
-          fontFamily: theme.headingFont,
-          color: theme.accent,
-          fontSize: 22,
-          fontWeight: 500,
-          letterSpacing: 0.5,
-        }}
-      >
-        {title ?? character?.name ?? ''}
-      </h1>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+        {onBack && (
+          <button
+            onClick={onBack}
+            style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+          >
+            <ChevronLeft size={14} /> Back
+          </button>
+        )}
+        <h1
+          style={{
+            margin: 0,
+            fontFamily: theme.headingFont,
+            color: theme.accent,
+            fontSize: 13,
+            fontWeight: 500,
+            letterSpacing: 0,
+            textTransform: 'uppercase',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {title ?? character?.name ?? ''}
+        </h1>
+      </div>
       {(showStats && unit) || onOpenItems ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           {showStats && unit && <UnitStatusStrip unit={unit} />}
@@ -162,10 +180,10 @@ export function PlayerHeader({
       ) : null}
       {gold != null && (
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
-          <span style={{ fontSize: 18, fontFamily: theme.headingFont, color: '#d9a441', fontWeight: 600 }}>
+          <span style={{ fontSize: 13, fontFamily: theme.headingFont, color: '#d9a441', fontWeight: 600 }}>
             {gold}
           </span>
-          <span style={{ fontSize: 12, color: '#d9a441', fontWeight: 600 }}>G</span>
+          <span style={{ fontSize: 13, color: '#d9a441', fontWeight: 600 }}>G</span>
         </div>
       )}
     </header>

@@ -17,6 +17,55 @@ const DB_NAME = 'gf-tile-images';
 const STORE = 'images';
 const DB_VERSION = 1;
 
+/**
+ * How a tile's artwork sits inside its hex footprint. The grid is fixed; this
+ * positions the *image* underneath it (the crop-frame model).
+ *
+ * Offsets are stored as a fraction of the footprint's bounding box so they stay
+ * correct at any render size. The identity transform (all zeros, scale 1)
+ * reproduces the old "stretch to cover the footprint" behaviour exactly, so
+ * images saved before this feature existed render unchanged.
+ */
+export interface TileImageTransform {
+  /** Horizontal offset, as a fraction of the footprint bounding-box width. */
+  offsetX: number;
+  /** Vertical offset, as a fraction of the footprint bounding-box height. */
+  offsetY: number;
+  /** Scale multiplier relative to the cover-fit baseline (1 = fills footprint). */
+  scale: number;
+  /** Rotation in degrees, applied around the footprint centre. */
+  rotation: number;
+}
+
+export const DEFAULT_TILE_IMAGE_TRANSFORM: TileImageTransform = {
+  offsetX: 0,
+  offsetY: 0,
+  scale: 1,
+  rotation: 0,
+};
+
+export interface TileImageRecord {
+  dataUrl: string;
+  transform: TileImageTransform;
+}
+
+/** Coerce whatever is in the store into a record. Legacy entries are bare data
+    URL strings; wrap them with the identity transform. */
+function normalizeRecord(value: unknown): TileImageRecord | null {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    return { dataUrl: value, transform: { ...DEFAULT_TILE_IMAGE_TRANSFORM } };
+  }
+  if (typeof value === 'object' && 'dataUrl' in value) {
+    const r = value as { dataUrl: string; transform?: Partial<TileImageTransform> };
+    return {
+      dataUrl: r.dataUrl,
+      transform: { ...DEFAULT_TILE_IMAGE_TRANSFORM, ...r.transform },
+    };
+  }
+  return null;
+}
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
@@ -52,14 +101,37 @@ function tx<T>(
   );
 }
 
-export function getTileImage(sideId: string): Promise<string | null> {
-  return tx<string | undefined>('readonly', (store) => store.get(sideId)).then(
-    (v) => v ?? null,
-  );
+/** Full record (image + how it's positioned) for a tile side. */
+export function getTileImageRecord(sideId: string): Promise<TileImageRecord | null> {
+  return tx<unknown>('readonly', (store) => store.get(sideId)).then(normalizeRecord);
 }
 
+/** Just the image data URL — convenience for callers that don't need the
+    transform. */
+export function getTileImage(sideId: string): Promise<string | null> {
+  return getTileImageRecord(sideId).then((r) => r?.dataUrl ?? null);
+}
+
+/** Save a (new) image. Uploading resets the placement to the cover-fit default. */
 export function setTileImage(sideId: string, dataUrl: string): Promise<void> {
-  return tx('readwrite', (store) => store.put(dataUrl, sideId)).then(() => undefined);
+  const record: TileImageRecord = {
+    dataUrl,
+    transform: { ...DEFAULT_TILE_IMAGE_TRANSFORM },
+  };
+  return tx('readwrite', (store) => store.put(record, sideId)).then(() => undefined);
+}
+
+/** Update just the placement transform, keeping the existing image. No-op if the
+    tile has no image stored. */
+export function setTileImageTransform(
+  sideId: string,
+  transform: TileImageTransform,
+): Promise<void> {
+  return getTileImageRecord(sideId).then((rec) => {
+    if (!rec) return;
+    const next: TileImageRecord = { dataUrl: rec.dataUrl, transform };
+    return tx('readwrite', (store) => store.put(next, sideId)).then(() => undefined);
+  });
 }
 
 export function clearTileImage(sideId: string): Promise<void> {

@@ -768,6 +768,8 @@ interface PlayerEntry {
   playerId: string;
   name: string;
   activeCharacterId: string | null;
+  /** Stable per-device id used to dedupe rejoins from the same phone. */
+  deviceId: string | null;
   socket: WebSocket | null;
   hand: Card[];
   discard: Card[];
@@ -920,11 +922,13 @@ export class Room {
     name: string,
     activeCharacterId: string | null,
     socket: WebSocket | null,
+    deviceId: string | null = null,
   ): PlayerEntry {
     return {
       playerId,
       name,
       activeCharacterId,
+      deviceId,
       socket,
       hand: [],
       discard: [],
@@ -977,17 +981,47 @@ export class Room {
     }
   }
 
-  attachPlayer(ws: WebSocket, requestedId?: string): string | null {
+  attachPlayer(ws: WebSocket, requestedId?: string, deviceId?: string): string | null {
     let entry = requestedId ? this.players.get(requestedId) : undefined;
+    // Idempotent rejoin: a phone that already has a live slot in this campaign
+    // (same deviceId) reattaches to it rather than spawning a duplicate — even
+    // if it lost its saved playerId (tapped Back / cleared its session).
+    if (!entry && deviceId) {
+      for (const e of this.players.values()) {
+        if (e.deviceId && e.deviceId === deviceId) {
+          entry = e;
+          break;
+        }
+      }
+    }
     if (entry) {
       entry.socket = ws;
-    } else if (requestedId) {
-      // Saved-session reconnect: the client remembers a playerId from a prior
-      // session. If we still have a record of them in campaign.players (with a
-      // claimed character), lazily restore the live entry.
-      const saved = this.campaign.players.find((p) => p.playerId === requestedId);
+      // Backfill the deviceId on a slot created before we knew it (e.g. an
+      // older client, or a reconnect by playerId).
+      if (deviceId && !entry.deviceId) {
+        entry.deviceId = deviceId;
+        const saved = this.campaign.players.find((p) => p.playerId === entry!.playerId);
+        if (saved && !saved.deviceId) {
+          saved.deviceId = deviceId;
+          void this.persist();
+        }
+      }
+    } else {
+      // Saved-session reconnect: restore a persisted slot (with a claimed
+      // character) matched by its playerId or, failing that, its deviceId.
+      const saved = this.campaign.players.find(
+        (p) =>
+          (requestedId && p.playerId === requestedId) ||
+          (deviceId && p.deviceId === deviceId),
+      );
       if (saved && saved.activeCharacterId) {
-        entry = this.newPlayerEntry(saved.playerId, saved.name, saved.activeCharacterId, ws);
+        entry = this.newPlayerEntry(
+          saved.playerId,
+          saved.name,
+          saved.activeCharacterId,
+          ws,
+          saved.deviceId ?? deviceId ?? null,
+        );
         this.players.set(saved.playerId, entry);
       }
     }
@@ -999,9 +1033,9 @@ export class Room {
       }
       const playerId = 'p_' + Math.random().toString(36).slice(2, 8);
       const name = `Player ${this.players.size + 1}`;
-      entry = this.newPlayerEntry(playerId, name, null, ws);
+      entry = this.newPlayerEntry(playerId, name, null, ws, deviceId ?? null);
       this.players.set(playerId, entry);
-      this.campaign.players.push({ playerId, name, activeCharacterId: null });
+      this.campaign.players.push({ playerId, name, activeCharacterId: null, ...(deviceId ? { deviceId } : {}) });
       void this.persist();
     }
     this.send(ws, {

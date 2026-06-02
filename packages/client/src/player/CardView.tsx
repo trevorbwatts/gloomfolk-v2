@@ -329,7 +329,10 @@ function attackTargetText(t: AttackTargetT): React.ReactNode {
   if (!t || t.kind === 'melee') return null;
   switch (t.kind) {
     case 'ranged': {
-      const targets = t.targets && t.targets > 1 ? `, ${t.targets} targets` : '';
+      const targets =
+        t.targets && t.targets > 1 ? (
+          <>, <GameIcon kind="target" /> Target {t.targets}</>
+        ) : null;
       return <><GameIcon kind="range" /> Range {t.range}{targets}</>;
     }
     case 'enemies-moved-through': return 'each enemy moved through';
@@ -445,6 +448,20 @@ function stepLabel(step: AbilityStep): React.ReactNode {
     case 'modify-future-move':
       return <>+{step.bonusAmount} to your <GameIcon kind="move" /> Move abilities while active</>;
     case 'modify-future-attack': {
+      // Round-long buff is worded like the printed card, e.g. Venom Shiv:
+      // "Add [pierce] 2 to all your ranged attacks this round."
+      if (step.appliesTo === 'all-attacks-this-round') {
+        const tokens: React.ReactNode[] = [];
+        if (step.doubleAttack) tokens.push('double Attack');
+        if (typeof step.bonusAmount === 'number')
+          tokens.push(<><GameIcon kind="attack" /> Attack {step.bonusAmount}</>);
+        else if (step.bonusAmount)
+          tokens.push(<><GameIcon kind="attack" /> Attack X</>);
+        if (step.pierceBonus)
+          tokens.push(<><GameIcon kind="pierce" /> Pierce {step.pierceBonus}</>);
+        const kindWord = step.attackKind ? `${step.attackKind} ` : '';
+        return <>Add {joinNodes(tokens, ' and ')} to all your {kindWord}attacks this round.</>;
+      }
       const parts: React.ReactNode[] = [];
       if (step.doubleAttack) parts.push('double Attack');
       if (typeof step.bonusAmount === 'number')
@@ -457,9 +474,7 @@ function stepLabel(step: AbilityStep): React.ReactNode {
         ? joinNodes(parts)
         : <>+<GameIcon kind="attack" /> Attack</>;
       const scope =
-        step.appliesTo === 'next-attack-ability' ? 'on your next Attack' :
-        step.appliesTo === 'all-attacks-this-round' ? 'on all Attacks this round' :
-        'while active';
+        step.appliesTo === 'next-attack-ability' ? 'on your next Attack' : 'while active';
       const filter = step.attackKind ? ` (${step.attackKind} only)` : '';
       return <>{bonus} {scope}{filter}</>;
     }

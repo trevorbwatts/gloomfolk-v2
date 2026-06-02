@@ -2,13 +2,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { TILE_SHAPES, TILE_SIDES, tileShapeById, tileSideById } from '@gloomfolk/shared';
 import { btn, theme } from '../theme.js';
 import { ShapePreview } from './ShapePreview.js';
+import { TileImagePlacer } from './TileImagePlacer.js';
 import {
   clearTileImage,
+  DEFAULT_TILE_IMAGE_TRANSFORM,
   fileToTileImage,
-  getTileImage,
+  getTileImageRecord,
   listTileImageIds,
   migrateLegacyTileImages,
   setTileImage,
+  setTileImageTransform,
+  type TileImageTransform,
 } from './tileImages.js';
 
 const layoutStyle: React.CSSProperties = {
@@ -58,6 +62,13 @@ const shapeHeadingStyle: React.CSSProperties = {
 export function TilesTab() {
   const [selectedId, setSelectedId] = useState<string>(TILE_SIDES[0]?.id ?? '');
   const [currentImage, setCurrentImage] = useState<string | null>(null);
+  const [transform, setTransform] = useState<TileImageTransform>({
+    ...DEFAULT_TILE_IMAGE_TRANSFORM,
+  });
+  // The placement as it currently lives in storage; lets us flag unsaved edits.
+  const [savedTransform, setSavedTransform] = useState<TileImageTransform>({
+    ...DEFAULT_TILE_IMAGE_TRANSFORM,
+  });
   const [imageIds, setImageIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
@@ -90,15 +101,21 @@ export function TilesTab() {
     migrateLegacyTileImages().finally(refreshImageIds);
   }, []);
 
-  // Load the selected tile's image whenever the selection changes.
+  // Load the selected tile's image (and its placement) whenever the selection
+  // changes.
   useEffect(() => {
     let cancelled = false;
     setCurrentImage(null);
+    setTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM });
+    setSavedTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM });
     if (!selectedSide) return;
     const id = selectedSide.id;
-    getTileImage(id)
-      .then((img) => {
-        if (!cancelled) setCurrentImage(img);
+    getTileImageRecord(id)
+      .then((rec) => {
+        if (cancelled || !rec) return;
+        setCurrentImage(rec.dataUrl);
+        setTransform(rec.transform);
+        setSavedTransform(rec.transform);
       })
       .catch((err) => console.warn('Could not load tile image:', err));
     return () => {
@@ -115,8 +132,13 @@ export function TilesTab() {
     try {
       const dataUrl = await fileToTileImage(file);
       await setTileImage(id, dataUrl);
-      // Only reflect it if the user is still on the same tile.
-      if (selectedSide?.id === id) setCurrentImage(dataUrl);
+      // Only reflect it if the user is still on the same tile. A fresh upload
+      // resets the placement to the cover-fit default.
+      if (selectedSide?.id === id) {
+        setCurrentImage(dataUrl);
+        setTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM });
+        setSavedTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM });
+      }
       refreshImageIds();
     } catch (err) {
       console.error('Failed to save tile image:', err);
@@ -134,13 +156,35 @@ export function TilesTab() {
     const id = selectedSide.id;
     try {
       await clearTileImage(id);
-      if (selectedSide?.id === id) setCurrentImage(null);
+      if (selectedSide?.id === id) {
+        setCurrentImage(null);
+        setTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM });
+        setSavedTransform({ ...DEFAULT_TILE_IMAGE_TRANSFORM });
+      }
       refreshImageIds();
     } catch (err) {
       console.error('Failed to remove tile image:', err);
       alert('Could not remove that image.');
     }
   }
+
+  async function handleSavePlacement() {
+    if (!selectedSide) return;
+    const id = selectedSide.id;
+    try {
+      await setTileImageTransform(id, transform);
+      if (selectedSide?.id === id) setSavedTransform(transform);
+    } catch (err) {
+      console.error('Failed to save image placement:', err);
+      alert('Could not save the image placement.');
+    }
+  }
+
+  const placementDirty =
+    transform.offsetX !== savedTransform.offsetX ||
+    transform.offsetY !== savedTransform.offsetY ||
+    transform.scale !== savedTransform.scale ||
+    transform.rotation !== savedTransform.rotation;
 
   return (
     <div style={layoutStyle}>
@@ -198,89 +242,59 @@ export function TilesTab() {
               {selectedShape.description}
             </p>
 
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: 20,
-                marginTop: 20,
-                alignItems: 'start',
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    color: theme.muted,
-                    fontSize: 11,
-                    textTransform: 'uppercase',
-                    letterSpacing: 1,
-                    marginBottom: 6,
-                  }}
-                >
-                  Catalogued shape
-                </div>
-                <ShapePreview footprint={selectedShape.footprint} />
+            <div style={{ marginTop: 20, maxWidth: 520 }}>
+              <div
+                style={{
+                  color: theme.muted,
+                  fontSize: 11,
+                  textTransform: 'uppercase',
+                  letterSpacing: 1,
+                  marginBottom: 6,
+                }}
+              >
+                {currentImage ? 'Background image' : 'Tile shape'}
               </div>
-
-              <div>
-                <div
-                  style={{
-                    color: theme.muted,
-                    fontSize: 11,
-                    textTransform: 'uppercase',
-                    letterSpacing: 1,
-                    marginBottom: 6,
-                  }}
-                >
-                  Background image
-                </div>
-                {currentImage ? (
-                  <img
-                    src={currentImage}
-                    alt={selectedSide.id}
-                    style={{
-                      width: '100%',
-                      maxWidth: 480,
-                      borderRadius: 6,
-                      border: `1px solid ${theme.border}`,
-                      display: 'block',
-                    }}
+              {currentImage ? (
+                <TileImagePlacer
+                  footprint={selectedShape.footprint}
+                  href={currentImage}
+                  transform={transform}
+                  onChange={setTransform}
+                />
+              ) : (
+                <ShapePreview footprint={selectedShape.footprint} />
+              )}
+              {currentImage && (
+                <p style={{ color: theme.muted, fontSize: 11, margin: '10px 0 0' }}>
+                  Drag the image to position it under the hex grid; use the
+                  sliders to scale and rotate. Save to keep this placement.
+                </p>
+              )}
+              <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <label style={{ ...btn.outline(), opacity: busy ? 0.6 : 1 }}>
+                  {busy ? 'Saving…' : currentImage ? 'Replace image' : 'Add image'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFile}
+                    disabled={busy}
+                    style={{ display: 'none' }}
                   />
-                ) : (
-                  <div
-                    style={{
-                      width: '100%',
-                      maxWidth: 480,
-                      aspectRatio: '4 / 3',
-                      borderRadius: 6,
-                      border: `1px dashed ${theme.border}`,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: theme.muted,
-                      fontSize: 13,
-                    }}
-                  >
-                    No image yet
-                  </div>
+                </label>
+                {currentImage && !busy && (
+                  <button style={btn.ghost()} onClick={handleClear}>
+                    Remove
+                  </button>
                 )}
-                <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <label style={{ ...btn.outline(), opacity: busy ? 0.6 : 1 }}>
-                    {busy ? 'Saving…' : currentImage ? 'Replace image' : 'Upload image'}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleFile}
-                      disabled={busy}
-                      style={{ display: 'none' }}
-                    />
-                  </label>
-                  {currentImage && !busy && (
-                    <button style={btn.ghost()} onClick={handleClear}>
-                      Remove
-                    </button>
-                  )}
-                </div>
+                {currentImage && !busy && (
+                  <button
+                    style={{ ...btn.outline(), marginLeft: 'auto', opacity: placementDirty ? 1 : 0.5 }}
+                    onClick={handleSavePlacement}
+                    disabled={!placementDirty}
+                  >
+                    {placementDirty ? 'Save placement' : 'Placement saved'}
+                  </button>
+                )}
               </div>
             </div>
           </div>

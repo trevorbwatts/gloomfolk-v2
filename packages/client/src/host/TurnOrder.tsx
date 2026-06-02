@@ -17,6 +17,7 @@ import {
 } from '@gloomfolk/shared';
 import { Fragment, type ReactNode } from 'react';
 import { classAvatarUrl, monsterAvatarUrl, onAvatarError } from '../avatars.js';
+import { GameIcon } from '../icons.js';
 import { theme } from '../theme.js';
 
 const SET_AVATAR_DEFID: Record<string, string> = {
@@ -130,16 +131,31 @@ function renderStep(
     case 'attack': {
       const base = baseStat(setId, units, scenarioLevel, (b) => b.attack);
       const value = resolved(base, step.modifier);
-      const tail: string[] = [];
+      const tail: ReactNode[] = [];
       if (step.range != null) tail.push(`Range ${step.range}`);
-      if (step.targets != null) tail.push(`Target ${step.targets}`);
+      if (step.targets != null)
+        tail.push(
+          <>
+            <GameIcon kind="target" size={14} /> Target {step.targets}
+          </>,
+        );
       if (step.effects?.length) {
         for (const e of step.effects) tail.push(e.condition);
       }
       return (
         <>
           Attack <RankedValue value={value} />
-          {tail.length > 0 && ` · ${tail.join(' · ')}`}
+          {tail.length > 0 && (
+            <>
+              {' · '}
+              {tail.map((t, i) => (
+                <Fragment key={i}>
+                  {i > 0 ? ' · ' : null}
+                  {t}
+                </Fragment>
+              ))}
+            </>
+          )}
         </>
       );
     }

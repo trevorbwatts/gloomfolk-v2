@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ChevronLeft } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
@@ -82,12 +83,11 @@ export function HostScreen() {
               Scenario Builder
             </Link>
           </div>
-          <h2 style={h2Style}>Load a campaign</h2>
-          {campaigns.length === 0 ? (
-            <p style={{ color: theme.muted }}>No campaigns yet.</p>
-          ) : (
-            <ul style={{ listStyle: 'none', padding: 0 }}>
-              {campaigns.map((c) => (
+          {campaigns.length > 0 && (
+            <>
+              <h2 style={h2Style}>Load a campaign</h2>
+              <ul style={{ listStyle: 'none', padding: 0 }}>
+                {campaigns.map((c) => (
                 <li
                   key={c.id}
                   style={{
@@ -122,10 +122,11 @@ export function HostScreen() {
                     Delete
                   </button>
                 </li>
-              ))}
-            </ul>
+                ))}
+              </ul>
+            </>
           )}
-          <h2 style={h2Style}>Or create a new one</h2>
+          <h2 style={h2Style}>{campaigns.length > 0 ? 'Or create a new one' : 'Create a campaign'}</h2>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               value={newName}
@@ -157,11 +158,13 @@ export function HostScreen() {
   const joinOrigin = lanHost
     ? `${location.protocol}//${lanHost}${joinPort}`
     : location.origin;
-  const joinUrl = `${joinOrigin}/p#${campaignId}`;
+  // The join link is the base URL up through `/p`; the campaign id is shown
+  // separately as the "campaign code" players enter.
+  const joinBaseUrl = `${joinOrigin}/p`;
   const playersWithChars = gameState?.players.filter((p) => p.characterId) ?? [];
   const playersReady = playersWithChars.filter((p) => {
     const ch = gameState?.characters.find((c) => c.id === p.characterId);
-    return ch?.loadout != null;
+    return ch?.loadout != null && ch.shoppingDone;
   });
   const waitingOn = playersWithChars.length - playersReady.length;
   // Gloomhaven requires a party of at least two.
@@ -233,17 +236,18 @@ export function HostScreen() {
       >
         <button
           onClick={() => { clearCampaign(); sock.send({ type: 'host_leave_campaign' }); }}
-          style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12 }}
+          style={{ ...btn.ghost(), padding: '4px 8px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}
         >
-          ← Back
+          <ChevronLeft size={14} /> Back
         </button>
         <h1
           style={{
             ...h1Style,
             margin: 0,
-            fontSize: 18,
-            fontVariant: 'small-caps',
-            letterSpacing: 1,
+            fontSize: 13,
+            fontWeight: 500,
+            textTransform: 'uppercase',
+            letterSpacing: 0,
           }}
         >
           {gameState?.campaignName ?? 'Loading…'}
@@ -305,7 +309,8 @@ export function HostScreen() {
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 24 }}>
           <WaitingRoom
             scenarioName={gameState?.scenarioName ?? null}
-            joinUrl={joinUrl}
+            joinBaseUrl={joinBaseUrl}
+            campaignCode={campaignId}
             players={gameState?.players ?? []}
             characters={gameState?.characters ?? []}
             canStart={canStart}
@@ -381,17 +386,13 @@ export function HostScreen() {
                 )}
                 <div style={{ display: 'flex', gap: 16, alignItems: 'stretch', flex: 1, minHeight: 0 }}>
                   {/* Map viewport: fills all remaining space up to the Elements
-                      bar and scrolls inside when the board is larger than it. */}
+                      bar. The board renders at a fixed hex size, starts centered
+                      on the players, and scrolls/zooms inside this box. */}
                   <div
                     style={{
                       flex: 1,
                       minWidth: 0,
-                      overflow: 'auto',
-                      background: '#0e0e10',
-                      borderRadius: 8,
-                      display: 'flex',
-                      justifyContent: 'center',
-                      alignItems: 'flex-start',
+                      minHeight: 0,
                     }}
                   >
                     <HexBoard
@@ -400,7 +401,7 @@ export function HostScreen() {
                       moneyTokens={gameState.moneyTokens}
                       doors={gameState.doors}
                       activeUnitIds={activeUnitIds}
-                      maxWidthPx={Number.POSITIVE_INFINITY}
+                      zoomable
                       {...(startingKeys ? { reachableKeys: startingKeys } : {})}
                       pathHexes={gameState.pendingForcedMove?.path}
                       unitAvatarUrl={(u: Unit) =>
@@ -804,7 +805,8 @@ function BigModCard({
 
 function WaitingRoom({
   scenarioName,
-  joinUrl,
+  joinBaseUrl,
+  campaignCode,
   players,
   characters,
   canStart,
@@ -813,7 +815,8 @@ function WaitingRoom({
   onStart,
 }: {
   scenarioName: string | null;
-  joinUrl: string;
+  joinBaseUrl: string;
+  campaignCode: string;
   players: LobbyPlayer[];
   characters: CharacterInstance[];
   canStart: boolean;
@@ -835,258 +838,230 @@ function WaitingRoom({
   const level = override ?? recommended;
   const setLevel = (next: number) =>
     setOverride(Math.max(MIN_SCENARIO_LEVEL, Math.min(MAX_SCENARIO_LEVEL, next)));
-  const hint = playersWithChars < 2
-    ? `Waiting for at least two players to pick a character (${playersWithChars}/2).`
-    : waitingOn > 0
-      ? `Waiting on ${waitingOn} ${waitingOn === 1 ? 'player' : 'players'} to lock in their hand.`
-      : 'Everyone is ready.';
+  const kicker: React.CSSProperties = {
+    fontFamily: theme.headingFont,
+    fontSize: 11,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    color: theme.muted,
+  };
+  const boxStyle: React.CSSProperties = {
+    background: theme.panel,
+    border: `1px solid ${theme.border}`,
+    borderRadius: 8,
+    padding: 20,
+    boxSizing: 'border-box',
+  };
   return (
-    <div style={{ maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
-      <div style={{ textAlign: 'center' }}>
-        <div
-          style={{
-            fontFamily: theme.headingFont,
-            fontSize: 11,
-            letterSpacing: 1,
-            textTransform: 'uppercase',
-            color: theme.muted,
-          }}
-        >
-          Next scenario
-        </div>
-        <div
-          style={{
-            fontFamily: theme.headingFont,
-            fontSize: 28,
-            color: theme.accent,
-            marginTop: 4,
-            letterSpacing: 0.5,
-          }}
-        >
-          {scenarioName ?? 'Level 1'}
-        </div>
-      </div>
-
+    <div style={{ maxWidth: 960, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Join info spans the full width above the two columns. The URL and the
+          campaign code players type in are shown as separate fields. */}
       <div
         style={{
-          padding: '20px 24px',
-          background: theme.panel,
-          border: `1px solid ${theme.border}`,
-          borderRadius: 8,
-          textAlign: 'center',
+          ...boxStyle,
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 24,
+          padding: '18px 24px',
         }}
       >
-        <div
-          style={{
-            fontFamily: theme.headingFont,
-            fontSize: 11,
-            letterSpacing: 1,
-            textTransform: 'uppercase',
-            color: theme.muted,
-          }}
-        >
-          Players join at
-        </div>
-        <code
-          style={{
-            display: 'inline-block',
-            marginTop: 8,
-            fontSize: 20,
-            color: theme.accent,
-            background: 'transparent',
-            wordBreak: 'break-all',
-          }}
-        >
-          {joinUrl}
-        </code>
-      </div>
-
-      <div>
-        <div
-          style={{
-            fontFamily: theme.headingFont,
-            fontSize: 11,
-            letterSpacing: 1,
-            textTransform: 'uppercase',
-            color: theme.muted,
-            marginBottom: 8,
-          }}
-        >
-          Players ({players.length})
-        </div>
-        {players.length === 0 ? (
-          <div
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={kicker}>Players join at</div>
+          <code
             style={{
-              padding: 16,
-              border: `1px dashed ${theme.border}`,
-              borderRadius: 6,
-              color: theme.muted,
-              textAlign: 'center',
-              fontSize: 14,
+              display: 'inline-block',
+              marginTop: 8,
+              fontSize: 20,
+              color: theme.accent,
+              background: 'transparent',
+              wordBreak: 'break-all',
             }}
           >
-            No one's signed in yet.
+            {joinBaseUrl}
+          </code>
+        </div>
+        <div
+          style={{
+            alignSelf: 'stretch',
+            width: 1,
+            background: theme.border,
+          }}
+        />
+        <div style={{ textAlign: 'center' }}>
+          <div style={kicker}>Campaign code</div>
+          <code
+            style={{
+              display: 'inline-block',
+              marginTop: 8,
+              fontSize: 28,
+              fontWeight: 700,
+              letterSpacing: 2,
+              color: theme.accent,
+              background: 'transparent',
+            }}
+          >
+            {campaignCode}
+          </code>
+        </div>
+      </div>
+
+      {/* Two side-by-side boxes: the scenario (with its picker, level, and
+          derived stats) on the left, and the players signing in on the right. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'stretch' }}>
+        <div style={{ ...boxStyle, flex: 1, minWidth: 300, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={kicker}>Scenario</div>
+          <select
+            value={scenarioId}
+            onChange={(e) => setScenarioId(e.target.value)}
+            style={{
+              fontSize: 15,
+              padding: '10px 36px 10px 12px',
+              background: theme.bgSolid,
+              color: theme.text,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 4,
+              fontFamily: theme.font,
+              width: '100%',
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              MozAppearance: 'none',
+              backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%23c9b27a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>")`,
+              backgroundRepeat: 'no-repeat',
+              backgroundPosition: 'right 12px center',
+            }}
+          >
+            {scenarios.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+
+          <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 16, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+            <div style={kicker}>Scenario level</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <button
+                onClick={() => setLevel(level - 1)}
+                disabled={level <= MIN_SCENARIO_LEVEL}
+                style={{
+                  ...btn.ghost(),
+                  fontSize: 20,
+                  padding: '2px 14px',
+                  opacity: level <= MIN_SCENARIO_LEVEL ? 0.4 : 1,
+                  cursor: level <= MIN_SCENARIO_LEVEL ? 'not-allowed' : 'pointer',
+                }}
+                aria-label="Lower scenario level"
+              >
+                −
+              </button>
+              <span
+                style={{
+                  fontFamily: theme.headingFont,
+                  fontSize: 34,
+                  color: theme.accent,
+                  minWidth: 40,
+                  textAlign: 'center',
+                }}
+              >
+                {level}
+              </span>
+              <button
+                onClick={() => setLevel(level + 1)}
+                disabled={level >= MAX_SCENARIO_LEVEL}
+                style={{
+                  ...btn.ghost(),
+                  fontSize: 20,
+                  padding: '2px 14px',
+                  opacity: level >= MAX_SCENARIO_LEVEL ? 0.4 : 1,
+                  cursor: level >= MAX_SCENARIO_LEVEL ? 'not-allowed' : 'pointer',
+                }}
+                aria-label="Raise scenario level"
+              >
+                +
+              </button>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: 4 }}>
+              <ScenarioLevelStrip level={level} showLevel={false} />
+            </div>
           </div>
-        ) : (
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {players.map((p) => {
-              const ch = p.characterId ? characters.find((c) => c.id === p.characterId) ?? null : null;
-              const status = !ch
-                ? 'Choosing character…'
-                : ch.loadout == null
-                  ? 'Building loadout…'
-                  : 'Ready';
-              const statusColor = !ch ? theme.muted : ch.loadout == null ? theme.muted : theme.good;
-              return (
-                <li
-                  key={p.playerId}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '10px 14px',
-                    background: theme.panel,
-                    border: `1px solid ${theme.border}`,
-                    borderRadius: 6,
-                  }}
-                >
-                  <span style={{ color: p.connected ? theme.good : theme.muted, fontSize: 16 }}>
-                    {p.connected ? '✓' : '○'}
-                  </span>
-                  {ch && (
-                    <img
-                      src={classAvatarUrl(ch.classId)}
-                      alt=""
-                      style={{ width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' }}
-                    />
-                  )}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, color: theme.text }}>
-                      {ch?.name ?? p.name}
-                    </div>
+        </div>
+
+        <div style={{ ...boxStyle, flex: 1, minWidth: 300, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={kicker}>Players ({players.length})</div>
+          {players.length === 0 ? (
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 16,
+                border: `1px dashed ${theme.border}`,
+                borderRadius: 6,
+                color: theme.muted,
+                textAlign: 'center',
+                fontSize: 14,
+              }}
+            >
+              No one's signed in yet.
+            </div>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {players.map((p) => {
+                const ch = p.characterId ? characters.find((c) => c.id === p.characterId) ?? null : null;
+                const ready = !!ch && ch.loadout != null && ch.shoppingDone;
+                const status = !ch
+                  ? 'Choosing character…'
+                  : ch.loadout == null
+                    ? 'Building loadout…'
+                    : !ch.shoppingDone
+                      ? 'Shopping…'
+                      : 'Ready';
+                const statusColor = ready ? theme.good : theme.muted;
+                return (
+                  <li
+                    key={p.playerId}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      padding: '10px 14px',
+                      background: theme.bgSolid,
+                      border: `1px solid ${theme.border}`,
+                      borderRadius: 6,
+                    }}
+                  >
+                    <span style={{ color: ready ? theme.good : theme.muted, fontSize: 16 }}>
+                      {ready ? '✓' : '○'}
+                    </span>
                     {ch && (
-                      <div style={{ fontSize: 12, color: theme.muted }}>
-                        {p.name}
-                      </div>
+                      <img
+                        src={classAvatarUrl(ch.classId)}
+                        alt=""
+                        style={{ width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' }}
+                      />
                     )}
-                  </div>
-                  <span style={{ fontSize: 12, color: statusColor }}>{status}</span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, color: theme.text }}>
+                        {ch?.name ?? p.name}
+                      </div>
+                      {ch && (
+                        <div style={{ fontSize: 12, color: theme.muted }}>
+                          {p.name}
+                        </div>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 12, color: statusColor }}>{status}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-        <select
-          value={scenarioId}
-          onChange={(e) => setScenarioId(e.target.value)}
-          style={{
-            fontSize: 14,
-            padding: '8px 12px',
-            background: theme.panel,
-            color: theme.text,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 4,
-            fontFamily: theme.font,
-          }}
-        >
-          {scenarios.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 8,
-            padding: '14px 18px',
-            background: theme.panel,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 8,
-          }}
-        >
-          <div
-            style={{
-              fontFamily: theme.headingFont,
-              fontSize: 11,
-              letterSpacing: 1,
-              textTransform: 'uppercase',
-              color: theme.muted,
-            }}
-          >
-            Scenario level
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <button
-              onClick={() => setLevel(level - 1)}
-              disabled={level <= MIN_SCENARIO_LEVEL}
-              style={{
-                ...btn.ghost(),
-                fontSize: 20,
-                padding: '2px 14px',
-                opacity: level <= MIN_SCENARIO_LEVEL ? 0.4 : 1,
-                cursor: level <= MIN_SCENARIO_LEVEL ? 'not-allowed' : 'pointer',
-              }}
-              aria-label="Lower scenario level"
-            >
-              −
-            </button>
-            <span
-              style={{
-                fontFamily: theme.headingFont,
-                fontSize: 34,
-                color: theme.accent,
-                minWidth: 40,
-                textAlign: 'center',
-              }}
-            >
-              {level}
-            </span>
-            <button
-              onClick={() => setLevel(level + 1)}
-              disabled={level >= MAX_SCENARIO_LEVEL}
-              style={{
-                ...btn.ghost(),
-                fontSize: 20,
-                padding: '2px 14px',
-                opacity: level >= MAX_SCENARIO_LEVEL ? 0.4 : 1,
-                cursor: level >= MAX_SCENARIO_LEVEL ? 'not-allowed' : 'pointer',
-              }}
-              aria-label="Raise scenario level"
-            >
-              +
-            </button>
-          </div>
-          <div style={{ fontSize: 12, color: theme.muted }}>
-            {override === null || override === recommended ? (
-              <>Recommended for this party (level {recommended}).</>
-            ) : (
-              <>
-                Recommended is {recommended}.{' '}
-                <button
-                  onClick={() => setOverride(null)}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: theme.accent,
-                    cursor: 'pointer',
-                    padding: 0,
-                    font: 'inherit',
-                    textDecoration: 'underline',
-                  }}
-                >
-                  Reset
-                </button>
-              </>
-            )}
-          </div>
-          <ScenarioLevelStrip level={level} />
-        </div>
         <button
           disabled={!canStart}
           onClick={() => onStart(scenarioId, level)}
@@ -1094,13 +1069,12 @@ function WaitingRoom({
         >
           Start Scenario
         </button>
-        <p style={{ color: theme.muted, fontSize: 12, margin: 0 }}>{hint}</p>
       </div>
     </div>
   );
 }
 
-function ScenarioLevelStrip({ level }: { level: number }) {
+function ScenarioLevelStrip({ level, showLevel = true }: { level: number; showLevel?: boolean }) {
   const chipStyle: React.CSSProperties = {
     padding: '4px 10px',
     background: theme.panel,
@@ -1127,10 +1101,12 @@ function ScenarioLevelStrip({ level }: { level: number }) {
       }}
       title="Derived values for the current scenario level"
     >
-      <span style={chipStyle}>
-        <span style={labelStyle}>Scenario Lv</span>
-        {level}
-      </span>
+      {showLevel && (
+        <span style={chipStyle}>
+          <span style={labelStyle}>Scenario Lv</span>
+          {level}
+        </span>
+      )}
       <span style={chipStyle}>
         <span style={labelStyle}>Gold</span>
         ×{goldConversionFor(level)}
