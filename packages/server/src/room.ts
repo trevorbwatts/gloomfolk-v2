@@ -47,7 +47,9 @@ import type {
   PendingForcedMove,
   PendingReactiveItem,
   PersistentTrigger,
+  PlacedTileArt,
   PublicGameState,
+  Scenario,
   ServerToClient,
   TargetCondition,
   TargetConditionalBonus,
@@ -1138,8 +1140,9 @@ export class Room {
   startScenario(
     scenarioId: string,
     level?: number,
+    custom?: { scenario: Scenario; tileArt: PlacedTileArt[] },
   ): { ok: true } | { ok: false; reason: string } {
-    const scenario = getScenario(scenarioId);
+    const scenario = custom?.scenario ?? getScenario(scenarioId);
     if (!scenario) return { ok: false, reason: 'unknown_scenario' };
 
     const playerSlots = scenario.spawns.filter((s) => s.side === 'player');
@@ -1170,6 +1173,17 @@ export class Room {
       MIN_SCENARIO_LEVEL,
       Math.min(MAX_SCENARIO_LEVEL, Math.floor(chosen)),
     );
+
+    // Adopt (or clear) the custom scenario + its artwork. Stored on the
+    // campaign so persist() saves it and it survives reload. Set before any
+    // currentScenario()-driven setup below so spawns/tiles resolve correctly.
+    if (custom) {
+      this.campaign.customScenario = custom.scenario;
+      this.campaign.tileArt = custom.tileArt;
+    } else {
+      delete this.campaign.customScenario;
+      delete this.campaign.tileArt;
+    }
 
     this.units = [];
     this.standeesInUse = new Map();
@@ -1476,11 +1490,19 @@ export class Room {
     return this.revealedRooms.has(room) && this.roomCleared(room);
   }
 
+  /** The scenario currently in play: a host-supplied custom (builder-authored)
+   *  scenario when present, otherwise the registry scenario named by
+   *  `campaign.scenarioId`. */
+  private currentScenario(): Scenario | null {
+    if (this.campaign.customScenario) return this.campaign.customScenario;
+    return this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+  }
+
   /** Doors the party can open right now: unlocked, and the room they'd reveal
    *  isn't already shown. (Doors sit on tile edges, so we don't require the
    *  door hex itself to be a floor tile.) */
   private openableDoors(): { id: string; hex: Hex }[] {
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     if (!scenario?.doors) return [];
     return scenario.doors
       .filter(
@@ -1496,7 +1518,7 @@ export class Room {
    *  door icon + numbered token. The token number is the door's 1-based index
    *  in the scenario's door list (door1 → ①, door2 → ②). */
   private doorViews(): { id: string; hex: Hex; number: number; openable: boolean }[] {
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     if (!scenario?.doors) return [];
     const visible = new Set(this.scenarioTiles().map((t) => hexKey(t)));
     return scenario.doors
@@ -1513,7 +1535,7 @@ export class Room {
   /** If an unlocked, unopened door sits on `hex`, open it. Called when a player
    *  moves onto a door hex (Gloomhaven: a door opens when a figure enters it). */
   private maybeOpenDoorAt(playerId: string, hex: Hex): void {
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     const door = scenario?.doors?.find((d) => hexEqual(d.hex, hex));
     if (!door) return;
     if (this.openedDoorIds.has(door.id)) return;
@@ -1528,7 +1550,7 @@ export class Room {
     if (this.phase === 'lobby' || this.phase === 'victory' || this.phase === 'defeat') {
       return { ok: false, reason: 'wrong_phase' };
     }
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     const door = scenario?.doors?.find((d) => d.id === doorId);
     if (!door) return { ok: false, reason: 'unknown_door' };
     if (this.openedDoorIds.has(doorId)) return { ok: false, reason: 'already_open' };
@@ -4487,7 +4509,7 @@ export class Room {
   }
 
   private scenarioTiles() {
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     if (!scenario) return [];
     // No room gating: single-room maps (no `rooms`) show every tile.
     const visible =
@@ -5528,7 +5550,7 @@ export class Room {
     this.refreshConsumeOffers();
     this.refreshTrapEligibility();
     this.syncUnitRetaliate();
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     return {
       campaignId: this.campaign.id,
       campaignName: this.campaign.name,
@@ -5538,6 +5560,7 @@ export class Room {
       scenarioId: this.campaign.scenarioId,
       scenarioName: scenario?.name ?? null,
       tiles: this.scenarioTiles(),
+      ...(this.campaign.tileArt?.length ? { tileArt: this.campaign.tileArt } : {}),
       units: this.units,
       moneyTokens: this.moneyTokens,
       moneyTokensPlaced: this.moneyTokensPlaced,
@@ -5912,7 +5935,7 @@ export class Room {
     if (this.phase === 'victory' || this.phase === 'defeat') return;
     if (this.phase === 'lobby') return;
     if (this.units.length === 0) return; // not yet set up
-    const scenario = this.campaign.scenarioId ? getScenario(this.campaign.scenarioId) : null;
+    const scenario = this.currentScenario();
     if (!scenario) return;
 
     // One-time "door unlocked" announcements as rooms get cleared.

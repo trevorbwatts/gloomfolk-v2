@@ -352,6 +352,9 @@ function stepExtras(step: AbilityStep): React.ReactNode[] {
   if (step.type === 'move' && step.mayBypassTraps) {
     lines.push('You may choose not to spring traps in hexes you enter with this movement.');
   }
+  if (step.type === 'control-enemy-move' && step.endConstraint === 'adjacent-to-actor') {
+    lines.push('This movement must end in a hex adjacent to you.');
+  }
   if (step.type === 'when') lines.push(...step.effects.flatMap(stepExtras));
   return lines;
 }
@@ -513,7 +516,8 @@ function stepLabel(step: AbilityStep): React.ReactNode {
     }
     case 'apply-condition': {
       const name = withIcon(step.condition, cap(step.condition));
-      if (!step.target || step.target.kind === 'self') return name;
+      if (step.target?.kind === 'self') return <>{name} (Self)</>;
+      if (!step.target) return name;
       if (step.target.kind === 'melee') return <>{name} an adjacent enemy</>;
       if (step.target.kind === 'ranged')
         return <>{name} a target at <GameIcon kind="range" /> Range {step.target.range}</>;
@@ -572,8 +576,17 @@ function stepLabel(step: AbilityStep): React.ReactNode {
       return <>{bonus} {scope}{filter}</>;
     }
     case 'control-enemy-move': {
-      const end = step.endConstraint === 'adjacent-to-actor' ? ', ending adjacent to you' : '';
-      return `Force a target enemy to Move ${step.moveAmount}${end}`;
+      const tgt = step.target;
+      const who =
+        tgt.kind === 'ranged' && tgt.range === 1 ? (
+          'one adjacent enemy'
+        ) : tgt.kind === 'ranged' ? (
+          <>one enemy within <GameIcon kind="range" /> Range {tgt.range}</>
+        ) : (
+          'one enemy'
+        );
+      // The "must end adjacent" clause renders as its own line via stepExtras.
+      return <>Control {who}:<br /><GameIcon kind="move" /> Move {step.moveAmount}</>;
     }
     case 'destroy-trap': {
       const xp = step.gainExp ? ` to gain ${step.gainExp} XP` : '';
@@ -663,7 +676,7 @@ function triggerPhrase(t: PersistentTriggerT, singular: boolean): React.ReactNod
     case 'attack-while-invisible':
       return (
         <>
-          attack{singular ? '' : 's'} while you have <GameIcon kind="invisible" /> Invisible
+          attack{singular ? '' : 's'} while you have <GameIcon kind="invisible" /> Invisibility
         </>
       );
   }

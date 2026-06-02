@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import type { DoorView, Hex, MoneyToken, MonsterTurnAnim, Tile, Unit } from '@gloomfolk/shared';
+import type {
+  DoorView,
+  Hex,
+  MoneyToken,
+  MonsterTurnAnim,
+  PlacedTileArt,
+  Tile,
+  Unit,
+} from '@gloomfolk/shared';
+import { tileShapeById, tileSideById } from '@gloomfolk/shared';
 import { GameIcon } from '../icons.js';
 
 const SQRT3 = Math.sqrt(3);
@@ -77,6 +86,9 @@ export interface HexBoardProps {
   /** Visible, unopened doors — drawn as a door icon + numbered token on their
    *  hex. An `openable` door also gets a pulsing highlight. */
   doors?: DoorView[];
+  /** Builder-authored tile background artwork. When present, plain floor hexes
+   *  render transparent so the art shows through behind the grid. */
+  tileArt?: PlacedTileArt[];
   size?: number;
   maxWidthPx?: number;
   /** When set, the board renders at a fixed hex size inside a scrollable
@@ -133,6 +145,7 @@ export function HexBoard({
   units,
   moneyTokens = [],
   doors = [],
+  tileArt = [],
   size = 40,
   maxWidthPx = 900,
   zoomable = false,
@@ -463,6 +476,7 @@ export function HexBoard({
   }
 
   const { vbW, vbH, originX, originY } = computeBounds(tiles, size);
+  const hasArt = tileArt.length > 0;
 
   // In zoomable mode the SVG renders at a fixed hex size (its viewBox extent ×
   // the zoom factor) and the surrounding viewport scrolls; otherwise it scales
@@ -495,6 +509,7 @@ export function HexBoard({
       onTouchStart={onHexEnter ? handleTouchStart : undefined}
       onTouchMove={onHexEnter ? handleTouchMove : undefined}
     >
+      {hasArt && <TileArtLayer art={tileArt} size={size} />}
       <g>
         {tiles.map((t) => {
           const { x, y } = axialToPx(t.q, t.r, size);
@@ -515,7 +530,13 @@ export function HexBoard({
                   ? '#3b5d2a'
                   : reachable
                     ? '#1f3a55'
-                    : TILE_FILL[t.kind];
+                    : // With tile art behind the grid, plain floor hexes go
+                      // transparent so the artwork shows through. Special
+                      // terrain (difficult/hazard/trap/…) keeps its fill so the
+                      // marker stays legible over the art.
+                    hasArt && t.kind === 'floor'
+                      ? 'transparent'
+                      : TILE_FILL[t.kind];
           const stroke = isAoeAnchor
             ? '#ffb347'
             : isAoeHit
@@ -559,43 +580,6 @@ export function HexBoard({
           );
         })}
       </g>
-      {tiles.some((t) => t.kind === 'trap') && (
-        <g style={{ pointerEvents: 'none' }}>
-          {tiles
-            .filter((t) => t.kind === 'trap')
-            .map((t) => {
-              const { x, y } = axialToPx(t.q, t.r, size);
-              const r = size * 0.42;
-              // Warning triangle: a trap to be sprung or destroyed.
-              const pts = [
-                `${x},${y - r}`,
-                `${x - r * 0.92},${y + r * 0.7}`,
-                `${x + r * 0.92},${y + r * 0.7}`,
-              ].join(' ');
-              return (
-                <g key={`trap-${t.q},${t.r}`}>
-                  <polygon
-                    points={pts}
-                    fill="#caa052"
-                    stroke="#6b4a12"
-                    strokeWidth={1.5}
-                    strokeLinejoin="round"
-                  />
-                  <text
-                    x={x}
-                    y={y + r * 0.42}
-                    textAnchor="middle"
-                    fontSize={size * 0.5}
-                    fontWeight={800}
-                    fill="#2a1d05"
-                  >
-                    !
-                  </text>
-                </g>
-              );
-            })}
-        </g>
-      )}
       {doors.length > 0 && (
         <g style={{ pointerEvents: 'none' }}>
           {doors.map((d) => {
@@ -1082,6 +1066,70 @@ function ZoomButton({
     >
       {label}
     </button>
+  );
+}
+
+/** Paints builder-authored tile artwork behind the hex grid. Mirrors the
+ *  builder's `TileBackground`: the image is drawn in the tile's local (unrotated)
+ *  frame — covering the footprint's bounding box and clipped to the footprint
+ *  hexes — then the whole group is translated and rotated into place so the art
+ *  stays glued to the hexes. */
+function TileArtLayer({ art, size }: { art: PlacedTileArt[]; size: number }) {
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      {art.map((piece) => {
+        const side = tileSideById(piece.tileSideId);
+        const shape = side ? tileShapeById(side.shapeId) : undefined;
+        const footprint = shape?.footprint ?? [];
+        if (footprint.length === 0) return null;
+        const polygons: string[] = [];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const h of footprint) {
+          const { x, y } = axialToPx(h.q, h.r, size);
+          polygons.push(hexCorners(x, y, size));
+          if (x - size < minX) minX = x - size;
+          if (y - size < minY) minY = y - size;
+          if (x + size > maxX) maxX = x + size;
+          if (y + size > maxY) maxY = y + size;
+        }
+        const W = maxX - minX;
+        const H = maxY - minY;
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const origin = axialToPx(piece.origin.q, piece.origin.r, size);
+        const t = piece.transform;
+        const clipId = `board-tile-clip-${piece.tileSideId}`;
+        const imageTransform =
+          `translate(${cx + t.offsetX * W} ${cy + t.offsetY * H}) ` +
+          `rotate(${t.rotation}) scale(${t.scale})`;
+        return (
+          <g
+            key={piece.tileSideId}
+            transform={`translate(${origin.x} ${origin.y}) rotate(${60 * piece.rotation})`}
+          >
+            <defs>
+              <clipPath id={clipId}>
+                {polygons.map((pts, i) => (
+                  <polygon key={i} points={pts} />
+                ))}
+              </clipPath>
+            </defs>
+            <g clipPath={`url(#${clipId})`}>
+              <g transform={imageTransform}>
+                <image
+                  href={piece.dataUrl}
+                  x={-W / 2}
+                  y={-H / 2}
+                  width={W}
+                  height={H}
+                  preserveAspectRatio="xMidYMid meet"
+                />
+              </g>
+            </g>
+          </g>
+        );
+      })}
+    </g>
   );
 }
 

@@ -20,7 +20,6 @@ export const smokeBomb: Card = {
             target: { kind: 'self' },
             node: 'diamond',
           },
-          { type: 'create-element', element: 'dark' },
         ],
       },
       {

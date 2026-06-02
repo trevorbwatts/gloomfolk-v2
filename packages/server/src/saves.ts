@@ -1,6 +1,12 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { CharacterInstance, CampaignSummary, ShopEntry } from '@gloomfolk/shared';
+import type {
+  CharacterInstance,
+  CampaignSummary,
+  PlacedTileArt,
+  Scenario,
+  ShopEntry,
+} from '@gloomfolk/shared';
 
 const SAVE_DIR = path.resolve(process.cwd(), 'saves');
 
@@ -10,6 +16,12 @@ export interface CampaignSave {
   createdAt: number;
   updatedAt: number;
   scenarioId: string | null;
+  /** A builder-authored scenario the host started, compiled in their browser.
+   *  Persisted (with its tile artwork) so `scenarioId` resolves to a playable
+   *  scenario on reload, since custom scenarios aren't in the static registry.
+   *  Undefined for the hand-written campaign scenarios. */
+  customScenario?: Scenario;
+  tileArt?: PlacedTileArt[];
   characters: CharacterInstance[];
   players: Array<{
     playerId: string;

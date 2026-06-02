@@ -195,12 +195,20 @@ export function PlayerScreen() {
     prevCharIdRef.current = myCharId ?? null;
   }, [myCharId]);
 
+  // Backing out of the loadout builder is the "previous step" in character
+  // creation, which is the roster — so it unclaims the character and returns
+  // there (the old in-body "Change hero" action), rather than dropping onto an
+  // intermediate lobby screen. Both the header Back button (via goBack →
+  // history.back) and the device back gesture route through this.
   useEffect(() => {
     if (!editingLoadout) return;
-    const onPop = () => setEditingLoadout(false);
+    const onPop = () => {
+      setEditingLoadout(false);
+      sock.send({ type: 'player_unclaim_character' });
+    };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, [editingLoadout]);
+  }, [editingLoadout, sock]);
 
   const meEarly = gameState?.players.find((p) => p.playerId === playerId);
   const phaseEarly = gameState?.phase;
@@ -325,11 +333,13 @@ export function PlayerScreen() {
     onPlayTab &&
     (myCharInstance?.broughtItemIds.length ?? 0) > 0;
   const headerTitle =
-    showBottomBar && activeTab === 'scenario'
-      ? 'Scenario'
-      : showBottomBar && activeTab === 'character'
-        ? 'Character'
-        : undefined;
+    showBottomBar && activeTab === 'active'
+      ? 'Active'
+      : showBottomBar && activeTab === 'scenario'
+        ? 'Scenario'
+        : showBottomBar && activeTab === 'character'
+          ? 'Character'
+          : undefined;
 
   // Back button: shown during character select/naming and while editing a
   // loadout. Walks back through the CharacterSelect history steps if any,
@@ -351,7 +361,29 @@ export function PlayerScreen() {
       you: null,
     });
   };
-  const showBack = onPlayTab && (!myCharInstance || editingLoadout);
+  // The shop step (hand built, in the lobby, not yet readied) gets a header
+  // Back button that returns to editing the hand — replacing the in-body
+  // "Edit hand" button that used to live there.
+  const openLoadoutBuilder = () => {
+    history.pushState({ gf: 'loadout' }, '');
+    setEditingLoadout(true);
+  };
+  const inLobbySetup =
+    onPlayTab && !!myCharInstance && phase === 'lobby' && !editingLoadout;
+  const atShopStep =
+    inLobbySetup &&
+    myCharInstance!.loadout != null &&
+    myCharInstance!.shoppingDone !== true;
+  // The Ready confirmation step: Back returns to the shop (the old in-body
+  // "Back to shop" button), reopening shopping.
+  const atReadyStep = inLobbySetup && myCharInstance!.shoppingDone === true;
+  const showBack =
+    onPlayTab && (!myCharInstance || editingLoadout || atShopStep || atReadyStep);
+  const onBack = atReadyStep
+    ? () => sock.send({ type: 'player_reopen_shopping' })
+    : atShopStep
+      ? openLoadoutBuilder
+      : goBack;
   // The top header bar renders whenever there's a character, and also during
   // the pre-character select/naming flow so the Back button and campaign name
   // share one consistent header section.
@@ -400,9 +432,8 @@ export function PlayerScreen() {
             {...(headerCampaignTitle != null ? { title: headerCampaignTitle } : {})}
             {...(myCharInstance && phase === 'lobby' ? { gold: myCharInstance.gold } : {})}
             {...(showItemsButton ? { onOpenItems: () => setShowItemsModal(true) } : {})}
-            {...(showBack ? { onBack: goBack } : {})}
+            {...(showBack ? { onBack } : {})}
           />
-          {myCharInstance && you && <ActiveArea you={you} />}
         </div>
       )}
       <div
@@ -502,20 +533,8 @@ export function PlayerScreen() {
                 textTransform: 'uppercase',
                 cursor: 'pointer',
               };
-          const secondaryBtnStyle: React.CSSProperties = {
-            fontSize: 14,
-            padding: '8px 14px',
-            background: 'transparent',
-            color: theme.muted,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 3,
-            fontFamily: theme.headingFont,
-            letterSpacing: 1,
-            textTransform: 'uppercase',
-            cursor: 'pointer',
-          };
-
-          // Readied up: show the confirmation and a way back to the shop.
+          // Readied up: show the confirmation. Back (in the header) returns to
+          // the shop.
           if (ready) {
             return (
               <div
@@ -543,12 +562,6 @@ export function PlayerScreen() {
                 <p style={{ marginTop: 16, color: theme.muted, fontSize: 14, letterSpacing: 0.5 }}>
                   Waiting for host to start the scenario…
                 </p>
-                <button
-                  onClick={() => sock.send({ type: 'player_reopen_shopping' })}
-                  style={{ ...secondaryBtnStyle, marginTop: 24 }}
-                >
-                  Back to shop
-                </button>
               </div>
             );
           }
@@ -556,23 +569,16 @@ export function PlayerScreen() {
           // Still setting up: pick a hand, then shop, then ready up.
           return (
             <div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button
-                  onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
-                  style={editBtnStyle}
-                >
-                  {hasLoadout ? 'Edit hand' : 'Pick cards'}
-                </button>
-                <button
-                  onClick={() => {
-                    setEditingLoadout(false);
-                    sock.send({ type: 'player_unclaim_character' });
-                  }}
-                  style={secondaryBtnStyle}
-                >
-                  Change hero
-                </button>
-              </div>
+              {!hasLoadout && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    onClick={() => { history.pushState({ gf: 'loadout' }, ''); setEditingLoadout(true); }}
+                    style={editBtnStyle}
+                  >
+                    Pick cards
+                  </button>
+                </div>
+              )}
               {!hasLoadout && (
                 <div
                   style={{
@@ -647,6 +653,9 @@ export function PlayerScreen() {
           )}
         {onPlayTab && me?.characterId && phase === 'turn_resolution' && gameState && (
           <TurnPlay gameState={gameState} myPlayerId={playerId!} you={you} />
+        )}
+        {showBottomBar && activeTab === 'active' && (
+          you ? <ActiveArea you={you} /> : null
         )}
         {showBottomBar && activeTab === 'scenario' && (
           <ScenarioPanel gameState={gameState ?? null} you={you} />

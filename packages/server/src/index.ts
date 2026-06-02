@@ -554,7 +554,7 @@ async function handle(
         send(ws, { type: 'error', message: 'no_room' });
         return;
       }
-      const result = room.startScenario(msg.scenarioId, msg.level);
+      const result = room.startScenario(msg.scenarioId, msg.level, msg.custom);
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }

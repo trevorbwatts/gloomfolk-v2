@@ -19,7 +19,7 @@ import {
   getScenario,
   modifierLabel,
 } from '@gloomfolk/shared';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, CircleEllipsis } from 'lucide-react';
 import { btn, theme } from '../theme.js';
 import { clearSession } from '../net/useSocket.js';
 import { useStore } from '../store.js';
@@ -29,7 +29,7 @@ import { GameIcon, type IconKey } from '../icons.js';
 export const BOTTOM_BAR_HEIGHT = 52;
 export const PLAYER_HEADER_HEIGHT = 41;
 
-export type TabId = 'play' | 'scenario' | 'character';
+export type TabId = 'play' | 'active' | 'scenario' | 'character';
 type CharacterTabId = 'sheet' | 'items' | 'cards' | 'modifiers';
 
 const MONSTER_DEFS: Record<string, MonsterStatCard | undefined> = {
@@ -47,6 +47,7 @@ export function BottomBar({
 }) {
   const tabs: { id: TabId; label: string; icon: ReactNode }[] = [
     { id: 'play', label: 'Play', icon: <PlayIcon /> },
+    { id: 'active', label: 'Active', icon: <CircleEllipsis size={24} strokeWidth={1.6} /> },
     { id: 'scenario', label: 'Scenario', icon: <ScenarioIcon /> },
     { id: 'character', label: 'Character', icon: <CharacterIcon /> },
   ];
@@ -121,8 +122,7 @@ export function PlayerHeader({
   return (
     <header
       style={{
-        // Sticky behavior lives on a wrapper in PlayerScreen so the ActiveArea
-        // can pin directly below this header as one cohesive top region.
+        // Sticky behavior lives on a wrapper in PlayerScreen.
         background: theme.bgSolid,
         padding: '0 16px 12px',
         borderBottom: `1px solid ${theme.border}`,

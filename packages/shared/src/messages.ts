@@ -13,7 +13,7 @@ import type {
 import type { MonsterRank } from './monsters/types.js';
 import type { Hex } from './hex.js';
 import type { ModifierCard, ModifierCardInstance } from './modifiers/index.js';
-import type { NarrativeEntry, Tile } from './scenarios/types.js';
+import type { NarrativeEntry, Scenario, Tile } from './scenarios/types.js';
 
 export type Role = 'host' | 'player';
 
@@ -206,6 +206,22 @@ export type TurnOrderEntry =
       done: boolean;
     };
 
+/** A tile's background artwork plus where it sits on the board, so any client
+ *  can paint the same image the builder shows behind the hex grid. Sent with a
+ *  custom (builder-authored) scenario and echoed back in PublicGameState. */
+export interface PlacedTileArt {
+  /** Map-tile side id, e.g. "G04-C" (matches the tile's `room`). */
+  tileSideId: string;
+  /** Placement origin in axial coords. */
+  origin: Hex;
+  /** Placement rotation in 60° steps (0–5). */
+  rotation: number;
+  /** Compressed image data URL of the artwork. */
+  dataUrl: string;
+  /** How the image is panned / scaled / rotated inside the footprint box. */
+  transform: { offsetX: number; offsetY: number; scale: number; rotation: number };
+}
+
 export interface PublicGameState {
   campaignId: string;
   campaignName: string;
@@ -216,6 +232,9 @@ export interface PublicGameState {
   scenarioId: string | null;
   scenarioName: string | null;
   tiles: Tile[];
+  /** Background artwork for builder-authored scenarios, keyed implicitly by the
+   *  tile's `room`. Empty/absent for the hand-written campaign scenarios. */
+  tileArt?: PlacedTileArt[];
   units: Unit[];
   /** Money tokens dropped on the map by monster deaths, awaiting pickup. */
   moneyTokens: MoneyToken[];
@@ -861,7 +880,15 @@ export type ClientToServer =
   /** Start a scenario. `level` (0–7) overrides the recommended scenario level
    *  chosen by the host in the lobby; omitted falls back to the recommended
    *  value derived from the party's character levels. */
-  | { type: 'host_start_scenario'; scenarioId: string; level?: number }
+  | {
+      type: 'host_start_scenario';
+      scenarioId: string;
+      level?: number;
+      /** A builder-authored scenario compiled in the host's browser, sent with
+       *  its tile artwork. When present the server plays this instead of a
+       *  registry scenario (scenarioId is still used as its id/name). */
+      custom?: { scenario: Scenario; tileArt: PlacedTileArt[] };
+    }
   /** Placement phase: claim (or move to) a starting hex. Allowed only while the
    *  player hasn't tapped Ready. */
   | { type: 'player_place'; hex: Hex }

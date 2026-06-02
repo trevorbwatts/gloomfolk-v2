@@ -680,8 +680,8 @@ function ActionDriver({
 
       <TrapChoicePrompt choice={gameState.pendingTrapChoice} />
 
-      {/* ActiveArea has moved up under the sticky PlayerHeader (see
-          PlayerScreen.tsx) so the persistent state is always visible. */}
+      {/* The active area (persistent cards + effects) lives in its own
+          "Active" app tab now — see ActiveArea in this file. */}
 
       {activeSlot && activeSlotKind ? (
         <>
@@ -1154,23 +1154,20 @@ function SlotChip({
   );
 }
 
-/** Sticky bar showing the player's persistent state — active cards (with
- *  use-slot circles for persistent-tracked) and active effects. Rendered in
- *  PlayerScreen.tsx, pinned directly under the sticky PlayerHeader. */
+/** The Active tab — shows the player's persistent state: active cards (with
+ *  use-slot circles for persistent-tracked) and active effects. Persistent
+ *  card halves land here when played and stay until they expire or are used
+ *  up. Rendered as its own app tab in PlayerScreen.tsx. */
 export function ActiveArea({ you }: { you: PrivatePlayerState }) {
-  if (you.active.length === 0 && you.activeEffects.length === 0) return null;
+  if (you.active.length === 0 && you.activeEffects.length === 0) {
+    return (
+      <p style={{ color: theme.muted, fontSize: 13, textAlign: 'center', margin: '32px 0' }}>
+        Nothing active right now. Persistent cards you play will show up here.
+      </p>
+    );
+  }
   return (
-    <div
-      style={{
-        padding: '6px 12px',
-        borderBottom: `1px solid ${theme.border}`,
-        background: theme.panel,
-        fontSize: 12,
-      }}
-    >
-      <div style={{ color: theme.muted, marginBottom: 4, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: theme.headingFont }}>
-        Active area
-      </div>
+    <div style={{ fontSize: 12 }}>
       {you.active.map((c) => {
         const tracked = you.activeTracked.find((t) => t.cardId === c.id);
         return (
@@ -2509,6 +2506,7 @@ function BoardForTurn({
         units={gameState.units}
         moneyTokens={gameState.moneyTokens}
         doors={gameState.doors}
+        {...(gameState.tileArt ? { tileArt: gameState.tileArt } : {})}
         size={22}
         maxWidthPx={500}
         activeUnitIds={myUnit ? [myUnit.id] : []}

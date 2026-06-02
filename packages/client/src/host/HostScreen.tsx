@@ -23,6 +23,7 @@ import {
   recommendedScenarioLevel,
   trapDamageFor,
 } from '@gloomfolk/shared';
+import { buildCustomScenario, isBuilderScenarioId, listBuiltScenarios } from './customScenario.js';
 
 const shellStyle: React.CSSProperties = {
   background: theme.bg,
@@ -316,9 +317,21 @@ export function HostScreen() {
             canStart={canStart}
             waitingOn={waitingOn}
             playersWithChars={playersWithChars.length}
-            onStart={(scenarioId, level) =>
-              sock.send({ type: 'host_start_scenario', scenarioId, level })
-            }
+            onStart={(scenarioId, level) => {
+              if (isBuilderScenarioId(scenarioId)) {
+                // Compile the editor scenario + gather its art in the browser,
+                // then ship it to the server to play.
+                void buildCustomScenario(scenarioId).then((custom) => {
+                  if (!custom) {
+                    sock.send({ type: 'host_start_scenario', scenarioId, level });
+                    return;
+                  }
+                  sock.send({ type: 'host_start_scenario', scenarioId, level, custom });
+                });
+                return;
+              }
+              sock.send({ type: 'host_start_scenario', scenarioId, level });
+            }}
           />
         </div>
       ) : (
@@ -400,6 +413,7 @@ export function HostScreen() {
                       units={gameState.units}
                       moneyTokens={gameState.moneyTokens}
                       doors={gameState.doors}
+                      {...(gameState.tileArt ? { tileArt: gameState.tileArt } : {})}
                       activeUnitIds={activeUnitIds}
                       zoomable
                       {...(startingKeys ? { reachableKeys: startingKeys } : {})}
@@ -824,7 +838,8 @@ function WaitingRoom({
   playersWithChars: number;
   onStart: (scenarioId: string, level: number) => void;
 }) {
-  const scenarios = listScenarios();
+  // Registry (hand-written campaign) scenarios plus any built in the editor.
+  const scenarios = [...listScenarios(), ...listBuiltScenarios()];
   const [scenarioId, setScenarioId] = useState(scenarios[0]?.id ?? FIRST_SCENARIO_ID);
   // Recommended scenario level from the levels of the characters claimed by
   // connected players (avg / 2, rounded up). Recomputes as players join, claim,
