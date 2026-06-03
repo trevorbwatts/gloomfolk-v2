@@ -68,7 +68,11 @@ const data: ScenarioData = {
   ],
 };
 
-const rules: ScenarioRules = {
+/** The hand-written behavior for Scenario 0 (door wiring, scripted sparring
+ *  partners, room reveal order, narrative). Exported so the host can layer it
+ *  onto the live builder layout for scenario 000 — keeping the editor as the
+ *  single source of truth for the map while preserving this tutorial logic. */
+export const scenario0Rules: ScenarioRules = {
   id: 'scenario-0',
   name: '0 · Training Course',
   objective: 'Defeat all the City Guards.',
@@ -132,4 +136,8 @@ const rules: ScenarioRules = {
   victory: { kind: 'killAll' },
 };
 
-export const scenario0 = compileScenario(data, rules);
+export const scenario0 = compileScenario(data, scenario0Rules);
+
+/** The scenario-book number that scenario 0's rules correspond to. The builder
+ *  scenario with this number is the live, editable Training Course layout. */
+export const SCENARIO_0_NUMBER = 0;

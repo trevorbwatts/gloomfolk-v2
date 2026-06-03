@@ -549,6 +549,10 @@ export function HexBoard({
                     ? '#5fa8e6'
                     : '#444';
           const strokeWidth = isAoeAnchor ? 3 : isAoeHit ? 2 : isSelectedHex ? 3 : onPath ? 2 : reachable ? 2 : 1;
+          // Over tile art, highlight fills (reachable/path/selected/AOE) go
+          // semi-transparent so the artwork reads through the overlay.
+          const highlighted = isAoeAnchor || isAoeHit || isSelectedHex || onPath || reachable;
+          const fillOpacity = highlighted && hasArt ? 0.45 : 1;
           return (
             <polygon
               key={k}
@@ -556,6 +560,7 @@ export function HexBoard({
               data-hex-q={t.q}
               data-hex-r={t.r}
               fill={fill}
+              fillOpacity={fillOpacity}
               stroke={stroke}
               strokeWidth={strokeWidth}
               style={{ cursor: tappable ? 'pointer' : 'default' }}

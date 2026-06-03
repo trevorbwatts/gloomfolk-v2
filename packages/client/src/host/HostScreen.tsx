@@ -16,14 +16,13 @@ import {
   FIRST_SCENARIO_ID,
   goldConversionFor,
   hazardousTerrainDamageFor,
-  listScenarios,
   MAX_SCENARIO_LEVEL,
   MIN_SCENARIO_LEVEL,
   modifierLabel,
   recommendedScenarioLevel,
   trapDamageFor,
 } from '@gloomfolk/shared';
-import { buildCustomScenario, isBuilderScenarioId, listBuiltScenarios } from './customScenario.js';
+import { buildCustomScenario, isBuilderScenarioId, listPlayableScenarios } from './customScenario.js';
 
 const shellStyle: React.CSSProperties = {
   background: theme.bg,
@@ -838,8 +837,9 @@ function WaitingRoom({
   playersWithChars: number;
   onStart: (scenarioId: string, level: number) => void;
 }) {
-  // Registry (hand-written campaign) scenarios plus any built in the editor.
-  const scenarios = [...listScenarios(), ...listBuiltScenarios()];
+  // Playable scenarios: built editor scenarios (source of truth) plus any
+  // registry scenarios not superseded by a built one.
+  const scenarios = listPlayableScenarios();
   const [scenarioId, setScenarioId] = useState(scenarios[0]?.id ?? FIRST_SCENARIO_ID);
   // Recommended scenario level from the levels of the characters claimed by
   // connected players (avg / 2, rounded up). Recomputes as players join, claim,

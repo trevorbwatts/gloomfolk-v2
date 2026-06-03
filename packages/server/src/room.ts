@@ -1180,6 +1180,10 @@ export class Room {
     if (custom) {
       this.campaign.customScenario = custom.scenario;
       this.campaign.tileArt = custom.tileArt;
+      console.info(
+        `[room] custom scenario "${custom.scenario.name}" started with ` +
+          `${custom.tileArt.length} tile-art piece(s).`,
+      );
     } else {
       delete this.campaign.customScenario;
       delete this.campaign.tileArt;
@@ -4508,6 +4512,18 @@ export class Room {
     return first;
   }
 
+  /** Tile artwork for currently-revealed rooms only, so what's behind an
+   *  unopened door stays hidden. Mirrors `scenarioTiles()` room gating — an art
+   *  piece's `tileSideId` is its room id. */
+  private visibleTileArt(): PlacedTileArt[] {
+    const art = this.campaign.tileArt;
+    if (!art || art.length === 0) return [];
+    const scenario = this.currentScenario();
+    // No room gating (single-tile maps): all art shows.
+    if (!scenario?.rooms || scenario.rooms.length === 0) return art;
+    return art.filter((a) => this.revealedRooms.has(a.tileSideId));
+  }
+
   private scenarioTiles() {
     const scenario = this.currentScenario();
     if (!scenario) return [];
@@ -5560,7 +5576,10 @@ export class Room {
       scenarioId: this.campaign.scenarioId,
       scenarioName: scenario?.name ?? null,
       tiles: this.scenarioTiles(),
-      ...(this.campaign.tileArt?.length ? { tileArt: this.campaign.tileArt } : {}),
+      ...(() => {
+        const art = this.visibleTileArt();
+        return art.length ? { tileArt: art } : {};
+      })(),
       units: this.units,
       moneyTokens: this.moneyTokens,
       moneyTokensPlaced: this.moneyTokensPlaced,
