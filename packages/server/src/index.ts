@@ -359,8 +359,8 @@ async function handle(
     }
 
     case 'dismiss_narrative': {
-      if (!conn.campaignId) return;
-      rooms.get(conn.campaignId)?.dismissNarrative();
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      rooms.get(conn.campaignId)?.dismissNarrative(conn.playerId);
       return;
     }
 

@@ -294,8 +294,10 @@ export interface PublicGameState {
    *  (victory or defeat). Null/empty during play, since goals are secret. */
   battleGoalResults: BattleGoalScenarioResult[] | null;
   /** Story text currently demanding the players' attention (scenario intro,
-   *  a door's section text, victory text). Shown as a modal everyone dismisses.
-   *  Null when nothing is queued. */
+   *  a door's section text, victory text). Shown as a modal on each player's
+   *  screen (not the host). Every player dismisses their own copy
+   *  (`PrivatePlayerState.narrativeDismissed`); the block only advances to the
+   *  next once all connected players have. Null when nothing is queued. */
   narrative: NarrativeEntry | null;
   /** Doors the party can open right now (unlock condition met, not yet opened,
    *  and their near room is visible). Drives the "Open door" affordance. */
@@ -525,6 +527,27 @@ export type PendingAction =
        *  (isolated / undamaged / adjacent-to-your-ally). Evaluated per target at
        *  resolution; non-matching targets get nothing. */
       targetConditionalBonuses?: readonly TargetConditionalBonus[];
+      /** Net attack-modifier draw mode the server has precomputed for each enemy
+       *  this attack could hit, keyed by target unit id. Only non-normal entries
+       *  are present — a missing id means a plain single draw. Lets the client
+       *  preview the real Advantage/Disadvantage of a staged target without
+       *  re-deriving the rules (single source of truth on the server). */
+      drawModeByTargetId?: Readonly<Record<string, 'advantage' | 'disadvantage'>>;
+      /** The deterministic attack value (before the modifier-card draw) and total
+       *  Pierce the server has precomputed for each enemy this attack could hit,
+       *  keyed by target unit id. Folds in every target-dependent bonus —
+       *  persistent "+X vs isolated" effects (Single Out), printed conditional
+       *  bonuses, poison, item charges — so the target bar shows the real numbers
+       *  before Confirm. A missing id falls back to the printed value. `bonuses`
+       *  lists the attack-value boosts beyond the printed amount (persistent
+       *  cards by name, printed conditional bonuses by condition) so the bar can
+       *  show a pill explaining *why* the number is what it is. */
+      previewByTargetId?: Readonly<
+        Record<
+          string,
+          { damage: number; pierce: number; bonuses: { label: string; amount: number }[] }
+        >
+      >;
       done: boolean;
     }
   | {
@@ -834,6 +857,11 @@ export interface PrivatePlayerState {
   /** This player's secret battle-goal hand for the current scenario (dealt
    *  three, kept one). Null in the lobby / before a scenario deals them. */
   battleGoal?: BattleGoalHand | null;
+  /** True once this player has dismissed the current narrative block (see
+   *  `PublicGameState.narrative`). Each player dismisses their own copy; the
+   *  shared block only advances once everyone has. Drives whether to keep
+   *  showing the story modal on this player's screen. */
+  narrativeDismissed: boolean;
 }
 
 export type ClientToServer =

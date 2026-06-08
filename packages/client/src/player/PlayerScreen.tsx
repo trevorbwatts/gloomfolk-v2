@@ -33,12 +33,12 @@ const CLASS_BY_ID: Record<string, CharacterClass> = {
   [silentKnife.id]: silentKnife,
 };
 
-function phaseHeadline(phase: string | undefined, hasCharacter: boolean, isMyTurn: boolean): string {
+function phaseHeadline(phase: string | undefined, hasCharacter: boolean): string {
   if (!hasCharacter) return '';
   switch (phase) {
     case 'placement': return 'Choose your starting position';
     case 'card_select': return 'Choose your Cards';
-    case 'turn_resolution': return isMyTurn ? '' : 'Turn in progress';
+    case 'turn_resolution': return '';
     case 'victory': return 'Victory';
     case 'defeat': return 'Defeated';
     default: return '';
@@ -183,7 +183,16 @@ export function PlayerScreen() {
   }, []);
 
   const myCharId = gameState?.players.find((p) => p.playerId === playerId)?.characterId ?? null;
+  const hasState = !!gameState;
   useEffect(() => {
+    // Don't decide anything until the server's state has actually arrived.
+    // On a reconnect (device wake / app reopen) the screen briefly mounts with
+    // no game state, so myCharId is momentarily null before the real character
+    // shows up. Establishing our baseline before state loads would make that
+    // null→character transition look like a fresh claim and wrongly yank the
+    // player into the loadout builder. Waiting for state means the baseline is
+    // set to the character they already had, and no spurious auto-open fires.
+    if (!hasState) return;
     if (prevCharIdRef.current === undefined) {
       prevCharIdRef.current = myCharId ?? null;
       return;
@@ -193,7 +202,7 @@ export function PlayerScreen() {
       setEditingLoadout(true);
     }
     prevCharIdRef.current = myCharId ?? null;
-  }, [myCharId]);
+  }, [myCharId, hasState]);
 
   // Backing out of the loadout builder is the "previous step" in character
   // creation, which is the roster — so it unclaims the character and returns
@@ -308,14 +317,27 @@ export function PlayerScreen() {
 
   const me = gameState?.players.find((p) => p.playerId === playerId);
   const phase = gameState?.phase;
-  const submittedCount = gameState?.players.filter((p) => p.submitted).length ?? 0;
-  const totalReady = gameState?.players.filter((p) => p.characterId).length ?? 0;
   const cur = gameState?.turnOrder[gameState?.activeTurnIndex ?? -1];
   const isMyTurn = cur?.kind === 'player' && cur.playerId === playerId;
 
   const myCharInstance = me?.characterId
     ? gameState?.characters.find((c) => c.id === me.characterId)
     : null;
+
+  // The page-header line. During another player's turn we show "<character>
+  // is playing…" here (in the shared header style) rather than as a muted
+  // line in the body; otherwise fall back to the phase headline.
+  const activePlayer =
+    cur?.kind === 'player'
+      ? gameState?.players.find((p) => p.playerId === cur.playerId)
+      : null;
+  const activeCharName = activePlayer?.characterId
+    ? gameState?.characters.find((c) => c.id === activePlayer.characterId)?.name
+    : null;
+  const headline =
+    phase === 'turn_resolution' && !isMyTurn && cur?.kind === 'player'
+      ? `${activeCharName ?? activePlayer?.name ?? 'Player'} is playing…`
+      : phaseHeadline(phase, !!me?.characterId);
   const myClassId = myCharInstance?.classId ?? null;
   const myClass = myClassId ? CLASS_BY_ID[myClassId] : null;
   const myUnit =
@@ -393,7 +415,7 @@ export function PlayerScreen() {
 
   return (
     <div style={shellStyle}>
-      {gameState?.narrative && (
+      {gameState?.narrative && !you?.narrativeDismissed && (
         <NarrativeModal
           entry={gameState.narrative}
           onDismiss={() => sock.send({ type: 'dismiss_narrative' })}
@@ -458,7 +480,7 @@ export function PlayerScreen() {
             </p>
           );
         })()}
-        {onPlayTab && !(phase === 'placement' && you?.battleGoal && you.battleGoal.chosenGoalId == null && you.battleGoal.dealtGoalIds.length > 0) && phaseHeadline(phase, !!me?.characterId, isMyTurn) && <h1
+        {onPlayTab && !(phase === 'placement' && you?.battleGoal && you.battleGoal.chosenGoalId == null && you.battleGoal.dealtGoalIds.length > 0) && headline && <h1
           style={{
             marginTop: 6,
             marginBottom: 12,
@@ -469,13 +491,8 @@ export function PlayerScreen() {
             letterSpacing: 0.5,
           }}
         >
-          {phaseHeadline(phase, !!me?.characterId, isMyTurn)}
+          {headline}
         </h1>}
-        {onPlayTab && phase === 'card_select' && me?.characterId && submittedCount > 0 && submittedCount < totalReady && (
-          <p style={{ color: theme.muted, fontSize: 13, marginTop: -8, marginBottom: 12 }}>
-            Waiting on {totalReady - submittedCount} other {totalReady - submittedCount === 1 ? 'player' : 'players'}.
-          </p>
-        )}
         {onPlayTab && !me?.characterId && playerId && gameState && (
           <CharacterSelect
             characters={gameState.characters}

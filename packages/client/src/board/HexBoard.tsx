@@ -67,6 +67,10 @@ const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 1.25;
 
+/** Difficult-terrain marker colour — matches the Scenario Builder's
+ *  'difficult-terrain' overlay (OVERLAY_STYLES) so the two read identically. */
+const DIFFICULT_OUTLINE = '#9b3fd4';
+
 const TILE_FILL: Record<Tile['kind'], string> = {
   floor: '#2a2a2e',
   wall: '#0a0a0c',
@@ -474,6 +478,11 @@ export function HexBoard({
   if (pathHexes) {
     pathHexes.forEach((h, i) => pathIndexByKey.set(`${h.q},${h.r}`, i + 1));
   }
+  // Difficult-terrain hexes, so a path step landing on one can be tinted purple
+  // (it cost 2 to enter). The number itself stays the physical step count — we
+  // never inflate it, so "X = hexes moved" cards still see the true distance.
+  const difficultKeys = new Set<string>();
+  for (const t of tiles) if (t.kind === 'difficult') difficultKeys.add(`${t.q},${t.r}`);
 
   const { vbW, vbH, originX, originY } = computeBounds(tiles, size);
   const hasArt = tileArt.length > 0;
@@ -531,12 +540,18 @@ export function HexBoard({
                   : reachable
                     ? '#1f3a55'
                     : // With tile art behind the grid, plain floor hexes go
-                      // transparent so the artwork shows through. Special
-                      // terrain (difficult/hazard/trap/…) keeps its fill so the
-                      // marker stays legible over the art.
-                    hasArt && t.kind === 'floor'
+                      // transparent so the artwork shows through. Difficult
+                      // terrain reads from its bold outline overlay (drawn on
+                      // top, mirroring the Scenario Builder), so it's treated
+                      // like floor here rather than getting a competing fill —
+                      // otherwise the outline fights a dark tint and the marker
+                      // vanishes the moment the hex is highlighted. Other
+                      // special terrain (hazard/trap/…) keeps its fill.
+                    hasArt && (t.kind === 'floor' || t.kind === 'difficult')
                       ? 'transparent'
-                      : TILE_FILL[t.kind];
+                      : t.kind === 'difficult'
+                        ? TILE_FILL.floor
+                        : TILE_FILL[t.kind];
           const stroke = isAoeAnchor
             ? '#ffb347'
             : isAoeHit
@@ -584,6 +599,26 @@ export function HexBoard({
             />
           );
         })}
+      </g>
+      {/* Difficult terrain: a bold coloured hex outline drawn on top of the
+          grid (and any reachable/path highlight), mirroring the Scenario
+          Builder's marker style so it stays legible while planning a move. */}
+      <g style={{ pointerEvents: 'none' }}>
+        {tiles
+          .filter((t) => t.kind === 'difficult')
+          .map((t) => {
+            const { x, y } = axialToPx(t.q, t.r, size);
+            return (
+              <polygon
+                key={`difficult-${t.q},${t.r}`}
+                points={hexCorners(x, y, size)}
+                fill="none"
+                stroke={DIFFICULT_OUTLINE}
+                strokeWidth={2.5}
+                strokeLinejoin="round"
+              />
+            );
+          })}
       </g>
       {doors.length > 0 && (
         <g style={{ pointerEvents: 'none' }}>
@@ -652,6 +687,7 @@ export function HexBoard({
         <g style={{ pointerEvents: 'none' }}>
           {pathHexes.map((h, i) => {
             const { x, y } = axialToPx(h.q, h.r, size);
+            const difficult = difficultKeys.has(`${h.q},${h.r}`);
             return (
               <text
                 key={`path-${h.q},${h.r}`}
@@ -661,7 +697,7 @@ export function HexBoard({
                 dominantBaseline="middle"
                 fontSize={size * 0.45}
                 fontWeight={700}
-                fill="#e7f3d4"
+                fill={difficult ? DIFFICULT_OUTLINE : '#e7f3d4'}
                 stroke="#1a1a1a"
                 strokeWidth={0.8}
                 paintOrder="stroke"
@@ -825,17 +861,20 @@ export function HexBoard({
                   {initial}
                 </text>
               )}
-              {(u.kind !== 'player' || u.shield > 0) && (
-                <text x={x} y={y + size * 0.35} textAnchor="middle" dominantBaseline="middle" fontSize={size * 0.28} fill="#fff" stroke="#000" strokeWidth={0.6} paintOrder="stroke">
-                  {u.kind === 'player'
-                    ? `⛨${u.shield}`
-                    : `${u.hp}/${u.hpMax}${u.shield > 0 ? ` ⛨${u.shield}` : ''}`}
+              {/* HP is no longer printed over the avatar — it reads from the
+                  HP ring and the enemy bar across the top of the board. Only a
+                  shield value (if any) is shown here. */}
+              {u.shield > 0 && (
+                <text x={x} y={y - size * 0.72} textAnchor="middle" dominantBaseline="middle" fontSize={size * 0.28} fill="#fff" stroke="#000" strokeWidth={0.6} paintOrder="stroke">
+                  ⛨{u.shield}
                 </text>
               )}
+              {/* Standee number, in its black circle, sits low on the avatar
+                  where the HP used to read. */}
               {u.kind === 'monster' && u.standeeNumber !== undefined && (
                 <>
-                  <circle cx={x + size * 0.52} cy={y - size * 0.52} r={size * 0.34} fill="#1b1b1b" stroke="#fff" strokeWidth={1} />
-                  <text x={x + size * 0.52} y={y - size * 0.52} textAnchor="middle" dominantBaseline="central" fontSize={size * 0.4} fontWeight={700} fill="#fff">
+                  <circle cx={x} cy={y + size * 0.35} r={size * 0.24} fill="#1b1b1b" stroke="#fff" strokeWidth={1} />
+                  <text x={x} y={y + size * 0.35} textAnchor="middle" dominantBaseline="central" fontSize={size * 0.3} fontWeight={700} fill="#fff">
                     {u.standeeNumber}
                   </text>
                 </>
@@ -852,20 +891,29 @@ export function HexBoard({
                 const iconSize = badgeSize * 0.66;
                 const gap = badgeSize * 0.18;
                 const totalW = items.length * badgeSize + (items.length - 1) * gap;
-                const rowY = y - size * 0.85 - badgeSize * 0.35;
+                // A foreignObject clips to its bounds, so pad it a couple pixels
+                // past the badge row — otherwise each badge's 1px white border
+                // gets shaved off at the edges.
+                const pad = 3;
+                // Sit the condition badges just below the standee number (which
+                // is low-centre on the avatar), hanging off the bottom edge.
+                const rowY = y + size * 0.58;
                 return (
                   <foreignObject
-                    x={x - totalW / 2}
-                    y={rowY}
-                    width={totalW}
-                    height={badgeSize}
+                    x={x - totalW / 2 - pad}
+                    y={rowY - pad}
+                    width={totalW + pad * 2}
+                    height={badgeSize + pad * 2}
                   >
                     <div
                       style={{
                         display: 'flex',
                         gap,
                         alignItems: 'center',
+                        justifyContent: 'center',
                         lineHeight: 0,
+                        width: '100%',
+                        height: '100%',
                       }}
                     >
                       {items.map((k, i) => (
@@ -877,6 +925,7 @@ export function HexBoard({
                             borderRadius: '50%',
                             background: '#1b1b1b',
                             border: '1px solid #fff',
+                            boxSizing: 'border-box',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
@@ -1139,10 +1188,10 @@ function TileArtLayer({ art, size }: { art: PlacedTileArt[]; size: number }) {
 }
 
 /** A clock-style HP gauge ringing a unit's token. A faint full circle marks the
- *  "spent" track; a bright red arc on top shows the HP still remaining, drawn
- *  from 12 o'clock and sweeping clockwise. As the unit takes damage the arc's
- *  trailing end recedes back toward 12 — it ticks down around the figure like a
- *  clock hand. The arc length is CSS-transitioned so each hit animates smoothly. */
+ *  "spent" track; a bright red arc shows the HP still remaining, anchored so it
+ *  always ends at 12 o'clock. As the unit takes damage the empty wedge opens at
+ *  12 and grows clockwise — the gauge drains clockwise from the top. The dash
+ *  offset/length are CSS-transitioned so each hit animates smoothly. */
 function HpRing({ x, y, size, hp, hpMax, color = '#e23b3b' }: { x: number; y: number; size: number; hp: number; hpMax: number; color?: string }) {
   if (hpMax <= 0) return null;
   const r = size * 0.72;
@@ -1153,7 +1202,8 @@ function HpRing({ x, y, size, hp, hpMax, color = '#e23b3b' }: { x: number; y: nu
     <g style={{ pointerEvents: 'none' }} transform={`rotate(-90 ${x} ${y})`}>
       {/* Spent track (full circle behind the arc). */}
       <circle cx={x} cy={y} r={r} fill="none" stroke="rgba(0,0,0,0.45)" strokeWidth={size * 0.07} />
-      {/* Remaining HP arc. */}
+      {/* Remaining HP arc. The dash offset pushes the gap (lost HP) to lead
+          clockwise from 12, leaving the coloured arc ending at 12. */}
       <circle
         cx={x}
         cy={y}
@@ -1163,7 +1213,8 @@ function HpRing({ x, y, size, hp, hpMax, color = '#e23b3b' }: { x: number; y: nu
         strokeWidth={size * 0.07}
         strokeLinecap={frac > 0 && frac < 1 ? 'round' : 'butt'}
         strokeDasharray={`${arc.toFixed(2)} ${(C - arc).toFixed(2)}`}
-        style={{ transition: 'stroke-dasharray 0.45s ease' }}
+        strokeDashoffset={arc.toFixed(2)}
+        style={{ transition: 'stroke-dasharray 0.45s ease, stroke-dashoffset 0.45s ease' }}
       />
     </g>
   );

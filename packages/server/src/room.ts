@@ -242,6 +242,17 @@ function poisonBonus(target: Unit): number {
   return hasCondition(target, 'poison') ? 1 : 0;
 }
 
+/** Short label for a target condition, used on the attack-preview "why" pills
+ *  (e.g. a printed "+2 vs isolated" bonus). */
+function conditionShort(c: TargetCondition): string {
+  switch (c.kind) {
+    case 'target-undamaged': return 'undamaged';
+    case 'target-isolated-from-allies': return 'isolated';
+    case 'target-adjacent-to-your-ally': return 'ally-adjacent';
+    case 'all-of': return 'conditional';
+  }
+}
+
 /** Reconcile advantage and disadvantage sources for a single attack. They do
  *  not stack: an attack carrying both is considered to have neither (a flat
  *  single draw), per advantage-disadvantage-pierce.md. Returns the net mode,
@@ -278,6 +289,9 @@ export function consumeAttackBonus(
   /** Whether the attacker is currently Invisible — gates `requiresInvisible`
    *  bonuses (Smoke Bomb). */
   attackerInvisible = false,
+  /** When false, compute the bonus without consuming any effects — used by the
+   *  attack-preview refresh to peek the numbers before the attack resolves. */
+  consume = true,
 ): { amount: number; pierce: number; double: boolean } {
   let amount = 0;
   let pierce = 0;
@@ -320,7 +334,7 @@ export function consumeAttackBonus(
     if (e.doubleAttack) double = true;
     if (e.expires !== 'next-attack') keep.push(e);
   }
-  p.activeEffects = keep;
+  if (consume) p.activeEffects = keep;
   return { amount, pierce, double };
 }
 
@@ -946,8 +960,12 @@ export class Room {
    *  card scripted figures perform instead of drawing). Rebuilt each round. */
   private scriptedActionBySet = new Map<string, ScriptedAction>();
   /** Story-text blocks waiting to be shown (FIFO). The head is broadcast as
-   *  `narrative`; players dismiss it to advance. */
+   *  `narrative`; the head only advances once every connected player has
+   *  dismissed it. */
   private narrativeQueue: NarrativeEntry[] = [];
+  /** Player ids who have dismissed the current narrative head (the modal hides
+   *  on their screen). Cleared each time the head advances. */
+  private narrativeDismissedBy = new Set<string>();
   /** Monotonic unit-id counter for the current scenario (players + monsters,
    *  including monsters spawned later when a door opens). */
   private nextUnitN = 1;
@@ -1204,6 +1222,7 @@ export class Room {
     this.monsterBehaviorById = new Map();
     this.scriptedActionBySet = new Map();
     this.narrativeQueue = [];
+    this.narrativeDismissedBy.clear();
     this.nextUnitN = 1;
     // Element board resets at scenario start (rulebook: tokens enter the
     // inert column when the table is reset).
@@ -1399,12 +1418,18 @@ export class Room {
       return { ok: false, reason: 'not_placed' };
     }
     p.placementReady = ready;
+    // Once the last player places and readies up, the round starts on its own —
+    // no host action needed. (The host Begin button stays as a fallback, e.g.
+    // for when a not-yet-ready player disconnects.)
+    if (ready && this.placementComplete()) {
+      return this.beginScenarioPlay();
+    }
     this.broadcastState();
     return { ok: true };
   }
 
   /** True when every connected character-player has placed a figure and tapped
-   *  Ready — the host may begin play. */
+   *  Ready — the round auto-begins (and the host may also begin manually). */
   private placementComplete(): boolean {
     const mustPlace = [...this.players.values()].filter(
       (p) => p.activeCharacterId && p.socket !== null,
@@ -1599,9 +1624,28 @@ export class Room {
     return { ok: true };
   }
 
-  /** Dismiss the story-text block currently shown to the party. */
-  dismissNarrative(): { ok: true } {
-    this.narrativeQueue.shift();
+  /** Connected players who should see (and dismiss) the narrative modal — i.e.
+   *  everyone in the scenario. The host is never included. */
+  private narrativeAudience(): PlayerEntry[] {
+    return [...this.players.values()].filter(
+      (p) => p.socket !== null && p.activeCharacterId != null,
+    );
+  }
+
+  /** Dismiss the current story-text block for one player. The modal hides on
+   *  their screen, but the block stays up for everyone else; it only advances
+   *  to the next block once every connected player has dismissed it. */
+  dismissNarrative(playerId: string): { ok: true } {
+    if (this.narrativeQueue.length === 0) return { ok: true };
+    this.narrativeDismissedBy.add(playerId);
+    const audience = this.narrativeAudience();
+    const allDismissed =
+      audience.length > 0 &&
+      audience.every((p) => this.narrativeDismissedBy.has(p.playerId));
+    if (allDismissed) {
+      this.narrativeQueue.shift();
+      this.narrativeDismissedBy.clear();
+    }
     this.broadcastState();
     return { ok: true };
   }
@@ -2463,6 +2507,26 @@ export class Room {
           basic: target.useBasic,
           targetedAlly: false,
         });
+      }
+    }
+    // A performed persistent half puts its card into the active area right
+    // away, so it appears on the player's Active tab the moment it's played
+    // rather than only after the turn ends. Unperformed/skipped persistent
+    // halves stay in hand and fall through to normal end-of-turn disposal
+    // (→ discard).
+    if (!target.useBasic && target.performedCount > 0 && target.cardId) {
+      const idx = guard.p.hand.findIndex((c) => c.id === target.cardId);
+      if (idx !== -1) {
+        const card = guard.p.hand[idx]!;
+        const half = slot === 'top' ? card.top : card.bottom;
+        if (
+          half.disposition === 'persistent-round' ||
+          half.disposition === 'persistent-tracked' ||
+          half.disposition === 'persistent-scenario'
+        ) {
+          guard.p.hand.splice(idx, 1);
+          this.moveCardToActive(guard.p, card, slot);
+        }
       }
     }
     void this.persist();
@@ -3664,6 +3728,31 @@ export class Room {
     this.pushEvent(`Monster modifier deck reshuffles.`);
   }
 
+  /** Place a performed persistent card into the active area, adding the
+   *  parallel use-slot bookkeeping for a persistent-tracked half. The card must
+   *  already be out of the player's hand. Shared by the immediate move on
+   *  finishHalf and the end-of-turn disposePlayerCards fallback. */
+  private moveCardToActive(p: PlayerEntry, card: Card, which: 'top' | 'bottom'): void {
+    p.active.push(card);
+    const half = which === 'top' ? card.top : card.bottom;
+    if (
+      half.disposition === 'persistent-tracked' &&
+      typeof half.trackedUses === 'number' &&
+      half.persistentTrigger
+    ) {
+      p.activeTracked.push({
+        cardId: card.id,
+        halfKind: which,
+        currentSlot: 1,
+        trackedUses: half.trackedUses,
+        persistentTrigger: half.persistentTrigger,
+        useSlotExp: half.useSlotExp ?? [],
+        finalPile: half.finalPile ?? 'lost',
+        triggerSteps: collectTriggerSteps(half),
+      });
+    }
+  }
+
   private disposePlayerCards(p: PlayerEntry): void {
     if (!p.selection || p.selection.kind !== 'cards') return;
     const ct = this.currentTurn;
@@ -3697,31 +3786,8 @@ export class Room {
       }
       if (dest === 'lost') p.lost.push(card);
       else if (dest === 'active') {
-        p.active.push(card);
-        // Persistent-tracked halves get parallel use-slot bookkeeping.
-        if (ct) {
-          const which: 'top' | 'bottom' | null =
-            ct.topSlot.cardId === id ? 'top' : ct.bottomSlot.cardId === id ? 'bottom' : null;
-          if (which) {
-            const half = which === 'top' ? card.top : card.bottom;
-            if (
-              half.disposition === 'persistent-tracked' &&
-              typeof half.trackedUses === 'number' &&
-              half.persistentTrigger
-            ) {
-              p.activeTracked.push({
-                cardId: card.id,
-                halfKind: which,
-                currentSlot: 1,
-                trackedUses: half.trackedUses,
-                persistentTrigger: half.persistentTrigger,
-                useSlotExp: half.useSlotExp ?? [],
-                finalPile: half.finalPile ?? 'lost',
-                triggerSteps: collectTriggerSteps(half),
-              });
-            }
-          }
-        }
+        const which: 'top' | 'bottom' = ct && ct.topSlot.cardId === id ? 'top' : 'bottom';
+        this.moveCardToActive(p, card, which);
       }
       else p.discard.push(card);
     }
@@ -5451,6 +5517,158 @@ export class Room {
     }
   }
 
+  /** Precompute the net attack-modifier draw mode for every enemy each pending
+   *  attack could target, so the client can preview a staged target's real
+   *  Advantage/Disadvantage without re-deriving the rules. Uses the exact same
+   *  sources as live attack resolution: a ranged Advantage charge (Simple Bow)
+   *  or a card's conditional Advantage vs the target gives Advantage; a ranged
+   *  attack on an adjacent target gives Disadvantage; one of each cancels. */
+  private refreshAttackDrawModes(): void {
+    const ct = this.currentTurn;
+    if (!ct) return;
+    const attacker = this.units.find((u) => u.id === ct.unitId) ?? null;
+    for (const slot of [ct.topSlot, ct.bottomSlot]) {
+      for (const a of slot.actions) {
+        if (a.type !== 'attack') continue;
+        if (!attacker) {
+          a.drawModeByTargetId = {};
+          continue;
+        }
+        const ranged = a.range > 1;
+        const chargeAdvantage = ct.advantageCharge && ranged;
+        const map: Record<string, 'advantage' | 'disadvantage'> = {};
+        for (const tgt of this.units) {
+          if (tgt.kind !== 'monster') continue;
+          const cardCond = this.resolveTargetConditionalBonuses(
+            a.targetConditionalBonuses,
+            attacker,
+            tgt,
+          );
+          const hasAdvantage = chargeAdvantage || cardCond.advantage;
+          const autoDisadvantage = ranged && hexDistance(attacker.hex, tgt.hex) === 1;
+          const mode = resolveAdvantage(hasAdvantage, autoDisadvantage);
+          if (mode) map[tgt.id] = mode;
+        }
+        a.drawModeByTargetId = map;
+      }
+    }
+  }
+
+  /** Precompute, for every enemy each pending attack could target, the attack
+   *  value (before the modifier-card draw) and total Pierce — folding in every
+   *  target-dependent bonus exactly as live resolution does (flat active
+   *  bonuses, persistent "+X vs isolated"/conditional bonuses, printed
+   *  conditional bonuses, poison, element-rider opt-ins, item Pierce charges).
+   *  The target bar reads this so it shows the real numbers before Confirm,
+   *  instead of just the printed Attack value. Non-mutating: the bonus peek
+   *  passes `consume = false`. */
+  private refreshAttackPreviews(): void {
+    const ct = this.currentTurn;
+    if (!ct) return;
+    const attacker = this.units.find((u) => u.id === ct.unitId) ?? null;
+    const p = attacker?.ownerPlayerId ? this.players.get(attacker.ownerPlayerId) ?? null : null;
+    for (const slot of [ct.topSlot, ct.bottomSlot]) {
+      for (const a of slot.actions) {
+        if (a.type !== 'attack') continue;
+        if (!attacker || !p) {
+          a.previewByTargetId = {};
+          continue;
+        }
+        const attackKind: 'melee' | 'ranged' = a.range > 1 ? 'ranged' : 'melee';
+        // Element-rider attack/pierce the player has opted into (locked once the
+        // first sub-target is named, otherwise the live accepted set).
+        const offerBonus = (key: 'attackBonus' | 'pierceBonus') =>
+          a.acceptedConsumeIndices.reduce(
+            (s, i) => s + (a.consumeOffers.find((o) => o.riderIndex === i)?.[key] ?? 0),
+            0,
+          );
+        const riderAttack = a.consumesLocked ? a.lockedRiderAttack : offerBonus('attackBonus');
+        const riderPierce = a.consumesLocked ? a.lockedRiderPierce : offerBonus('pierceBonus');
+        const itemPierce = ct.pierceCharge?.amount ?? 0;
+        const map: Record<
+          string,
+          { damage: number; pierce: number; bonuses: { label: string; amount: number }[] }
+        > = {};
+        for (const tgt of this.units) {
+          if (tgt.kind !== 'monster') continue;
+          const resolvedAmount =
+            a.amountRef && a.amountRef.kind === 'target-shield-value'
+              ? resolveAmountRef(a.amountRef, ct, tgt)
+              : a.amount;
+          const flat = consumeAttackBonus(
+            p,
+            attackKind,
+            (ref) =>
+              ref.kind === 'target-shield-value' && tgt.shield <= 0
+                ? null
+                : resolveAmountRef(ref, ct, tgt),
+            attacker.invisible === true,
+            false,
+          );
+          const printed = flat.double ? resolvedAmount * 2 : resolvedAmount;
+          const cardCond = this.resolveTargetConditionalBonuses(
+            a.targetConditionalBonuses,
+            attacker,
+            tgt,
+          );
+          const activeCond = this.targetConditionalActiveBonus(p, attackKind, attacker, tgt);
+          const damage =
+            printed + flat.amount + riderAttack + poisonBonus(tgt) + cardCond.attack + activeCond.attack;
+          const pierce =
+            a.pierce + flat.pierce + riderPierce + itemPierce + cardCond.pierce + activeCond.pierce;
+          const bonuses = this.attackBonusBreakdown(p, attackKind, attacker, tgt, a, resolvedAmount);
+          map[tgt.id] = { damage, pierce, bonuses };
+        }
+        a.previewByTargetId = map;
+      }
+    }
+  }
+
+  /** Labelled attack-value boosts beyond the printed amount, for the target
+   *  bar's "why" pills: each applicable persistent/active attack bonus (named by
+   *  its source card, e.g. "+3 Single Out") and each matching printed
+   *  conditional bonus (named by its condition, e.g. "+2 isolated"). Poison and
+   *  element riders are surfaced elsewhere, so they're left out here. */
+  private attackBonusBreakdown(
+    p: PlayerEntry,
+    attackKind: 'melee' | 'ranged',
+    attacker: Unit,
+    tgt: Unit,
+    action: Extract<PendingAction, { type: 'attack' }>,
+    resolvedAmount: number,
+  ): { label: string; amount: number }[] {
+    const ct = this.currentTurn;
+    const out: { label: string; amount: number }[] = [];
+    for (const e of p.activeEffects) {
+      if (e.kind !== 'attack-bonus') continue;
+      if (e.attackKind && e.attackKind !== attackKind) continue;
+      if (e.requiresInvisible && attacker.invisible !== true) continue;
+      if (e.targetCondition && !this.matchesTargetCondition(e.targetCondition, attacker, tgt)) {
+        continue;
+      }
+      let amount = e.amount;
+      if (e.amountRef) {
+        const r =
+          e.amountRef.kind === 'target-shield-value' && tgt.shield <= 0
+            ? null
+            : ct
+              ? resolveAmountRef(e.amountRef, ct, tgt)
+              : null;
+        if (r === null) continue;
+        amount += r;
+      }
+      const name = p.active.find((c) => c.id === e.sourceCardId)?.name ?? 'Bonus';
+      if (e.doubleAttack) out.push({ label: `${name} (×2)`, amount: resolvedAmount });
+      if (amount > 0) out.push({ label: name, amount });
+    }
+    for (const b of action.targetConditionalBonuses ?? []) {
+      if (!this.matchesTargetCondition(b.condition, attacker, tgt)) continue;
+      const amount = b.attackBonus ?? 0;
+      if (amount > 0) out.push({ label: conditionShort(b.condition), amount });
+    }
+    return out;
+  }
+
   /** Recompute the tappable hexes for any pending `destroy-trap` action: trap
    *  hexes the actor entered (and bypassed) this move that still hold a trap. */
   private refreshTrapEligibility(): void {
@@ -5565,6 +5783,8 @@ export class Room {
     this.refreshAmountRefs();
     this.refreshConsumeOffers();
     this.refreshTrapEligibility();
+    this.refreshAttackDrawModes();
+    this.refreshAttackPreviews();
     this.syncUnitRetaliate();
     const scenario = this.currentScenario();
     return {
@@ -6050,6 +6270,7 @@ export class Room {
           shortRestPending: p.shortRestPending,
           longRestPending: p.longRestPending,
           battleGoal: this.battleGoalHandForPlayer(p.playerId),
+          narrativeDismissed: this.narrativeDismissedBy.has(p.playerId),
         },
       });
     }

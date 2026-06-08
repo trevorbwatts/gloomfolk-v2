@@ -42,25 +42,29 @@ function startScenario0() {
   assert.deepEqual(res, { ok: true });
 
   // Scenario start now drops the party into a placement phase. Drive both
-  // players through it (placement completion + Begin require live sockets) so
-  // the room reaches card-selection like the tests below expect. We also leave
-  // player 2 with a standing card selection so the single-player buildTurnOrder
-  // helper can still finalize the round order.
+  // players through it (placement completion requires live sockets) so the room
+  // reaches card-selection like the tests below expect — readying the last
+  // player auto-begins the round. We also leave player 2 with a standing card
+  // selection so the single-player buildTurnOrder helper can still finalize the
+  // round order.
   (fx.player as unknown as { socket: unknown }).socket = { send: () => {} };
   (player2 as unknown as { socket: unknown }).socket = { send: () => {} };
   const starts = fx.room.publicState().startingPositions;
   assert.ok(starts.length >= 2, 'scenario 0 offers at least two starting hexes');
   fx.room.placePlayer('p-1', starts[0]!);
   fx.room.placePlayer('p-2', starts[1]!);
-  fx.room.setPlacementReady('p-1', true);
-  fx.room.setPlacementReady('p-2', true);
   (player2 as unknown as { selection: unknown }).selection = {
     kind: 'cards',
     leadingId: 'p2-leading',
     secondId: 'p2-second',
   };
-  const begin = fx.room.beginScenarioPlay();
-  assert.deepEqual(begin, { ok: true });
+  fx.room.setPlacementReady('p-1', true);
+  fx.room.setPlacementReady('p-2', true);
+  assert.equal(
+    fx.room.publicState().phase,
+    'card_select',
+    'readying the last player auto-begins the round',
+  );
   return fx;
 }
 
@@ -68,6 +72,14 @@ function startScenario0() {
  *  internal). Returns the live monster units. */
 function monsters(room: Room) {
   return room.units.filter((u) => u.kind === 'monster');
+}
+
+/** A narrative block now advances only once every connected player dismisses
+ *  it (each dismisses their own copy). The fixture is a two-player party, so
+ *  the head clears only after both p-1 and p-2 dismiss. */
+function dismissNarrativeForAll(room: Room) {
+  room.dismissNarrative('p-1');
+  room.dismissNarrative('p-2');
 }
 
 /** Drive the private turn-order builder with the player having selected two
@@ -109,13 +121,13 @@ test('Scenario 0 starts with only room 1 revealed and the intro narrative', () =
   // No door is openable yet (room 1 not cleared).
   assert.equal(state.openableDoors.length, 0);
 
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
   assert.equal(fx.room.publicState().narrative, null);
 });
 
 test('door 1 shows token ① (locked), and stepping onto it opens it only after room 1 is cleared', () => {
   const fx = startScenario0();
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
   const room = fx.room as unknown as {
     maybeOpenDoorAt: (pid: string, hex: { q: number; r: number }) => void;
   };
@@ -163,7 +175,7 @@ test('room-1 dummies never get a monster-group turn', () => {
 
 test('clearing room 1 unlocks and opens door 1, revealing scripted room 2', () => {
   const fx = startScenario0();
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
 
   // Kill room-1 guards.
   fx.room.units = fx.room.units.filter((u) => u.kind !== 'monster');
@@ -186,7 +198,7 @@ test('clearing room 1 unlocks and opens door 1, revealing scripted room 2', () =
   assert.ok(state.tiles.some((t) => t.room === '07-D'));
   assert.equal(state.narrative?.title, 'Sparring Room');
 
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
 
   // Room-2 guards are scripted: they act as a group at initiative 50.
   const order = buildTurnOrder(fx.room, fx.player);
@@ -198,17 +210,17 @@ test('clearing room 1 unlocks and opens door 1, revealing scripted room 2', () =
 
 test('room 3 guards act on their real ability deck, and clearing it wins', () => {
   const fx = startScenario0();
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
 
   // Clear room 1, open door 1.
   fx.room.units = fx.room.units.filter((u) => u.kind !== 'monster');
   fx.room.openDoor(fx.player.playerId, 'door1');
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
 
   // Clear room 2, open door 2 → room 3 (normal behavior).
   fx.room.units = fx.room.units.filter((u) => u.kind !== 'monster');
   fx.room.openDoor(fx.player.playerId, 'door2');
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
 
   const order = buildTurnOrder(fx.room, fx.player);
   const group = order.find((e) => e.kind === 'monster-group');
@@ -227,7 +239,7 @@ test('room 3 guards act on their real ability deck, and clearing it wins', () =>
 
 test('opening a door mid-round splices the revealed monster set into the live initiative order', () => {
   const fx = startScenario0();
-  fx.room.dismissNarrative();
+  dismissNarrativeForAll(fx.room);
 
   // Enter turn resolution for the round. Room-1 guards are dummies, so the live
   // order is players-only at this point (no monster-group entry).

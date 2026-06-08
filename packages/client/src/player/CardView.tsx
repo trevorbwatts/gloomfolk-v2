@@ -742,28 +742,40 @@ function trackedSentence(half: CardHalf): React.ReactNode {
   return <>{lead}, gain {body()}.</>;
 }
 
-function UseTrack({ half }: { half: CardHalf }) {
+/** The use-track shown under a persistent-tracked half. When `currentSlot` is
+ *  given (the card is live in the Active area), the slot the use-token sits on
+ *  is filled like a game token — starting on the first ("starting") space and
+ *  advancing as the tracked bonus fires; earlier spaces dim out. Without it
+ *  (browsing the card in hand), every space renders empty as printed. */
+function UseTrack({ half, currentSlot }: { half: CardHalf; currentSlot?: number }) {
   const slots = half.trackedUses ?? 0;
   if (slots <= 0) return null;
   const exp = half.useSlotExp ?? [];
   const finalPile = half.finalPile ?? 'lost';
   const finalExp = exp.length === slots ? exp[slots - 1] ?? null : null;
 
-  const circle = (key: string, xpInside: number | null) => (
+  const circle = (
+    key: string,
+    xpInside: number | null,
+    state: 'used' | 'current' | 'future',
+  ) => (
     <span
       key={key}
       style={{
         width: 26,
         height: 26,
         borderRadius: '50%',
-        border: `1.5px solid ${theme.muted}`,
+        border: `1.5px solid ${state === 'current' ? theme.accent : theme.muted}`,
+        background: state === 'current' ? theme.accent : 'transparent',
+        color: state === 'current' ? '#0e1612' : theme.text,
+        fontWeight: state === 'current' ? 700 : 400,
         flex: '0 0 auto',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
         fontSize: 11,
         lineHeight: 1,
-        opacity: xpInside != null ? 1 : 0.85,
+        opacity: state === 'used' ? 0.35 : state === 'future' && xpInside == null ? 0.85 : 1,
       }}
     >
       {xpInside != null ? `+${xpInside}` : ''}
@@ -786,7 +798,16 @@ function UseTrack({ half }: { half: CardHalf }) {
   const items: React.ReactNode[] = [];
   for (let i = 0; i < slots; i++) {
     const xpInside = i > 0 ? exp[i - 1] ?? null : null;
-    items.push(circle(`c${i}`, xpInside));
+    const slotIdx = i + 1;
+    const state: 'used' | 'current' | 'future' =
+      currentSlot == null
+        ? 'future'
+        : slotIdx < currentSlot
+          ? 'used'
+          : slotIdx === currentSlot
+            ? 'current'
+            : 'future';
+    items.push(circle(`c${i}`, xpInside, state));
     if (i < slots - 1) items.push(arrow(`a${i}`));
   }
 
@@ -908,9 +929,13 @@ function AbilityBlock({
 export function HalfView({
   half,
   elementContext = null,
+  trackedCurrentSlot,
 }: {
   half: CardHalf;
   elementContext?: CardElementContext | null;
+  /** When this half is a live persistent-tracked card in the Active area, the
+   *  slot its use-token currently occupies (1..trackedUses). */
+  trackedCurrentSlot?: number;
 }) {
   const isTracked = half.disposition === 'persistent-tracked';
   const cost = half.requiredElementCost ?? [];
@@ -973,7 +998,12 @@ export function HalfView({
           />
         ))
       )}
-      {half.disposition === 'persistent-tracked' && <UseTrack half={half} />}
+      {half.disposition === 'persistent-tracked' && (
+        <UseTrack
+          half={half}
+          {...(trackedCurrentSlot != null ? { currentSlot: trackedCurrentSlot } : {})}
+        />
+      )}
       <div
         style={{
           fontSize: 11,
@@ -999,12 +1029,20 @@ export function CardView({
   onClick,
   selected,
   elementContext = null,
+  activeTracked,
+  halfOnly,
 }: {
   card: Card;
   marker?: 'L' | '2nd' | null;
   onClick?: () => void;
   selected?: boolean;
   elementContext?: CardElementContext | null;
+  /** Live persistent-tracked progress for this card in the Active area: which
+   *  half carries the track and where its use-token currently sits. */
+  activeTracked?: { halfKind: 'top' | 'bottom'; currentSlot: number };
+  /** Render only one half (no divider/other half). Used by the Active area to
+   *  show just the persistent half that's actually in play. */
+  halfOnly?: 'top' | 'bottom';
 }) {
   const border = selected ? theme.accent : theme.border;
   return (
@@ -1064,14 +1102,36 @@ export function CardView({
         )}
       </div>
       <div style={{ fontSize: 18, lineHeight: 1.35 }}>
-        <div><HalfView half={card.top} elementContext={elementContext} /></div>
-        <div
-          style={{
-            borderTop: `2px solid ${theme.border}`,
-            margin: '16px -18px 4px',
-          }}
-        />
-        <div><HalfView half={card.bottom} elementContext={elementContext} /></div>
+        {halfOnly !== 'bottom' && (
+          <div>
+            <HalfView
+              half={card.top}
+              elementContext={elementContext}
+              {...(activeTracked?.halfKind === 'top'
+                ? { trackedCurrentSlot: activeTracked.currentSlot }
+                : {})}
+            />
+          </div>
+        )}
+        {!halfOnly && (
+          <div
+            style={{
+              borderTop: `2px solid ${theme.border}`,
+              margin: '16px -18px 4px',
+            }}
+          />
+        )}
+        {halfOnly !== 'top' && (
+          <div>
+            <HalfView
+              half={card.bottom}
+              elementContext={elementContext}
+              {...(activeTracked?.halfKind === 'bottom'
+                ? { trackedCurrentSlot: activeTracked.currentSlot }
+                : {})}
+            />
+          </div>
+        )}
       </div>
     </button>
   );

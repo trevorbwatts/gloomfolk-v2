@@ -5,12 +5,11 @@ import { useSocket } from '../net/useSocket.js';
 import { useStore } from '../store.js';
 import { HexBoard } from '../board/HexBoard.js';
 import { ElementBoard } from '../board/ElementBoard.js';
-import { NarrativeModal } from '../board/NarrativeModal.js';
 import { useMoveAnim } from '../board/useMoveAnim.js';
 import { TurnOrder } from './TurnOrder.js';
 import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
 import { btn, theme } from '../theme.js';
-import type { CharacterInstance, LobbyPlayer, ModifierCard, MonsterTurnAnim, Unit } from '@gloomfolk/shared';
+import type { CharacterInstance, LobbyPlayer, ModifierCard, MonsterTurnAnim, PublicGameState, Unit } from '@gloomfolk/shared';
 import {
   bonusExperienceFor,
   FIRST_SCENARIO_ID,
@@ -217,12 +216,6 @@ export function HostScreen() {
         overflow: 'hidden',
       }}
     >
-      {gameState?.narrative && (
-        <NarrativeModal
-          entry={gameState.narrative}
-          onDismiss={() => sock.send({ type: 'dismiss_narrative' })}
-        />
-      )}
       <div
         style={{
           background: '#000',
@@ -253,58 +246,10 @@ export function HostScreen() {
           {gameState?.campaignName ?? 'Loading…'}
         </h1>
         <div style={{ flex: 1 }} />
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center' }}>
-          {!inLobby && gameState?.players.map((p) => {
-            const charInst = p.characterId
-              ? gameState.characters.find((c) => c.id === p.characterId)
-              : null;
-            const unit = gameState.units.find(
-              (u) => u.kind === 'player' && u.ownerPlayerId === p.playerId,
-            );
-            const displayName = charInst?.name ?? p.name;
-            return (
-              <div
-                key={p.playerId}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '4px 10px',
-                  background: theme.panel,
-                  border: `1px solid ${theme.border}`,
-                  borderRadius: 4,
-                  fontSize: 13,
-                  color: theme.text,
-                }}
-              >
-                <span style={{ color: p.connected ? theme.good : theme.muted }}>
-                  {p.connected ? '✓' : '○'}
-                </span>
-                <strong style={{ fontWeight: 600 }}>{displayName}</strong>
-                {unit && (
-                  <span style={{ color: theme.muted }}>
-                    {unit.hp}/{unit.hpMax} HP
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ flex: 1 }} />
-      </div>
-      {gameState && gameState.tiles.length > 0 && !inLobby && (
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'center',
-            padding: '10px 24px',
-            borderBottom: `1px solid ${theme.border}`,
-            flexShrink: 0,
-          }}
-        >
+        {!inLobby && gameState && gameState.tiles.length > 0 && (
           <ScenarioLevelStrip level={gameState.scenarioLevel} />
-        </div>
-      )}
+        )}
+      </div>
       {inLobby ? (
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 24 }}>
           <WaitingRoom
@@ -334,6 +279,8 @@ export function HostScreen() {
           />
         </div>
       ) : (
+        <>
+        {gameState && gameState.tiles.length > 0 && <TokenBar gameState={gameState} />}
         <div
           style={{
             flex: 1,
@@ -437,7 +384,180 @@ export function HostScreen() {
             )}
           </div>
         </div>
+        </>
       )}
+    </div>
+  );
+}
+
+/** One token chip in the {@link TokenBar}: a round avatar with a small corner
+ *  badge, the figure's name, and a draining HP bar. Shared by players and
+ *  enemies so both read identically. */
+function TokenChip({
+  avatarUrl,
+  name,
+  hp,
+  hpMax,
+  badge,
+  badgeColor = '#1b1b1b',
+  borderColor,
+  hpColor,
+}: {
+  avatarUrl: string;
+  name: string;
+  hp: number;
+  hpMax: number;
+  badge?: string | number;
+  badgeColor?: string;
+  borderColor: string;
+  hpColor: string;
+}) {
+  const frac = hpMax > 0 ? Math.max(0, Math.min(1, hp / hpMax)) : 0;
+  const dead = hpMax > 0 && hp <= 0;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '4px 12px 4px 4px',
+        background: theme.panel,
+        border: `1px solid ${borderColor}`,
+        borderRadius: 20,
+        flexShrink: 0,
+        opacity: dead ? 0.4 : 1,
+      }}
+    >
+      <div style={{ position: 'relative', width: 30, height: 30, flexShrink: 0 }}>
+        <img
+          src={avatarUrl}
+          alt=""
+          style={{ width: 30, height: 30, borderRadius: '50%', objectFit: 'cover', display: 'block' }}
+        />
+        {badge !== undefined && (
+          <span
+            style={{
+              position: 'absolute',
+              right: -3,
+              bottom: -3,
+              minWidth: 15,
+              height: 15,
+              padding: '0 3px',
+              boxSizing: 'border-box',
+              borderRadius: 8,
+              background: badgeColor,
+              border: '1px solid #fff',
+              color: '#fff',
+              fontSize: 9,
+              fontWeight: 700,
+              lineHeight: '13px',
+              textAlign: 'center',
+            }}
+          >
+            {badge}
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 56 }}>
+        <span
+          style={{
+            fontSize: 11,
+            display: 'flex',
+            justifyContent: 'space-between',
+            gap: 8,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <span style={{ color: theme.muted }}>{name}</span>
+          <strong style={{ color: theme.text }}>
+            {Math.max(0, hp)}/{hpMax}
+          </strong>
+        </span>
+        <div
+          style={{
+            height: 4,
+            borderRadius: 2,
+            background: 'rgba(0,0,0,0.45)',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              height: '100%',
+              width: `${frac * 100}%`,
+              background: hpColor,
+              transition: 'width 0.45s ease',
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** A bar across the top of the scenario view listing every token on the board —
+ *  the party first, then the enemies — each with its current HP, so the host can
+ *  read the whole roster at a glance without hunting across the map. Enemies are
+ *  sorted by name then standee number for a stable order; dead figures fade out. */
+function TokenBar({ gameState }: { gameState: PublicGameState }) {
+  const players = gameState.players
+    .map((p) => {
+      const unit = gameState.units.find(
+        (u) => u.kind === 'player' && u.ownerPlayerId === p.playerId,
+      );
+      const charInst = p.characterId
+        ? gameState.characters.find((c) => c.id === p.characterId)
+        : null;
+      return unit && charInst ? { p, unit, charInst } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+  const enemies = gameState.units
+    .filter((u) => u.kind === 'monster')
+    .sort((a, b) =>
+      a.name === b.name
+        ? (a.standeeNumber ?? 0) - (b.standeeNumber ?? 0)
+        : a.name.localeCompare(b.name),
+    );
+  if (players.length === 0 && enemies.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        padding: '8px 24px',
+        borderBottom: `1px solid ${theme.border}`,
+        overflowX: 'auto',
+        flexShrink: 0,
+      }}
+    >
+      {players.map(({ p, unit, charInst }) => (
+        <TokenChip
+          key={p.playerId}
+          avatarUrl={classAvatarUrl(charInst.classId)}
+          name={charInst.name}
+          hp={unit.hp}
+          hpMax={unit.hpMax}
+          badge={p.connected ? '✓' : '○'}
+          badgeColor={p.connected ? theme.good : '#555'}
+          borderColor={theme.border}
+          hpColor="#3fbf57"
+        />
+      ))}
+      {enemies.map((u) => (
+        <TokenChip
+          key={u.id}
+          avatarUrl={monsterAvatarUrl(u.defId)}
+          name={u.name}
+          hp={u.hp}
+          hpMax={u.hpMax}
+          {...(u.standeeNumber !== undefined ? { badge: u.standeeNumber } : {})}
+          borderColor={
+            u.rank === 'elite' ? '#f0c850' : u.rank === 'named' ? '#e0564f' : theme.border
+          }
+          hpColor="#e23b3b"
+        />
+      ))}
     </div>
   );
 }

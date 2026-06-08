@@ -54,7 +54,6 @@ import { GameIcon, type IconKey } from '../icons.js';
 const cap = (s: string): string => s.length === 0 ? s : s[0]!.toUpperCase() + s.slice(1);
 import { btn, theme } from '../theme.js';
 import { CardView, HalfView, ElementChip, type CardElementContext } from './CardView.js';
-import { CardsOverview } from './Hand.js';
 import {
   ItemModal,
   UseItemButton,
@@ -99,13 +98,15 @@ export function TurnPlay({
       <div>
         {gameState.monsterTurnAnim ? (
           <MonsterTurnBanner anim={gameState.monsterTurnAnim} units={gameState.units} />
+        ) : cur?.kind === 'player' ? (
+          // The "<character> is playing…" wait message lives in the page header
+          // (see PlayerScreen), so nothing is rendered here for a player's turn.
+          null
         ) : (
           <p style={{ color: theme.muted }}>
-            {cur?.kind === 'player'
-              ? `Waiting on ${gameState.players.find((p) => p.playerId === cur.playerId)?.name ?? 'player'}…`
-              : cur?.kind === 'monster-group'
-                ? `${cur.abilityCardName} — monster turn`
-                : 'No active turn.'}
+            {cur?.kind === 'monster-group'
+              ? `${cur.abilityCardName} — monster turn`
+              : 'No active turn.'}
           </p>
         )}
         {/* The board is intentionally hidden while it isn't this player's turn
@@ -120,7 +121,6 @@ export function TurnPlay({
             ))}
           </div>
         )}
-        {you && <CardsOverview you={you} />}
       </div>
     );
   }
@@ -918,10 +918,17 @@ function ModifierFlipOverlay({ draws }: { draws: ModifierDrawResult[] }) {
   const [active, setActive] = useState<ModifierDrawResult[] | null>(null);
 
   useEffect(() => {
-    const fresh = draws.filter((d) => !shownRef.current.has(d.id));
-    if (fresh.length === 0) return;
-    for (const d of fresh) shownRef.current.add(d.id);
-    setActive(fresh);
+    // A multi-target attack draws one card per target, sent as several rapid
+    // perform messages → several state broadcasts (first [d1], then [d1, d2]).
+    // Showing only the newly-arrived draws would replace the overlay on each
+    // broadcast and reveal just the last card. Instead, whenever any new draw
+    // arrives, show the whole current burst: the server clears
+    // lastModifierDraws at the start of each fresh attack, so this array only
+    // ever holds the current attack's cards.
+    const hasNew = draws.some((d) => !shownRef.current.has(d.id));
+    if (!hasNew) return;
+    for (const d of draws) shownRef.current.add(d.id);
+    setActive(draws);
   }, [draws]);
 
   if (!active) return null;
@@ -1170,35 +1177,27 @@ export function ActiveArea({ you }: { you: PrivatePlayerState }) {
     <div style={{ fontSize: 12 }}>
       {you.active.map((c) => {
         const tracked = you.activeTracked.find((t) => t.cardId === c.id);
+        // Show only the half that's actually persisting — for Warding Strength
+        // that's the bottom (Shield/Retaliate), not the top attack. Tracked
+        // cards name their half; others are found by persistent disposition.
+        const isPersistent = (d: typeof c.top.disposition) =>
+          d === 'persistent-round' || d === 'persistent-tracked' || d === 'persistent-scenario';
+        const persistentHalf: 'top' | 'bottom' | undefined =
+          tracked?.halfKind ??
+          (isPersistent(c.top.disposition)
+            ? 'top'
+            : isPersistent(c.bottom.disposition)
+              ? 'bottom'
+              : undefined);
         return (
-          <div key={c.id} style={{ marginBottom: 2, color: theme.text, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <strong>{c.name}</strong>
-            {tracked && (
-              <span style={{ display: 'inline-flex', gap: 2 }}>
-                {Array.from({ length: tracked.trackedUses }).map((_, i) => {
-                  const slotIdx = i + 1;
-                  const used = slotIdx < tracked.currentSlot;
-                  return (
-                    <span
-                      key={i}
-                      title={`slot ${slotIdx}${slotIdx === tracked.currentSlot ? ' (current)' : used ? ' (used)' : ''}`}
-                      style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: '50%',
-                        background: used ? theme.muted : slotIdx === tracked.currentSlot ? theme.accent : 'transparent',
-                        border: `1px solid ${theme.border}`,
-                        opacity: used ? 0.4 : 1,
-                      }}
-                    />
-                  );
-                })}
-                <span style={{ marginLeft: 4, color: theme.muted, fontSize: 11 }}>
-                  on {tracked.persistentTrigger.kind.replace(/-/g, ' ')}
-                </span>
-              </span>
-            )}
-          </div>
+          <CardView
+            key={c.id}
+            card={c}
+            {...(persistentHalf ? { halfOnly: persistentHalf } : {})}
+            {...(tracked
+              ? { activeTracked: { halfKind: tracked.halfKind, currentSlot: tracked.currentSlot } }
+              : {})}
+          />
         );
       })}
       {you.activeEffects.length > 0 && (
@@ -1823,7 +1822,7 @@ function riderConditionSuffix(conditions?: readonly string[]): ReactNode {
   );
 }
 
-type ChipTone = 'applied' | 'muted' | 'warn';
+type ChipTone = 'applied' | 'muted' | 'warn' | 'good';
 
 /** Small pill used in the target breakdown. `applied` = something this action
  *  will do to the enemy (accent); `muted` = the enemy's current defensive
@@ -1842,7 +1841,9 @@ function StatusChip({
       ? { bg: 'rgba(217, 164, 65, 0.14)', border: theme.accent, fg: theme.text }
       : tone === 'warn'
         ? { bg: 'rgba(200, 80, 80, 0.14)', border: theme.bad, fg: theme.text }
-        : { bg: 'transparent', border: theme.border, fg: theme.muted };
+        : tone === 'good'
+          ? { bg: 'rgba(90, 180, 110, 0.16)', border: theme.good, fg: theme.text }
+          : { bg: 'transparent', border: theme.border, fg: theme.muted };
   return (
     <span
       style={{
@@ -1894,6 +1895,9 @@ function AttackTargetSummary({
   target: Unit;
 }) {
   const targetPoisoned = target.conditions.some((c) => c.kind === 'poison');
+  // Net advantage/disadvantage is precomputed by the server (single source of
+  // truth) and keyed by target id; a missing entry means a normal draw.
+  const drawMode = action.drawModeByTargetId?.[target.id] ?? null;
   const acceptedOffers = action.acceptedConsumeIndices
     .map((i) => action.consumeOffers.find((o) => o.riderIndex === i))
     .filter((o): o is AttackConsumeOffer => !!o);
@@ -1903,8 +1907,13 @@ function AttackTargetSummary({
   const bonusPierce = action.consumesLocked
     ? action.lockedRiderPierce
     : acceptedOffers.reduce((s, o) => s + (o.pierceBonus ?? 0), 0);
-  const dmg = action.amount + bonusAttack + (targetPoisoned ? 1 : 0);
-  const pierceTotal = action.pierce + bonusPierce;
+  // Damage and Pierce come precomputed per target from the server (single
+  // source of truth) — they fold in persistent/conditional bonuses (e.g. Single
+  // Out's +3 vs isolated) the client can't see. Fall back to the printed value
+  // if a preview is somehow missing for this target.
+  const preview = action.previewByTargetId?.[target.id];
+  const dmg = preview ? preview.damage : action.amount + bonusAttack + (targetPoisoned ? 1 : 0);
+  const pierceTotal = preview ? preview.pierce : action.pierce + bonusPierce;
   const riders = action.riderConditions ?? [];
   const stateChips = targetStateChips(target);
   return (
@@ -1917,6 +1926,13 @@ function AttackTargetSummary({
         {amountSuffix(action)}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {drawMode === 'advantage' && <StatusChip label="Advantage" tone="good" />}
+        {drawMode === 'disadvantage' && <StatusChip label="Disadvantage" tone="warn" />}
+        {/* Why the damage is what it is: a pill per attack-value bonus
+            (e.g. "+3 Single Out", "+2 isolated"). */}
+        {preview?.bonuses.map((b, i) => (
+          <StatusChip key={`bonus-${i}`} label={`+${b.amount} ${b.label}`} tone="applied" />
+        ))}
         {pierceTotal > 0 && <StatusChip icon="pierce" label={`Pierce ${pierceTotal}`} tone="applied" />}
         {riders.map((c) => (
           <StatusChip key={`rider-${c}`} icon={c as IconKey} label={cap(c)} tone="applied" />
@@ -2460,6 +2476,15 @@ function BoardForTurn({
   const isMoveMode = selectedAction?.type === 'move';
   const moveBudget = isMoveMode ? selectedAction.amount : 0;
   const moveStepsUsed = movePath.length;
+  // The ratio is shown in movement points (same units as the budget), not raw
+  // hex count — so difficult terrain reads correctly: stepping into a difficult
+  // hex bumps the count by 2 and "5/5" shows you're maxed even at 4 hexes. A
+  // jump ignores difficult terrain, so its cost is just the hex count. (The
+  // board's step numbers still show the true hex count for "X = hexes moved".)
+  const isJumpMove =
+    selectedAction != null && selectedAction.type === 'move' && selectedAction.jump === true;
+  const movePointsUsed =
+    movePredicates && !isJumpMove ? pathCost(movePath, movePredicates.enterCost) : moveStepsUsed;
 
   const handleHexEnter = (h: Hex) => {
     if (isMoveMode && !isImmobilized) {
@@ -2490,7 +2515,7 @@ function BoardForTurn({
           }}
         >
           <span style={{ fontFamily: theme.headingFont, color: theme.accent }}>
-            {moveStepsUsed}/{moveBudget}
+            {movePointsUsed}/{moveBudget}
           </span>
           <span style={{ color: theme.muted, fontSize: 12, flex: 1 }}>
             {isImmobilized

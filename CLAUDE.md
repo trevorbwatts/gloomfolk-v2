@@ -2,5 +2,7 @@
 
 ## Working preferences
 
-- Don't ask whether to launch/run the app for me. If running it would help verify
-  a change, just do it; otherwise skip it. No need to offer.
+- Don't launch/run the app to verify changes, and don't offer to. Trevor handles
+  manual verification himself. Just make the change and report what it does; he'll
+  confirm it in the app. (Running the app for some other explicit reason he asks
+  for is still fine.)
