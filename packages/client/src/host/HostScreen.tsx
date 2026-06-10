@@ -9,7 +9,7 @@ import { useMoveAnim } from '../board/useMoveAnim.js';
 import { TurnOrder } from './TurnOrder.js';
 import { classAvatarUrl, monsterAvatarUrl } from '../avatars.js';
 import { btn, theme } from '../theme.js';
-import type { CharacterInstance, LobbyPlayer, ModifierCard, MonsterTurnAnim, PublicGameState, Unit } from '@gloomfolk/shared';
+import type { CampaignSheet, CharacterInstance, ClientToServer, LobbyPlayer, ModifierCard, MonsterTurnAnim, PublicGameState, Unit } from '@gloomfolk/shared';
 import {
   bonusExperienceFor,
   FIRST_SCENARIO_ID,
@@ -22,6 +22,7 @@ import {
   trapDamageFor,
 } from '@gloomfolk/shared';
 import { buildCustomScenario, isBuilderScenarioId, listPlayableScenarios } from './customScenario.js';
+import { CampaignSheetPanel } from './CampaignSheetPanel.js';
 
 const shellStyle: React.CSSProperties = {
   background: theme.bg,
@@ -261,6 +262,8 @@ export function HostScreen() {
             canStart={canStart}
             waitingOn={waitingOn}
             playersWithChars={playersWithChars.length}
+            sheet={gameState?.sheet ?? null}
+            send={(msg) => sock.send(msg)}
             onStart={(scenarioId, level) => {
               if (isBuilderScenarioId(scenarioId)) {
                 // Compile the editor scenario + gather its art in the browser,
@@ -360,6 +363,7 @@ export function HostScreen() {
                       moneyTokens={gameState.moneyTokens}
                       doors={gameState.doors}
                       {...(gameState.tileArt ? { tileArt: gameState.tileArt } : {})}
+                      {...(gameState.decorations ? { decorations: gameState.decorations } : {})}
                       activeUnitIds={activeUnitIds}
                       zoomable
                       {...(startingKeys ? { reachableKeys: startingKeys } : {})}
@@ -376,6 +380,36 @@ export function HostScreen() {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
                     <ElementBoard board={gameState.elementBoard} />
+                    {gameState.scenarioObjective && (
+                      <div
+                        style={{
+                          background: theme.panel,
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 6,
+                          padding: 12,
+                          minWidth: 260,
+                          maxWidth: 260,
+                          fontFamily: theme.font,
+                          color: theme.text,
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 12,
+                            textTransform: 'uppercase',
+                            letterSpacing: 1,
+                            color: theme.muted,
+                            marginBottom: 10,
+                            textAlign: 'center',
+                          }}
+                        >
+                          Victory Condition
+                        </div>
+                        <p style={{ margin: 0, fontSize: 14, lineHeight: 1.4 }}>
+                          {gameState.scenarioObjective}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               </>
@@ -945,6 +979,8 @@ function WaitingRoom({
   canStart,
   waitingOn,
   playersWithChars,
+  sheet,
+  send,
   onStart,
 }: {
   scenarioName: string | null;
@@ -955,6 +991,8 @@ function WaitingRoom({
   canStart: boolean;
   waitingOn: number;
   playersWithChars: number;
+  sheet: CampaignSheet | null;
+  send: (msg: ClientToServer) => void;
   onStart: (scenarioId: string, level: number) => void;
 }) {
   // Playable scenarios: built editor scenarios (source of truth) plus any
@@ -1195,6 +1233,8 @@ function WaitingRoom({
           )}
         </div>
       </div>
+
+      {sheet && <CampaignSheetPanel sheet={sheet} send={send} />}
 
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
         <button

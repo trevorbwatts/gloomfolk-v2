@@ -2532,6 +2532,7 @@ function BoardForTurn({
         moneyTokens={gameState.moneyTokens}
         doors={gameState.doors}
         {...(gameState.tileArt ? { tileArt: gameState.tileArt } : {})}
+        {...(gameState.decorations ? { decorations: gameState.decorations } : {})}
         size={22}
         maxWidthPx={500}
         activeUnitIds={myUnit ? [myUnit.id] : []}

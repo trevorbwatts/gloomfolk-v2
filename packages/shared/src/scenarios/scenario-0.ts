@@ -45,7 +45,7 @@ const data: ScenarioData = {
     { id: 'o-mpta9iqg-mw22', kind: 'obstacle', hexes: [{ q: 5, r: -7 }] },
     { id: 'o-mpta9lef-n2qf', kind: 'obstacle', hexes: [{ q: 8, r: -8 }] },
   ],
-  specialRules: 'The Scenario ends when all enemies in it are dead.',
+  victoryCondition: 'The Scenario ends when all enemies in it are dead.',
   monsterSpawns: [
     // Room 1 (09-D) — training dummies.
     { id: 'm-mpu1nczo-cjtt', hex: { q: -2, r: 3 }, monsterType: 'city-guard', ranks: { 2: 'normal', 3: 'normal', 4: 'normal' }, behavior: 'dummy' },

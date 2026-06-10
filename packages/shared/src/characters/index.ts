@@ -2,6 +2,7 @@ export * from './types.js';
 export * from './perks.js';
 export * from './masteries.js';
 export * from './experience.js';
+export * from './level-up.js';
 export * from './loadout.js';
 export { bruiser } from './bruiser.js';
 export { bruiserPerks } from './bruiser-perks.js';

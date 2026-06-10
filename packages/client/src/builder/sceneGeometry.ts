@@ -31,10 +31,14 @@ export function placedTileHexes(placed: PlacedTile): Hex[] {
 }
 
 /**
- * Resolve the hex footprint of a placed tile given its shape footprint.
- * Use this when you already have the shape (avoids a second lookup).
+ * Resolve the absolute hexes a footprint covers given a placement (origin +
+ * rotation). Works for any placed thing — tiles and decorations alike — since
+ * it only needs the origin and rotation, not the tile-specific fields.
  */
-export function applyPlacement(footprint: readonly Hex[], placed: PlacedTile): Hex[] {
+export function applyPlacement(
+  footprint: readonly Hex[],
+  placed: { origin: { q: number; r: number }; rotation: number },
+): Hex[] {
   return rotatePattern(footprint, placed.rotation).map((h) => ({
     q: h.q + placed.origin.q,
     r: h.r + placed.origin.r,

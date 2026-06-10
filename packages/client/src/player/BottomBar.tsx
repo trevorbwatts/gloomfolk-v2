@@ -675,7 +675,7 @@ export function ScenarioPanel({
     <div>
       <SectionTitle>Objective</SectionTitle>
       <p style={{ color: theme.text, fontSize: 14, margin: '0 0 6px', lineHeight: 1.4 }}>
-        {scenario?.objective ?? '—'}
+        {gameState.scenarioObjective ?? scenario?.objective ?? '—'}
       </p>
       {gameState.scenarioName && (
         <p style={{ color: theme.muted, fontSize: 12, margin: 0, letterSpacing: 0.3 }}>

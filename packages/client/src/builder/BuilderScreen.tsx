@@ -117,12 +117,13 @@ export function BuilderScreen() {
     refresh();
   }
 
-  // Special-rules draft, kept here so Save/Revert survive editor re-renders.
-  const savedRules = selectedData?.specialRules ?? '';
-  const [rulesDraft, setRulesDraft] = useState(savedRules);
+  // Victory-condition draft, kept here so Save/Revert survive editor re-renders.
+  // Falls back to the old `specialRules` field so existing layouts keep their text.
+  const savedVictory = selectedData?.victoryCondition ?? selectedData?.specialRules ?? '';
+  const [victoryDraft, setVictoryDraft] = useState(savedVictory);
   useEffect(() => {
-    setRulesDraft(savedRules);
-  }, [savedRules, selectedNumber]);
+    setVictoryDraft(savedVictory);
+  }, [savedVictory, selectedNumber]);
 
   return (
     <div style={shellStyle}>
@@ -190,8 +191,8 @@ export function BuilderScreen() {
         <ScenarioEditor
           data={selectedData}
           onChange={handleChange}
-          rulesDraft={rulesDraft}
-          onRulesDraftChange={setRulesDraft}
+          victoryDraft={victoryDraft}
+          onVictoryDraftChange={setVictoryDraft}
         />
       ) : (
         <div style={{ padding: '32px 24px' }}>

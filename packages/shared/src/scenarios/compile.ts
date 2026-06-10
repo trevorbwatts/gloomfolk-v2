@@ -15,6 +15,7 @@ import type {
   MonsterBehavior,
   Narrative,
   Scenario,
+  SceneDecoration,
   SpawnSlot,
   Tile,
   TileKind,
@@ -147,16 +148,36 @@ export function compileScenario(data: ScenarioData, rules: ScenarioRules): Scena
     });
   }
 
-  // 4. Room reveal order: explicit, else placed-tile order (deduped).
+  // 4. Decorations: purely-visual props. The engine ignores them; we just carry
+  //    them through so the board can paint them. Tag each with the room of its
+  //    origin hex (best-effort) so reveal gating matches the tiles under it.
+  const decorations: SceneDecoration[] = (data.decorations ?? []).map((d) => {
+    const room = roomOf.get(hexKey(d.origin));
+    return {
+      id: d.id,
+      decorationId: d.decorationId,
+      origin: d.origin,
+      rotation: d.rotation,
+      ...(room ? { room } : {}),
+    };
+  });
+
+  // 5. Room reveal order: explicit, else placed-tile order (deduped).
   const rooms =
     rules.rooms ??
     [...new Set(placed.map((p) => p.tileSideId))];
 
+  // The author's free-text victory condition (editor box) is what players see
+  // in the Objective panel; fall back to the hand-written rules objective when
+  // it's blank. (`specialRules` is the old field name, read for compatibility.)
+  const authoredObjective = (data.victoryCondition ?? data.specialRules)?.trim();
+
   return {
     id: rules.id,
     name: rules.name,
-    objective: rules.objective,
+    objective: authoredObjective || rules.objective,
     tiles,
+    ...(decorations.length ? { decorations } : {}),
     spawns,
     ...(rooms.length > 1 ? { rooms } : {}),
     ...(rules.doors ? { doors: rules.doors } : {}),

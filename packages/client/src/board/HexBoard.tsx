@@ -5,10 +5,12 @@ import type {
   MoneyToken,
   MonsterTurnAnim,
   PlacedTileArt,
+  SceneDecoration,
   Tile,
   Unit,
 } from '@gloomfolk/shared';
 import { tileShapeById, tileSideById } from '@gloomfolk/shared';
+import { decorationDef } from '../builder/decorationCatalog.js';
 import { GameIcon } from '../icons.js';
 
 const SQRT3 = Math.sqrt(3);
@@ -93,6 +95,8 @@ export interface HexBoardProps {
   /** Builder-authored tile background artwork. When present, plain floor hexes
    *  render transparent so the art shows through behind the grid. */
   tileArt?: PlacedTileArt[];
+  /** Purely-visual decorative props (logs, scenery) drawn over the floor. */
+  decorations?: SceneDecoration[];
   size?: number;
   maxWidthPx?: number;
   /** When set, the board renders at a fixed hex size inside a scrollable
@@ -150,6 +154,7 @@ export function HexBoard({
   moneyTokens = [],
   doors = [],
   tileArt = [],
+  decorations = [],
   size = 40,
   maxWidthPx = 900,
   zoomable = false,
@@ -518,6 +523,19 @@ export function HexBoard({
       onTouchStart={onHexEnter ? handleTouchStart : undefined}
       onTouchMove={onHexEnter ? handleTouchMove : undefined}
     >
+      {/* Soft drop-shadow shared by all decoration props, easing the hard edge
+          where the artwork meets the floor. Blur/offset scale with hex size. */}
+      <defs>
+        <filter id="board-decoration-shadow" x="-25%" y="-25%" width="150%" height="150%">
+          <feDropShadow
+            dx={0}
+            dy={size * 0.03}
+            stdDeviation={size * 0.07}
+            floodColor="#000"
+            floodOpacity={0.5}
+          />
+        </filter>
+      </defs>
       {hasArt && <TileArtLayer art={tileArt} size={size} />}
       <g>
         {tiles.map((t) => {
@@ -620,6 +638,12 @@ export function HexBoard({
             );
           })}
       </g>
+      {/* Decorative props (logs, scenery): laid over the floor grid and the
+          terrain outlines, but below doors, movement UI, and unit tokens so
+          those stay legible. */}
+      {decorations.length > 0 && (
+        <DecorationLayer decorations={decorations} size={size} />
+      )}
       {doors.length > 0 && (
         <g style={{ pointerEvents: 'none' }}>
           {doors.map((d) => {
@@ -1180,6 +1204,58 @@ function TileArtLayer({ art, size }: { art: PlacedTileArt[]; size: number }) {
                 />
               </g>
             </g>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+/** Decorative props (logs, scenery) laid over the floor. Each prop's artwork is
+ *  fit to its hex footprint's bounding box and rotated with the map — the same
+ *  transform tile art uses — but it is *not* clipped, so the PNG's transparency
+ *  defines its silhouette (a log overhangs its hexes). Footprint + image come
+ *  from the decoration catalogue. */
+function DecorationLayer({
+  decorations,
+  size,
+}: {
+  decorations: SceneDecoration[];
+  size: number;
+}) {
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      {decorations.map((d) => {
+        const def = decorationDef(d.decorationId);
+        if (!def || def.hexes.length === 0) return null;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const h of def.hexes) {
+          const { x, y } = axialToPx(h.q, h.r, size);
+          if (x - size < minX) minX = x - size;
+          if (y - size < minY) minY = y - size;
+          if (x + size > maxX) maxX = x + size;
+          if (y + size > maxY) maxY = y + size;
+        }
+        const scale = def.scale ?? 1;
+        const W = (maxX - minX) * scale;
+        const H = (maxY - minY) * scale;
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const origin = axialToPx(d.origin.q, d.origin.r, size);
+        return (
+          <g
+            key={d.id}
+            transform={`translate(${origin.x} ${origin.y}) rotate(${60 * d.rotation})`}
+          >
+            <image
+              href={def.image}
+              x={cx - W / 2}
+              y={cy - H / 2}
+              width={W}
+              height={H}
+              preserveAspectRatio="xMidYMid meet"
+              filter="url(#board-decoration-shadow)"
+            />
           </g>
         );
       })}

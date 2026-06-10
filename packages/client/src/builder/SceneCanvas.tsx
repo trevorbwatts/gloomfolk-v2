@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { type Hex, hexKey, tileShapeById, tileSideById } from '@gloomfolk/shared';
 import { theme } from '../theme.js';
 import { applyPlacement } from './sceneGeometry.js';
-import type { MonsterSpawn, Overlay, PlacedTile } from './scenarios.js';
+import type { Decoration, MonsterSpawn, Overlay, PlacedTile } from './scenarios.js';
+import { decorationDef } from './decorationCatalog.js';
 import { OVERLAY_STYLES } from './overlayStyle.js';
 import { monsterEntry } from './monsterCatalog.js';
 import { monsterAvatarUrl } from '../avatars.js';
@@ -139,6 +140,77 @@ function TileBackground({
   );
 }
 
+/**
+ * Renders a decorative prop's artwork over its hex footprint.
+ *
+ * Like `TileBackground` the image is drawn in the prop's local (unrotated)
+ * frame — fit to the footprint's bounding box — then the whole group is rotated
+ * and translated into place with the same transform the hex grid uses, so the
+ * art stays glued to the hexes through rotation. Unlike tile art it is *not*
+ * clipped to the hexagons: the PNG's transparency defines the prop's silhouette
+ * (a log overhangs its hexes naturally). A faint selection ring is drawn around
+ * the footprint box when selected.
+ */
+function DecorationImage({
+  decoration,
+  footprint,
+  size,
+  href,
+  scale = 1,
+  selected,
+}: {
+  decoration: Decoration;
+  footprint: readonly Hex[];
+  size: number;
+  href: string;
+  scale?: number;
+  selected: boolean;
+}) {
+  if (footprint.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const h of footprint) {
+    const { x, y } = axialToPx(h.q, h.r, size);
+    if (x - size < minX) minX = x - size;
+    if (y - size < minY) minY = y - size;
+    if (x + size > maxX) maxX = x + size;
+    if (y + size > maxY) maxY = y + size;
+  }
+  const W = (maxX - minX) * scale;
+  const H = (maxY - minY) * scale;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const origin = axialToPx(decoration.origin.q, decoration.origin.r, size);
+  return (
+    <g
+      transform={`translate(${origin.x} ${origin.y}) rotate(${60 * decoration.rotation})`}
+      style={{ pointerEvents: 'none' }}
+    >
+      {selected && (
+        <rect
+          x={cx - W / 2}
+          y={cy - H / 2}
+          width={W}
+          height={H}
+          fill="none"
+          stroke="#fff"
+          strokeWidth={1}
+          strokeDasharray="4 3"
+          rx={4}
+        />
+      )}
+      <image
+        href={href}
+        x={cx - W / 2}
+        y={cy - H / 2}
+        width={W}
+        height={H}
+        preserveAspectRatio="xMidYMid meet"
+        filter="url(#scene-decoration-shadow)"
+      />
+    </g>
+  );
+}
+
 function HexContents({
   cx,
   cy,
@@ -255,8 +327,10 @@ function tileColor(id: string): string {
 export interface SceneCanvasProps {
   placedTiles: PlacedTile[];
   overlays: Overlay[];
+  decorations: Decoration[];
   monsterSpawns: MonsterSpawn[];
   selectedTileId: string | null;
+  selectedDecorationId: string | null;
   selectedHexKeys: Set<string>;
   onHexClick: (hex: Hex, shift: boolean) => void;
   onHexContextMenu: (hex: Hex, clientX: number, clientY: number) => void;
@@ -267,8 +341,10 @@ export interface SceneCanvasProps {
 export function SceneCanvas({
   placedTiles,
   overlays,
+  decorations,
   monsterSpawns,
   selectedTileId,
+  selectedDecorationId,
   selectedHexKeys,
   onHexClick,
   onHexContextMenu,
@@ -316,6 +392,15 @@ export function SceneCanvas({
     for (const h of hexes) tileHexKeys.add(hexKey(h));
   }
 
+  // Decoration props: resolve each to its (unrotated) footprint plus the
+  // absolute hexes it covers once placed/rotated. Used for bounds and rendering.
+  const decorationsWithHexes = decorations.map((d) => {
+    const def = decorationDef(d.decorationId);
+    const footprint = def?.hexes ?? [];
+    const hexes: Hex[] = def ? applyPlacement(def.hexes, d) : [];
+    return { decoration: d, def, footprint, hexes };
+  });
+
   // Multiple overlays per hex allowed; collect them in order.
   const overlaysByHex = new Map<string, Overlay[]>();
   for (const o of overlays) {
@@ -360,6 +445,9 @@ export function SceneCanvas({
   const allHexesForBounds: Hex[] = [];
   for (const { hexes } of tilesWithHexes) allHexesForBounds.push(...hexes);
   allHexesForBounds.push(...extraHexes);
+  // Keep decoration footprints inside the viewBox even when they overhang the
+  // map or sit in empty space.
+  for (const { hexes } of decorationsWithHexes) allHexesForBounds.push(...hexes);
   for (const h of allHexesForBounds) {
     const { x, y } = axialToPx(h.q, h.r, size);
     if (x - size < minX) minX = x - size;
@@ -418,6 +506,20 @@ export function SceneCanvas({
         if (h) onHexContextMenu(h, e.clientX, e.clientY);
       }}
     >
+      {/* Soft drop-shadow shared by all decoration props, to ease the hard edge
+          where the artwork meets the floor. Blur/offset scale with hex size so
+          it reads the same at any zoom. */}
+      <defs>
+        <filter id="scene-decoration-shadow" x="-25%" y="-25%" width="150%" height="150%">
+          <feDropShadow
+            dx={0}
+            dy={size * 0.03}
+            stdDeviation={size * 0.07}
+            floodColor="#000"
+            floodOpacity={0.5}
+          />
+        </filter>
+      </defs>
       {/* Tile hexes */}
       {tilesWithHexes.map(({ placed, hexes, footprint }) => {
         const isTileSelected = placed.id === selectedTileId;
@@ -436,18 +538,18 @@ export function SceneCanvas({
             )}
             {hexes.map((h) => {
               const key = hexKey(h);
-              const hexOverlays = overlaysByHex.get(key) ?? [];
-              const monster = monsterByHex.get(key);
               const isHexSelected = selectedHexKeys.has(key);
               const { x, y } = axialToPx(h.q, h.r, size);
               const stroke = isHexSelected
-                ? theme.accent
+                ? '#fff'
                 : isTileSelected
                 ? theme.accent
                 : theme.border;
-              const strokeWidth = isHexSelected ? 3 : isTileSelected ? 2 : 1;
+              const strokeWidth = isHexSelected ? 2 : isTileSelected ? 2 : 1;
               // Overlay markers are drawn as hex outlines (later pass), so the
               // fill just shows the tile art (transparent) or its flat colour.
+              // Monster/badge contents are also a later pass, so they layer
+              // above decoration props.
               const hexFill = fill;
               const hexFillOpacity = art ? 0 : 1;
               return (
@@ -472,13 +574,6 @@ export function SceneCanvas({
                     strokeWidth={strokeWidth}
                     style={{ pointerEvents: 'all' }}
                   />
-                  <HexContents
-                    cx={x}
-                    cy={y}
-                    size={size}
-                    overlays={hexOverlays}
-                    monster={monster}
-                  />
                 </g>
               );
             })}
@@ -493,8 +588,8 @@ export function SceneCanvas({
         const monster = monsterByHex.get(key);
         const isHexSelected = selectedHexKeys.has(key);
         const { x, y } = axialToPx(h.q, h.r, size);
-        const stroke = isHexSelected ? theme.accent : theme.border;
-        const strokeWidth = isHexSelected ? 3 : 1;
+        const stroke = isHexSelected ? '#fff' : theme.border;
+        const strokeWidth = isHexSelected ? 2 : 1;
         const hexFill =
           hexOverlays.length > 0 || monster ? theme.panelRaised : 'transparent';
         return (
@@ -520,21 +615,14 @@ export function SceneCanvas({
                 hexOverlays.length === 0 && !monster ? '3 3' : undefined
               }
             />
-            <HexContents
-              cx={x}
-              cy={y}
-              size={size}
-              overlays={hexOverlays}
-              monster={monster}
-            />
           </g>
         );
       })}
 
-      {/* Overlay markers: a bold hex outline in the marker's colour. Drawn last
-          so each reads as a full, unbroken hexagon on top of tile art and
-          neighbouring borders. Skipped for selected hexes so the selection ring
-          stays visible. */}
+      {/* Overlay markers: a bold hex outline in the marker's colour. Drawn over
+          the grid so each reads as a full, unbroken hexagon on top of tile art
+          and neighbouring borders. Skipped for selected hexes so the selection
+          ring stays visible. */}
       {OUTLINE_OVERLAY_KINDS.flatMap((kind) => {
         const color = OVERLAY_STYLES[kind].color;
         return [...(outlineHexKeysByKind.get(kind) ?? [])].map((key) => {
@@ -554,6 +642,43 @@ export function SceneCanvas({
           );
         });
       })}
+
+      {/* Decoration props (logs, scenery): transparent artwork laid over the
+          grid and the outline markers, but below the monster/badge contents
+          below, so tokens stay on top. Purely visual. */}
+      {decorationsWithHexes.map(({ decoration, def, footprint }) =>
+        def ? (
+          <DecorationImage
+            key={decoration.id}
+            decoration={decoration}
+            footprint={footprint}
+            size={size}
+            href={def.image}
+            scale={def.scale ?? 1}
+            selected={decoration.id === selectedDecorationId}
+          />
+        ) : null,
+      )}
+
+      {/* Monster avatars + non-terrain overlay badges, drawn last so they sit
+          on top of decoration props (a monster standing on a log reads over
+          it). Pulled out of the per-hex groups into one pass for layering. */}
+      {[...new Set<string>([...overlaysByHex.keys(), ...monsterByHex.keys()])].map(
+        (key) => {
+          const [q, r] = key.split(',').map(Number) as [number, number];
+          const { x, y } = axialToPx(q, r, size);
+          return (
+            <HexContents
+              key={`contents-${key}`}
+              cx={x}
+              cy={y}
+              size={size}
+              overlays={overlaysByHex.get(key) ?? []}
+              monster={monsterByHex.get(key)}
+            />
+          );
+        },
+      )}
     </svg>
   );
 }

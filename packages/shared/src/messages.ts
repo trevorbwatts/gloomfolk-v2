@@ -10,10 +10,11 @@ import type {
   TargetCondition,
   TargetConditionalBonus,
 } from './cards/types.js';
+import type { CampaignSheet, FactionId } from './campaign/sheet.js';
 import type { MonsterRank } from './monsters/types.js';
 import type { Hex } from './hex.js';
 import type { ModifierCard, ModifierCardInstance } from './modifiers/index.js';
-import type { NarrativeEntry, Scenario, Tile } from './scenarios/types.js';
+import type { NarrativeEntry, Scenario, SceneDecoration, Tile } from './scenarios/types.js';
 
 export type Role = 'host' | 'player';
 
@@ -231,10 +232,16 @@ export interface PublicGameState {
   players: LobbyPlayer[];
   scenarioId: string | null;
   scenarioName: string | null;
+  /** The active scenario's victory condition / objective, shown to players.
+   *  Synced from the scenario so it works for builder-authored scenarios too. */
+  scenarioObjective?: string;
   tiles: Tile[];
   /** Background artwork for builder-authored scenarios, keyed implicitly by the
    *  tile's `room`. Empty/absent for the hand-written campaign scenarios. */
   tileArt?: PlacedTileArt[];
+  /** Purely-visual decorative props (logs, scenery) for the current scenario,
+   *  filtered to revealed rooms. Absent when the scenario has none. */
+  decorations?: SceneDecoration[];
   units: Unit[];
   /** Money tokens dropped on the map by monster deaths, awaiting pickup. */
   moneyTokens: MoneyToken[];
@@ -248,6 +255,9 @@ export interface PublicGameState {
   activeTurnIndex: number;
   /** Campaign-wide shop stock. Decrements when a character buys an item. */
   shop: ShopEntry[];
+  /** The campaign sheet: faction reputation, inspiration, prosperity, Great
+   *  Oak / imbuement tracks, retirements, unlocked classes. Host-adjusted. */
+  sheet: CampaignSheet;
   /** The six-element board state. Each element is `strong`, `waning`, or
    *  `inert`. End-of-round wanes every element one column left; end-of-turn
    *  pending infusions land in `strong`; consumption pushes to `inert`. */
@@ -880,12 +890,20 @@ export type ClientToServer =
   | { type: 'player_pick_character'; characterId: string }
   | { type: 'player_unclaim_character' }
   | { type: 'player_set_loadout'; cardIds: string[] }
+  /** Downtime level-up (lobby only): add `cardId` to the pool and spend the
+   *  newly-earned perk mark on the perk at `perkIndex` in the class's perk
+   *  list. Validated server-side against XP threshold and card/perk rules. */
+  | { type: 'player_level_up'; cardId: string; perkIndex: number }
   | { type: 'player_buy_item'; itemId: string }
   /** Undo a purchase made during the current shopping session (refund + restock). */
   | { type: 'player_undo_buy_item'; itemId: string }
   | { type: 'player_set_item_loadout'; itemIds: string[] }
   /** Finish the pre-scenario shopping trip and ready up. Requires a locked
    *  loadout. */
+  /** Donate 10 of this character's gold to the Great Oak (lobby only). Marks
+   *  the next box on the sheet's track; every fifth box grants Gloomhaven
+   *  +1 prosperity. Donations are not refundable. */
+  | { type: 'player_donate_great_oak' }
   | { type: 'player_finish_shopping' }
   /** Re-open the shop after readying up (un-ready, back to shopping). */
   | { type: 'player_reopen_shopping' }
@@ -919,6 +937,13 @@ export type ClientToServer =
     }
   /** Placement phase: claim (or move to) a starting hex. Allowed only while the
    *  player hasn't tapped Ready. */
+  /** Campaign-sheet adjustments (host only, docs/rules/campaign-sheet.md).
+   *  Values are clamped server-side: reputation to [−10, cap], prosperity
+   *  boxes never erase a numbered box, inspiration floors at 0. */
+  | { type: 'host_adjust_reputation'; faction: FactionId; delta: number }
+  | { type: 'host_adjust_inspiration'; delta: number }
+  /** Delta is in prosperity *boxes* ("+X prosperity" marks X boxes). */
+  | { type: 'host_adjust_prosperity'; delta: number }
   | { type: 'player_place'; hex: Hex }
   /** Placement phase: lock in (or unlock) this player's chosen starting hex. */
   | { type: 'player_set_placement_ready'; ready: boolean }

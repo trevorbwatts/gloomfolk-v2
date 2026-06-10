@@ -13,6 +13,7 @@ import { btn, theme } from '../theme.js';
 import { SceneCanvas } from './SceneCanvas.js';
 import { HEX_DIRECTIONS } from './sceneGeometry.js';
 import {
+  type Decoration,
   type MonsterRankAtCount,
   type MonsterSpawn,
   type Overlay,
@@ -20,10 +21,12 @@ import {
   type PlacedTile,
   type ScenarioData,
   type SpawnBehavior,
+  newDecorationId,
   newMonsterSpawnId,
   newOverlayId,
   newPlacedTileId,
 } from './scenarios.js';
+import { DECORATION_CATALOG, decorationDef } from './decorationCatalog.js';
 import {
   OVERLAY_KINDS,
   OVERLAY_STYLES,
@@ -36,8 +39,8 @@ import { monsterAvatarUrl, onAvatarError } from '../avatars.js';
 interface Props {
   data: ScenarioData;
   onChange: (next: ScenarioData) => void;
-  rulesDraft: string;
-  onRulesDraftChange: (next: string) => void;
+  victoryDraft: string;
+  onVictoryDraftChange: (next: string) => void;
 }
 
 const sectionLabel: React.CSSProperties = {
@@ -57,7 +60,7 @@ const panelStyle: React.CSSProperties = {
 };
 
 /** Which toolbar dropdown is currently open (only one at a time). */
-type MenuId = null | 'tile' | 'letters' | 'numbers' | 'monster';
+type MenuId = null | 'tile' | 'letters' | 'numbers' | 'monster' | 'decoration';
 
 const menuHeadingStyle: React.CSSProperties = {
   color: theme.muted,
@@ -111,11 +114,13 @@ const dividerStyle: React.CSSProperties = {
 
 const sideOptions = TILE_SIDES.slice().sort((a, b) => a.id.localeCompare(b.id));
 
-export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange }: Props) {
+export function ScenarioEditor({ data, onChange, victoryDraft, onVictoryDraftChange }: Props) {
   const placed = data.placedTiles ?? [];
   const overlays = data.overlays ?? [];
+  const decorations = data.decorations ?? [];
   const monsterSpawns = data.monsterSpawns ?? [];
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null);
+  const [selectedDecorationId, setSelectedDecorationId] = useState<string | null>(null);
   const [selectedHexKeys, setSelectedHexKeys] = useState<Set<string>>(new Set());
   const [monsterQuery, setMonsterQuery] = useState('');
   const [openMenu, setOpenMenu] = useState<MenuId>(null);
@@ -125,6 +130,11 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
   const selectedTile: PlacedTile | undefined = useMemo(
     () => placed.find((p) => p.id === selectedTileId),
     [placed, selectedTileId],
+  );
+
+  const selectedDecoration: Decoration | undefined = useMemo(
+    () => decorations.find((d) => d.id === selectedDecorationId),
+    [decorations, selectedDecorationId],
   );
 
   /** Overlays whose hex set exactly matches the current selection. With
@@ -170,6 +180,9 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
   function updateOverlays(next: Overlay[]) {
     onChange({ ...data, overlays: next });
   }
+  function updateDecorations(next: Decoration[]) {
+    onChange({ ...data, decorations: next });
+  }
   function updateMonsters(next: MonsterSpawn[]) {
     onChange({ ...data, monsterSpawns: next });
   }
@@ -184,6 +197,7 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
     };
     updateTiles([...placed, newTile]);
     setSelectedTileId(newTile.id);
+    closeMenu();
   }
   function patchSelectedTile(patch: Partial<PlacedTile>) {
     if (!selectedTile) return;
@@ -208,8 +222,66 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
     removeTileById(selectedTile.id);
   }
 
+  function handleAddDecoration(decorationId: string) {
+    if (!decorationDef(decorationId)) return;
+    // Drop it on the currently selected hex (the first, if several are
+    // selected); fall back to the map origin when nothing is selected.
+    const [firstKey] = Array.from(selectedHexKeys);
+    const origin = firstKey
+      ? (() => {
+          const [q, r] = firstKey.split(',').map(Number) as [number, number];
+          return { q, r };
+        })()
+      : { q: 0, r: 0 };
+    const newDeco: Decoration = {
+      id: newDecorationId(),
+      decorationId,
+      origin,
+      rotation: 0,
+    };
+    updateDecorations([...decorations, newDeco]);
+    setSelectedDecorationId(newDeco.id);
+    closeMenu();
+  }
+  function patchSelectedDecoration(patch: Partial<Decoration>) {
+    if (!selectedDecoration) return;
+    updateDecorations(
+      decorations.map((d) =>
+        d.id === selectedDecoration.id ? { ...d, ...patch } : d,
+      ),
+    );
+  }
+  function moveDecoration(deltaQ: number, deltaR: number) {
+    if (!selectedDecoration) return;
+    patchSelectedDecoration({
+      origin: {
+        q: selectedDecoration.origin.q + deltaQ,
+        r: selectedDecoration.origin.r + deltaR,
+      },
+    });
+  }
+  function rotateDecoration(step: 1 | -1) {
+    if (!selectedDecoration) return;
+    patchSelectedDecoration({
+      rotation: ((selectedDecoration.rotation + step) % 6 + 6) % 6,
+    });
+  }
+  function removeDecorationById(id: string) {
+    updateDecorations(decorations.filter((d) => d.id !== id));
+    if (selectedDecorationId === id) setSelectedDecorationId(null);
+  }
+  function removeDecoration() {
+    if (!selectedDecoration) return;
+    removeDecorationById(selectedDecoration.id);
+  }
+
   function handleHexClick(h: Hex, shift: boolean) {
     const k = hexKey(h);
+    // Clicking a hex moves focus to the hex/overlay tools, so drop any tile or
+    // scenery selection (and its inspector panel) — lets the user click off a
+    // just-placed object.
+    setSelectedTileId(null);
+    setSelectedDecorationId(null);
     const overlay = overlays.find((o) => o.hexes.some((oh) => hexKey(oh) === k));
     if (shift) {
       const next = new Set(selectedHexKeys);
@@ -225,6 +297,8 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
 
   function handleEmptyClick() {
     setSelectedHexKeys(new Set());
+    setSelectedTileId(null);
+    setSelectedDecorationId(null);
   }
 
   /** Toggle an overlay of `kind` covering the current selection.
@@ -306,6 +380,7 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
       ranks: { 2: 'normal', 3: 'normal', 4: 'normal' },
     };
     updateMonsters([...monsterSpawns, newMon]);
+    closeMenu();
   }
 
   function updateMonsterRanks(id: string, ranks: MonsterSpawn['ranks']) {
@@ -344,42 +419,6 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
     >
       {/* ── Toolbar (Google-Docs style, grouped left→right) ─────────────── */}
       <div style={toolbarStyle}>
-        {/* Tile group — picking a side adds that tile */}
-        <div style={groupStyle}>
-          <ToolbarMenu
-            label="+ Add tile"
-            open={openMenu === 'tile'}
-            onToggle={() => toggleMenu('tile')}
-            onClose={closeMenu}
-            width={200}
-          >
-            <div style={{ maxHeight: 340, overflowY: 'auto' }}>
-              {TILE_SHAPES.map((shape) => {
-                const sides = sideOptions.filter((s) => s.shapeId === shape.id);
-                if (sides.length === 0) return null;
-                return (
-                  <div key={shape.id}>
-                    <div style={menuHeadingStyle}>
-                      {shape.id} · {shape.name}
-                    </div>
-                    {sides.map((side) => (
-                      <button
-                        key={side.id}
-                        style={menuItemStyle()}
-                        onClick={() => handleAddTile(side.id)}
-                      >
-                        {side.id}
-                      </button>
-                    ))}
-                  </div>
-                );
-              })}
-            </div>
-          </ToolbarMenu>
-        </div>
-
-        <div style={dividerStyle} />
-
         {/* Overlays group */}
         <div style={groupStyle}>
           {OVERLAY_KINDS.map((kind) => {
@@ -539,6 +578,42 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
             )}
           </div>
         </ToolbarMenu>
+
+        <div style={dividerStyle} />
+
+        {/* Decoration (scenery) group */}
+        <ToolbarMenu
+          label="+ Scenery"
+          open={openMenu === 'decoration'}
+          onToggle={() => toggleMenu('decoration')}
+          onClose={closeMenu}
+          align="right"
+          width={220}
+        >
+          <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+            {DECORATION_CATALOG.map((d) => (
+              <button
+                key={d.id}
+                onClick={() => handleAddDecoration(d.id)}
+                title={`Add ${d.name}`}
+                style={menuItemStyle()}
+              >
+                <img
+                  src={d.image}
+                  alt={d.name}
+                  style={{
+                    width: 28,
+                    height: 18,
+                    objectFit: 'contain',
+                    flexShrink: 0,
+                  }}
+                />
+                <span style={{ flex: 1, textAlign: 'left' }}>{d.name}</span>
+                <span style={{ color: theme.muted, fontSize: 10 }}>{d.footprint}</span>
+              </button>
+            ))}
+          </div>
+        </ToolbarMenu>
       </div>
 
       {/* ── Canvas (center) + Properties (right) ────────────────────────── */}
@@ -555,8 +630,10 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
           <SceneCanvas
             placedTiles={placed}
             overlays={overlays}
+            decorations={decorations}
             monsterSpawns={monsterSpawns}
             selectedTileId={selectedTileId}
+            selectedDecorationId={selectedDecorationId}
             selectedHexKeys={selectedHexKeys}
             onHexClick={handleHexClick}
             onHexContextMenu={() => {}}
@@ -580,30 +657,6 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
             gap: 12,
           }}
         >
-          {selectedTile && (
-            <div style={panelStyle}>
-              <div style={sectionLabel}>Selected tile: {selectedTile.tileSideId}</div>
-              <MoveControls onMove={moveTile} />
-              <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-                <button style={btn.ghost()} onClick={() => rotateTile(-1)}>
-                  ⟲ Rotate
-                </button>
-                <button style={btn.ghost()} onClick={() => rotateTile(1)}>
-                  Rotate ⟳
-                </button>
-              </div>
-              <div style={{ color: theme.muted, fontSize: 11, marginTop: 8 }}>
-                Origin: ({selectedTile.origin.q}, {selectedTile.origin.r}) · Rotation:{' '}
-                {selectedTile.rotation} (× 60°)
-              </div>
-              <div style={{ marginTop: 10 }}>
-                <button style={{ ...btn.ghost(), fontSize: 12 }} onClick={removeTile}>
-                  Remove tile
-                </button>
-              </div>
-            </div>
-          )}
-
           {selectedMonsters.length > 0 && (
             <div style={panelStyle}>
               <div style={sectionLabel}>
@@ -627,7 +680,7 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
             <div style={sectionLabel}>Placed tiles ({placed.length})</div>
             {placed.length === 0 ? (
               <p style={{ color: theme.muted, fontSize: 12, margin: 0 }}>
-                None yet. Add one from the toolbar.
+                None yet. Add one with “+ Add tile”.
               </p>
             ) : (
               placed.map((p) => (
@@ -667,13 +720,148 @@ export function ScenarioEditor({ data, onChange, rulesDraft, onRulesDraftChange 
                 </div>
               ))
             )}
+            <div style={{ marginTop: 8 }}>
+              <ToolbarMenu
+                label="+ Add tile"
+                open={openMenu === 'tile'}
+                onToggle={() => toggleMenu('tile')}
+                onClose={closeMenu}
+                align="left"
+                fullWidth
+              >
+                <div style={{ maxHeight: 340, overflowY: 'auto' }}>
+                  {TILE_SHAPES.map((shape) => {
+                    const sides = sideOptions.filter((s) => s.shapeId === shape.id);
+                    if (sides.length === 0) return null;
+                    return (
+                      <div key={shape.id}>
+                        <div style={menuHeadingStyle}>
+                          {shape.id} · {shape.name}
+                        </div>
+                        {sides.map((side) => (
+                          <button
+                            key={side.id}
+                            style={menuItemStyle()}
+                            onClick={() => handleAddTile(side.id)}
+                          >
+                            {side.id}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </ToolbarMenu>
+            </div>
           </div>
 
-          <SpecialRules
-            value={rulesDraft}
-            saved={data.specialRules ?? ''}
-            onChange={onRulesDraftChange}
-            onSave={() => onChange({ ...data, specialRules: rulesDraft })}
+          {decorations.length > 0 && (
+            <div style={panelStyle}>
+              <div style={sectionLabel}>Scenery ({decorations.length})</div>
+              {decorations.map((d) => {
+                const def = decorationDef(d.decorationId);
+                return (
+                  <div
+                    key={d.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}
+                  >
+                    <button
+                      onClick={() => setSelectedDecorationId(d.id)}
+                      style={{
+                        flex: 1,
+                        display: 'block',
+                        textAlign: 'left',
+                        padding: '6px 10px',
+                        background:
+                          d.id === selectedDecorationId ? theme.panelRaised : 'transparent',
+                        color: d.id === selectedDecorationId ? theme.accent : theme.text,
+                        border: 'none',
+                        borderRadius: 3,
+                        fontFamily: theme.font,
+                        fontSize: 13,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {def?.name ?? d.decorationId}
+                      <span style={{ color: theme.muted, fontSize: 11, marginLeft: 8 }}>
+                        ({d.origin.q},{d.origin.r}) · rot {d.rotation}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => removeDecorationById(d.id)}
+                      title="Remove scenery"
+                      aria-label={`Remove ${def?.name ?? d.decorationId}`}
+                      style={{ ...btn.ghost(), fontSize: 14, padding: '4px 8px', flexShrink: 0 }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {selectedTile && (
+            <div style={panelStyle}>
+              <div style={sectionLabel}>Selected tile: {selectedTile.tileSideId}</div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 6 }}>
+                <MoveControls onMove={moveTile} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <button style={btn.ghost()} onClick={() => rotateTile(-1)}>
+                    ⟲ Rotate
+                  </button>
+                  <button style={btn.ghost()} onClick={() => rotateTile(1)}>
+                    Rotate ⟳
+                  </button>
+                </div>
+              </div>
+              <div style={{ color: theme.muted, fontSize: 11, marginTop: 8 }}>
+                Origin: ({selectedTile.origin.q}, {selectedTile.origin.r}) · Rotation:{' '}
+                {selectedTile.rotation} (× 60°)
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <button style={{ ...btn.ghost(), fontSize: 12 }} onClick={removeTile}>
+                  Remove tile
+                </button>
+              </div>
+            </div>
+          )}
+
+          {selectedDecoration && (
+            <div style={panelStyle}>
+              <div style={sectionLabel}>
+                Selected scenery:{' '}
+                {decorationDef(selectedDecoration.decorationId)?.name ??
+                  selectedDecoration.decorationId}
+              </div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 6 }}>
+                <MoveControls onMove={moveDecoration} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <button style={btn.ghost()} onClick={() => rotateDecoration(-1)}>
+                    ⟲ Rotate
+                  </button>
+                  <button style={btn.ghost()} onClick={() => rotateDecoration(1)}>
+                    Rotate ⟳
+                  </button>
+                </div>
+              </div>
+              <div style={{ color: theme.muted, fontSize: 11, marginTop: 8 }}>
+                Origin: ({selectedDecoration.origin.q}, {selectedDecoration.origin.r}) ·
+                Rotation: {selectedDecoration.rotation} (× 60°)
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <button style={{ ...btn.ghost(), fontSize: 12 }} onClick={removeDecoration}>
+                  Remove scenery
+                </button>
+              </div>
+            </div>
+          )}
+
+          <VictoryCondition
+            value={victoryDraft}
+            saved={data.victoryCondition ?? data.specialRules ?? ''}
+            onChange={onVictoryDraftChange}
+            onSave={() => onChange({ ...data, victoryCondition: victoryDraft })}
           />
         </aside>
       </div>
@@ -693,6 +881,7 @@ function ToolbarMenu({
   disabled = false,
   align = 'left',
   width,
+  fullWidth = false,
   children,
 }: {
   label: string;
@@ -702,6 +891,7 @@ function ToolbarMenu({
   disabled?: boolean;
   align?: 'left' | 'right';
   width?: number;
+  fullWidth?: boolean;
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -722,14 +912,16 @@ function ToolbarMenu({
   }, [open, onClose]);
 
   return (
-    <div ref={ref} style={{ position: 'relative' }}>
+    <div ref={ref} style={{ position: 'relative', width: fullWidth ? '100%' : undefined }}>
       <button
         disabled={disabled}
         onClick={onToggle}
         style={{
           ...btn.outline(),
           padding: '6px 12px',
-          display: 'inline-flex',
+          display: fullWidth ? 'flex' : 'inline-flex',
+          width: fullWidth ? '100%' : undefined,
+          justifyContent: 'center',
           alignItems: 'center',
           gap: 8,
           cursor: disabled ? 'not-allowed' : 'pointer',
@@ -746,9 +938,9 @@ function ToolbarMenu({
             top: '100%',
             ...(align === 'right' ? { right: 0 } : { left: 0 }),
             marginTop: 4,
-            width: width ?? 'max-content',
+            width: fullWidth ? '100%' : (width ?? 'max-content'),
             minWidth: 140,
-            maxWidth: 320,
+            maxWidth: fullWidth ? undefined : 320,
             background: theme.panelRaised,
             border: `1px solid ${theme.border}`,
             borderRadius: 6,
@@ -810,7 +1002,7 @@ function TokenList({
   );
 }
 
-function SpecialRules({
+function VictoryCondition({
   value,
   saved,
   onChange,
@@ -824,11 +1016,11 @@ function SpecialRules({
   const dirty = value !== saved;
   return (
     <div style={panelStyle}>
-      <div style={sectionLabel}>Special rules</div>
+      <div style={sectionLabel}>Victory condition</div>
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Paste the scenario book's special rules here. The host will read them out."
+        placeholder="Describe how players win this scenario. Shown to players as the Objective from the start."
         style={{
           width: '100%',
           minHeight: 80,

@@ -48,6 +48,21 @@ export interface Overlay {
   doorOpen?: boolean;
 }
 
+/**
+ * A purely-decorative image prop placed on the map (e.g. a fallen log). Unlike
+ * `Overlay`, a decoration carries no game meaning — difficult terrain, obstacles
+ * and the like remain separate overlays. The artwork and the hex footprint come
+ * from the client-side decoration catalogue, keyed by `decorationId`. Placement
+ * mirrors `PlacedTile`: an origin hex plus a 0..5 rotation, snapping the art to
+ * the centres of the hexes it covers.
+ */
+export interface Decoration {
+  id: string;             // unique within the scenario
+  decorationId: string;   // refs the decoration catalogue, e.g. "fallen-log"
+  origin: { q: number; r: number };
+  rotation: number;       // 0..5, each step = 60°
+}
+
 export type MonsterRankAtCount = 'none' | 'normal' | 'elite';
 
 /** Behavior tag authored per monster spawn. Maps to the runtime
@@ -70,9 +85,15 @@ export interface MonsterSpawn {
 export interface ScenarioData {
   number: number;
   name?: string;
-  /** Free-text special rules pasted from the scenario book — read by the host. */
+  /** Free-text victory condition shown to players from the outset (the
+   *  "Objective" panel). Display-only — no engine logic is wired to it. */
+  victoryCondition?: string;
+  /** @deprecated Renamed to `victoryCondition`. Still read as a fallback so
+   *  older saved layouts keep their text. */
   specialRules?: string;
   placedTiles?: PlacedTile[];
   overlays?: Overlay[];
+  /** Purely-visual image props (logs, scenery). Carry no game meaning. */
+  decorations?: Decoration[];
   monsterSpawns?: MonsterSpawn[];
 }

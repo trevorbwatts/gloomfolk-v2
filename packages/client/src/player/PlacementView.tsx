@@ -68,6 +68,7 @@ export function PlacementView({
         moneyTokens={gameState.moneyTokens}
         doors={gameState.doors}
         {...(gameState.tileArt ? { tileArt: gameState.tileArt } : {})}
+        {...(gameState.decorations ? { decorations: gameState.decorations } : {})}
         reachableKeys={openKeys}
         {...(myUnit ? { selectedHexKey: hexKey(myUnit.hex) } : {})}
         {...(myReady ? {} : { onTapHex })}

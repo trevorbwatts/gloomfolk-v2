@@ -11,8 +11,11 @@ import type {
   Card,
   CardHalf,
   CardSelection,
+  CampaignSheet,
   CharacterClass,
   CharacterInstance,
+  CharacterLevel,
+  FactionId,
   ClientToServer,
   ConditionInstance,
   CurrentTurn,
@@ -50,6 +53,7 @@ import type {
   PlacedTileArt,
   PublicGameState,
   Scenario,
+  SceneDecoration,
   ServerToClient,
   TargetCondition,
   TargetConditionalBonus,
@@ -76,9 +80,22 @@ import {
   pathCost,
   bruiser,
   silentKnife,
+  canLevelUp,
+  characterIgnoresItemMinusOnes,
+  clampReputation,
+  createModifierDeckFrom,
+  GREAT_OAK_BOXES_PER_PROSPERITY,
+  GREAT_OAK_DONATION_GOLD,
+  MAX_PROSPERITY_BOXES,
+  normalizeCampaignSheet,
+  prosperityBoxesFloor,
+  prosperityLevel,
+  scenarioCompletionInspiration,
   createMonsterModifierDeck,
   createStartingModifierDeck,
   dealBattleGoalIds,
+  modifierDeckTemplateForCharacter,
+  validateLevelUp,
   evaluateBattleGoal,
   experienceRequirementByLevel,
   getBattleGoal,
@@ -103,6 +120,7 @@ import {
   startingHandFor,
   triggersReshuffle,
   DEFAULT_SHOP_STOCK,
+  FACTIONS,
   getItem,
   validateItemLoadout,
 } from '@gloomfolk/shared';
@@ -164,6 +182,10 @@ const CHARACTER_NAMES: Record<string, string> = {
   bruiser: 'Bruiser',
   'silent-knife': 'Silent Knife',
 };
+
+function factionDisplayName(id: FactionId): string {
+  return FACTIONS.find((f) => f.id === id)?.name ?? id;
+}
 
 const CHARACTER_CLASSES: Record<string, CharacterClass> = {
   [bruiser.id]: bruiser,
@@ -832,10 +854,11 @@ function describeStep(step: { type: string }): string {
   }
 }
 
-function characterHp(characterId: string): number {
-  if (characterId === 'bruiser') return bruiser.hp[1] ?? 10;
-  // Silent Knife class file not yet defined — use a sane default.
-  return 8;
+function characterHp(charInst: CharacterInstance): number {
+  const classDef = CHARACTER_CLASSES[charInst.classId];
+  if (!classDef) return 8;
+  const level = Math.min(Math.max(charInst.level, 1), 9) as CharacterLevel;
+  return classDef.hp[level];
 }
 
 interface PlayerEntry {
@@ -996,6 +1019,8 @@ export class Room {
     if (!Array.isArray(campaign.shop)) {
       campaign.shop = DEFAULT_SHOP_STOCK.map((s) => ({ ...s }));
     }
+    // Backfill the campaign sheet on legacy saves (and partial ones).
+    campaign.sheet = normalizeCampaignSheet(campaign.sheet);
     // Backfill item fields on legacy character instances.
     for (const ch of campaign.characters) {
       if (!Array.isArray(ch.ownedItemIds)) ch.ownedItemIds = [];
@@ -1293,21 +1318,32 @@ export class Room {
       p.activeEffects = [];
       p.pendingRetaliateXp = [];
       p.selection = null;
-      // Fresh, shuffled attack-modifier deck. Items brought into the scenario
-      // can inject extra -1 cards (e.g. Hide Armor adds two).
+      // Fresh, shuffled attack-modifier deck with the character's resolved
+      // perk mutations baked in. Items brought into the scenario can inject
+      // extra -1 cards (e.g. Hide Armor adds two) unless a perk ignores them.
+      const ignoresItemMinusOnes = classDef
+        ? characterIgnoresItemMinusOnes(classDef, charInst.perksUnlocked)
+        : false;
       const extraMinusOnes: ModifierCardInstance[] = [];
-      for (const iid of charInst?.broughtItemIds ?? []) {
-        const count = getItem(iid)?.negativeModifierCount ?? 0;
-        for (let k = 0; k < count; k++) {
-          extraMinusOnes.push({
-            id: `item-m${extraMinusOnes.length + 1}`,
-            card: { kind: 'flat', amount: -1 },
-          });
+      if (!ignoresItemMinusOnes) {
+        for (const iid of charInst?.broughtItemIds ?? []) {
+          const count = getItem(iid)?.negativeModifierCount ?? 0;
+          for (let k = 0; k < count; k++) {
+            extraMinusOnes.push({
+              id: `item-m${extraMinusOnes.length + 1}`,
+              card: { kind: 'flat', amount: -1 },
+            });
+          }
         }
       }
-      p.modifierDeck = extraMinusOnes.length
-        ? reshuffleModifierDeck(createStartingModifierDeck(), extraMinusOnes)
+      const baseDeck = classDef
+        ? createModifierDeckFrom(
+            modifierDeckTemplateForCharacter(classDef, charInst.perksUnlocked),
+          )
         : createStartingModifierDeck();
+      p.modifierDeck = extraMinusOnes.length
+        ? reshuffleModifierDeck(baseDeck, extraMinusOnes)
+        : baseDeck;
       p.modifierDiscard = [];
       p.modifierNeedsReshuffle = false;
     });
@@ -1381,7 +1417,7 @@ export class Room {
     if (existing) {
       existing.hex = { q: hex.q, r: hex.r };
     } else {
-      const hp = characterHp(charInst.classId);
+      const hp = characterHp(charInst);
       this.units.push({
         id: `u${this.nextUnitN++}`,
         kind: 'player',
@@ -4590,6 +4626,15 @@ export class Room {
     return art.filter((a) => this.revealedRooms.has(a.tileSideId));
   }
 
+  private visibleDecorations(): SceneDecoration[] {
+    const scenario = this.currentScenario();
+    const decos = scenario?.decorations;
+    if (!decos || decos.length === 0) return [];
+    // No room gating (single-tile maps), or room-less props: always shown.
+    if (!scenario.rooms || scenario.rooms.length === 0) return decos;
+    return decos.filter((d) => !d.room || this.revealedRooms.has(d.room));
+  }
+
   private scenarioTiles() {
     const scenario = this.currentScenario();
     if (!scenario) return [];
@@ -4970,6 +5015,150 @@ export class Room {
 
   /** Mark the player's pre-scenario shopping as finished (ready up). Requires
    *  a locked loadout — you can't ready up before choosing a hand. */
+  /**
+   * Downtime level-up (rulebook p. 53–54, docs/rules/level-up.md). Lobby
+   * only. Raises the level, adds the chosen card to the pool, and spends the
+   * newly-earned perk mark on `perkIndex`. Max HP is derived from the class's
+   * level track at scenario start; perk deck mutations are applied when the
+   * personal modifier deck is built.
+   */
+  levelUp(
+    playerId: string,
+    cardId: string,
+    perkIndex: number,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'lobby') return { ok: false, reason: 'not_in_lobby' };
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (instance.claimedByPlayerId !== playerId) {
+      return { ok: false, reason: 'not_your_character' };
+    }
+    const classDef = CHARACTER_CLASSES[instance.classId];
+    if (!classDef) return { ok: false, reason: 'unknown_class' };
+
+    const prosperity = prosperityLevel(this.sheet.prosperityBoxesMarked);
+    const result = validateLevelUp(classDef, instance, cardId, perkIndex, prosperity);
+    if (!result.ok) return { ok: false, reason: result.reason };
+
+    instance.level += 1;
+    instance.pool.push(cardId);
+    instance.perksUnlocked.push(perkIndex);
+    // Prosperity catch-up: XP jumps to the new level's requirement.
+    if (result.mode === 'catch-up') {
+      instance.xp = experienceRequirementByLevel[instance.level as CharacterLevel];
+    }
+    const card = classDef.cards.find((c) => c.id === cardId);
+    const perk = classDef.perks[perkIndex];
+    this.pushEvent(
+      `${instance.name} reaches level ${instance.level}` +
+        `${result.mode === 'catch-up' ? ' (prosperity catch-up)' : ''}! ` +
+        `Adds "${card?.name ?? cardId}" to their pool and marks a perk: ` +
+        `${perk?.text ?? `#${perkIndex + 1}`}`,
+    );
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** The campaign sheet; the constructor guarantees it exists. */
+  private get sheet(): CampaignSheet {
+    return this.campaign.sheet!;
+  }
+
+  /** Host: adjust a faction's reputation, clamped to [−10, cap]. */
+  adjustReputation(faction: FactionId, delta: number): void {
+    if (!Number.isFinite(delta)) return;
+    const before = this.sheet.reputation[faction];
+    const after = clampReputation(before + delta, this.sheet.reputationCap);
+    if (after === before) return;
+    this.sheet.reputation[faction] = after;
+    this.pushEvent(
+      `Reputation with ${factionDisplayName(faction)}: ${before} → ${after}.`,
+    );
+    void this.persist();
+    this.broadcastState();
+  }
+
+  /** Host: adjust the party's inspiration (floors at 0). */
+  adjustInspiration(delta: number): void {
+    if (!Number.isFinite(delta)) return;
+    const before = this.sheet.inspiration;
+    const after = Math.max(0, before + delta);
+    if (after === before) return;
+    this.sheet.inspiration = after;
+    this.pushEvent(`Party inspiration: ${before} → ${after}.`);
+    void this.persist();
+    this.broadcastState();
+  }
+
+  /** Host: mark/erase prosperity boxes. Negative deltas never erase a
+   *  numbered (level) box or anything before it. */
+  adjustProsperity(delta: number): void {
+    if (!Number.isFinite(delta) || delta === 0) return;
+    this.applyProsperityBoxes(delta);
+    void this.persist();
+    this.broadcastState();
+  }
+
+  /** Downtime donation: the character pays 10 gold to the Great Oak, marking
+   *  the next box on the campaign sheet. Every fifth box grants Gloomhaven
+   *  1 prosperity. Not refundable. */
+  donateGreatOak(
+    playerId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'lobby') return { ok: false, reason: 'not_in_lobby' };
+    const entry = this.players.get(playerId);
+    if (!entry) return { ok: false, reason: 'no_player' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === entry.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (instance.claimedByPlayerId !== playerId) {
+      return { ok: false, reason: 'not_your_character' };
+    }
+    if (instance.gold < GREAT_OAK_DONATION_GOLD) {
+      return { ok: false, reason: 'not_enough_gold' };
+    }
+    instance.gold -= GREAT_OAK_DONATION_GOLD;
+    this.sheet.greatOakBoxesMarked += 1;
+    const boxes = this.sheet.greatOakBoxesMarked;
+    this.pushEvent(
+      `${instance.name} donates ${GREAT_OAK_DONATION_GOLD} gold to the ` +
+        `Great Oak (box ${boxes}).`,
+    );
+    if (boxes % GREAT_OAK_BOXES_PER_PROSPERITY === 0) {
+      this.applyProsperityBoxes(1);
+    }
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
+  /** Mark (or erase) prosperity boxes, clamping to the track and to the
+   *  never-erase-a-numbered-box floor, and narrate level changes. Callers
+   *  persist + broadcast. */
+  private applyProsperityBoxes(delta: number): void {
+    const sheet = this.sheet;
+    const before = sheet.prosperityBoxesMarked;
+    const floor = delta < 0 ? prosperityBoxesFloor(before) : 0;
+    const after = Math.max(floor, Math.min(MAX_PROSPERITY_BOXES, before + delta));
+    if (after === before) return;
+    sheet.prosperityBoxesMarked = after;
+    const levelBefore = prosperityLevel(before);
+    const levelAfter = prosperityLevel(after);
+    this.pushEvent(
+      `Gloomhaven's prosperity ${delta > 0 ? 'grows' : 'wanes'} ` +
+        `(${after}/${MAX_PROSPERITY_BOXES} boxes, level ${levelAfter}).`,
+    );
+    if (levelAfter > levelBefore) {
+      this.pushEvent(`Gloomhaven reaches prosperity level ${levelAfter}!`);
+    }
+  }
+
   finishShopping(
     playerId: string,
   ): { ok: true } | { ok: false; reason: string } {
@@ -4981,6 +5170,11 @@ export class Room {
     );
     if (!instance) return { ok: false, reason: 'character_not_found' };
     if (instance.loadout === null) return { ok: false, reason: 'no_loadout' };
+    // Leveling up is mandatory at Downtime — can't ready up with a pending
+    // level-up (the client surfaces the level-up flow first).
+    if (instance.level < 9 && canLevelUp(instance.level, instance.xp)) {
+      return { ok: false, reason: 'level_up_required' };
+    }
     instance.shoppingDone = true;
     void this.persist();
     this.broadcastState();
@@ -5795,10 +5989,15 @@ export class Room {
       characters: this.campaign.characters,
       scenarioId: this.campaign.scenarioId,
       scenarioName: scenario?.name ?? null,
+      ...(scenario?.objective ? { scenarioObjective: scenario.objective } : {}),
       tiles: this.scenarioTiles(),
       ...(() => {
         const art = this.visibleTileArt();
         return art.length ? { tileArt: art } : {};
+      })(),
+      ...(() => {
+        const decorations = this.visibleDecorations();
+        return decorations.length ? { decorations } : {};
       })(),
       units: this.units,
       moneyTokens: this.moneyTokens,
@@ -5832,6 +6031,7 @@ export class Room {
         placementReady: p.placementReady,
       })),
       shop: this.campaign.shop ?? [],
+      sheet: this.sheet,
     };
   }
 
@@ -6239,6 +6439,18 @@ export class Room {
       );
     }
     this.moneyTokens = [];
+    // Completing a scenario grants the party inspiration equal to 4 minus the
+    // number of participating characters (docs/rules/campaign-sheet.md).
+    if (outcome === 'victory') {
+      const partySize = this.units.filter((u) => u.kind === 'player').length;
+      const gained = scenarioCompletionInspiration(partySize);
+      if (gained > 0) {
+        this.sheet.inspiration += gained;
+        this.pushEvent(
+          `The party gains ${gained} inspiration (now ${this.sheet.inspiration}).`,
+        );
+      }
+    }
     this.phase = outcome;
     this.currentTurn = null;
     this.pendingForcedMove = null;

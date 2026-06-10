@@ -16,6 +16,7 @@ export type {
   PlacedTile,
   Overlay,
   OverlayKind,
+  Decoration,
   MonsterSpawn,
   MonsterRankAtCount,
   SpawnBehavior,
@@ -40,6 +41,10 @@ export function newPlacedTileId(): string {
 
 export function newOverlayId(): string {
   return `o-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function newDecorationId(): string {
+  return `d-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
 export function newMonsterSpawnId(): string {

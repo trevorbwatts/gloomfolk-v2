@@ -73,12 +73,21 @@ function shuffleInPlace<T>(arr: T[]): T[] {
   return arr;
 }
 
+/** Build a fresh, shuffled modifier deck from any template, with stable ids.
+ *  Used for perk-modified personal decks (see characters/level-up.ts). */
+export function createModifierDeckFrom(
+  template: readonly ModifierCard[],
+): ModifierCardInstance[] {
+  const instances: ModifierCardInstance[] = template.map((card, i) => ({
+    id: `m${i + 1}`,
+    card,
+  }));
+  return shuffleInPlace(instances);
+}
+
 /** Build a fresh, shuffled starting modifier deck with stable ids. */
 export function createStartingModifierDeck(): ModifierCardInstance[] {
-  const instances: ModifierCardInstance[] = STARTING_MODIFIER_DECK_TEMPLATE.map(
-    (card, i) => ({ id: `m${i + 1}`, card }),
-  );
-  return shuffleInPlace(instances);
+  return createModifierDeckFrom(STARTING_MODIFIER_DECK_TEMPLATE);
 }
 
 /** Build a fresh, shuffled monster attack-modifier deck with stable ids. */

@@ -96,12 +96,28 @@ export type VictoryCondition =
 /** Loss condition (beyond the engine's default party-exhaustion check). */
 export type LossCondition = { kind: 'allCharactersExhausted' };
 
+/** A purely-decorative image prop on the runtime map (e.g. a fallen log).
+ *  Compiled from the authored `Decoration`; carries no game meaning. The
+ *  artwork and hex footprint are resolved client-side from the decoration
+ *  catalogue via `decorationId`. `room` (when set) gates fog-of-war reveal the
+ *  same way tiles do. */
+export interface SceneDecoration {
+  id: string;
+  decorationId: string;
+  origin: Hex;
+  rotation: number;
+  /** Room this prop sits in, for reveal gating. Omitted on room-less maps. */
+  room?: string;
+}
+
 export interface Scenario {
   id: string;
   name: string;
   /** One-line victory condition shown to players in the Scenario tab. */
   objective: string;
   tiles: Tile[];
+  /** Purely-visual props (logs, scenery). Carry no game meaning. */
+  decorations?: SceneDecoration[];
   spawns: SpawnSlot[];
   /** Reveal order of rooms. The first room is visible at start; the rest are
    *  hidden until a door reveals them. Scenarios with no rooms (single-room

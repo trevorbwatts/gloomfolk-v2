@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
+  CampaignSheet,
   CharacterInstance,
   CampaignSummary,
   PlacedTileArt,
@@ -35,6 +36,9 @@ export interface CampaignSave {
   /** Campaign-wide shop stock. Undefined on legacy saves; restored to
    *  DEFAULT_SHOP_STOCK on load. */
   shop?: ShopEntry[];
+  /** The campaign sheet. Undefined on legacy saves; normalized to a default
+   *  sheet on load. */
+  sheet?: CampaignSheet;
 }
 
 async function ensureDir(): Promise<void> {

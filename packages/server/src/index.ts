@@ -262,6 +262,15 @@ async function handle(
       return;
     }
 
+    case 'player_level_up': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.levelUp(conn.playerId, msg.cardId, msg.perkIndex);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
     case 'player_buy_item': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       const r = rooms.get(conn.campaignId);
@@ -540,6 +549,37 @@ async function handle(
       const r = rooms.get(conn.campaignId);
       if (!r) return;
       const result = r.skipHalf(conn.playerId, msg.slot, msg.cardId);
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
+      return;
+    }
+
+    case 'host_adjust_reputation':
+    case 'host_adjust_inspiration':
+    case 'host_adjust_prosperity': {
+      if (conn.role !== 'host' || !conn.campaignId) {
+        send(ws, { type: 'error', message: 'not_a_host' });
+        return;
+      }
+      const room = rooms.get(conn.campaignId);
+      if (!room) {
+        send(ws, { type: 'error', message: 'no_room' });
+        return;
+      }
+      if (msg.type === 'host_adjust_reputation') {
+        room.adjustReputation(msg.faction, msg.delta);
+      } else if (msg.type === 'host_adjust_inspiration') {
+        room.adjustInspiration(msg.delta);
+      } else {
+        room.adjustProsperity(msg.delta);
+      }
+      return;
+    }
+
+    case 'player_donate_great_oak': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.donateGreatOak(conn.playerId);
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }

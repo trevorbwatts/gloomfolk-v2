@@ -1,7 +1,10 @@
 import {
   ALL_ITEMS,
   getItem,
+  GREAT_OAK_BOXES_PER_PROSPERITY,
+  GREAT_OAK_DONATION_GOLD,
   validateItemLoadout,
+  type CampaignSheet,
   type CharacterInstance,
   type Item,
   type ShopEntry,
@@ -72,9 +75,11 @@ const sectionHeading: React.CSSProperties = {
 export function Shop({
   character,
   shop,
+  sheet,
 }: {
   character: CharacterInstance;
   shop: readonly ShopEntry[];
+  sheet: CampaignSheet | null;
 }) {
   const sock = useSocket();
 
@@ -154,8 +159,79 @@ export function Shop({
         ))}
       </div>
 
+      {sheet && (
+        <GreatOakDonation
+          character={character}
+          sheet={sheet}
+          onDonate={() => sock.send({ type: 'player_donate_great_oak' })}
+        />
+      )}
+
       <OwnedItems character={character} sock={sock} />
     </section>
+  );
+}
+
+/** Downtime donation to the Great Oak: 10 gold from this character marks the
+ *  next box on the campaign sheet; every fifth box grants +1 prosperity.
+ *  Unlike item purchases, donations can't be undone. */
+function GreatOakDonation({
+  character,
+  sheet,
+  onDonate,
+}: {
+  character: CharacterInstance;
+  sheet: CampaignSheet;
+  onDonate: () => void;
+}) {
+  const tooPoor = character.gold < GREAT_OAK_DONATION_GOLD;
+  const progress = sheet.greatOakBoxesMarked % GREAT_OAK_BOXES_PER_PROSPERITY;
+  const untilProsperity = GREAT_OAK_BOXES_PER_PROSPERITY - progress;
+  return (
+    <>
+      <h3 style={{ ...sectionHeading, margin: '24px 0 12px' }}>Great Oak Sanctuary</h3>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          padding: 12,
+          background: theme.panel,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 6,
+        }}
+      >
+        <div style={{ flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {Array.from({ length: GREAT_OAK_BOXES_PER_PROSPERITY }).map((_, i) => (
+              <span
+                key={i}
+                style={{
+                  display: 'inline-block',
+                  width: 12,
+                  height: 12,
+                  border: `1px solid ${i < progress ? theme.accent : theme.border}`,
+                  background: i < progress ? theme.accent : 'transparent',
+                  borderRadius: 2,
+                }}
+              />
+            ))}
+          </div>
+          <p style={{ margin: '8px 0 0', fontSize: 12, color: theme.muted, lineHeight: 1.4 }}>
+            {untilProsperity === 1
+              ? 'One more donation grants Gloomhaven +1 prosperity.'
+              : `${untilProsperity} donations until Gloomhaven gains +1 prosperity.`}{' '}
+            Donations can’t be refunded.
+          </p>
+        </div>
+        <BuyButton
+          disabled={tooPoor}
+          reason={tooPoor ? `Need ${GREAT_OAK_DONATION_GOLD - character.gold}g more` : null}
+          label="Donate 10G"
+          onClick={onDonate}
+        />
+      </div>
+    </>
   );
 }
 

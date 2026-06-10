@@ -3,7 +3,11 @@ import { Swords } from 'lucide-react';
 import {
   bruiser,
   silentKnife,
+  canCatchUpLevelUp,
+  canLevelUp,
+  catchUpLevelCap,
   defaultPoolForClass,
+  prosperityLevel,
   type CharacterClass,
   type CharacterPool,
 } from '@gloomfolk/shared';
@@ -14,6 +18,7 @@ import { NarrativeModal } from '../board/NarrativeModal.js';
 import { PlacementView } from './PlacementView.js';
 import { CharacterSelect } from './CharacterSelect.js';
 import { BattleGoalPicker } from './BattleGoalPicker.js';
+import { LevelUpPanel } from './LevelUpPanel.js';
 import { LoadoutBuilder } from './LoadoutBuilder.js';
 import { Hand } from './Hand.js';
 import { Shop } from './Shop.js';
@@ -162,6 +167,7 @@ export function PlayerScreen() {
   });
 
   const [editingLoadout, setEditingLoadout] = useState(false);
+  const [catchUpOpen, setCatchUpOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('play');
   const [showItemsModal, setShowItemsModal] = useState(false);
   const prevCharIdRef = useRef<string | null | undefined>(undefined);
@@ -243,6 +249,8 @@ export function PlayerScreen() {
     activeTab,
     charEarly?.loadout ? 'L' : '',
     charEarly?.shoppingDone ? 'S' : '',
+    // Level changes mid-lobby (the level-up step) swap the view content too.
+    charEarly?.level ?? '',
   ].join('|');
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -506,7 +514,7 @@ export function PlayerScreen() {
           return (
             <LoadoutBuilder
               characterClass={myClass}
-              pool={poolByClassId[myClassId]!}
+              pool={myCharInstance?.pool ?? poolByClassId[myClassId]!}
               {...(savedLoadout ? { initialChosenIds: savedLoadout } : {})}
               onLockIn={(chosenCardIds) => {
                 setLoadoutByClassId((prev) => ({
@@ -523,6 +531,83 @@ export function PlayerScreen() {
           );
         })()}
         {onPlayTab && me?.characterId && !editingLoadout && phase === 'lobby' && (() => {
+          // Mandatory downtime level-up: takes over the lobby flow (before
+          // hand-building, shopping, and the ready screen) until resolved.
+          // Repeats if enough XP banked to cross two thresholds.
+          if (
+            myCharInstance &&
+            myClass &&
+            canLevelUp(myCharInstance.level, myCharInstance.xp)
+          ) {
+            return (
+              <LevelUpPanel
+                character={myCharInstance}
+                characterClass={myClass}
+                onConfirm={(cardId, perkIndex) =>
+                  sock.send({ type: 'player_level_up', cardId, perkIndex })
+                }
+              />
+            );
+          }
+          // Optional prosperity catch-up: offered (not forced) while the
+          // character's level is below half of Gloomhaven's prosperity level.
+          const prosperity = prosperityLevel(
+            gameState?.sheet?.prosperityBoxesMarked ?? 0,
+          );
+          const catchUpEligible =
+            !!myCharInstance &&
+            !!myClass &&
+            canCatchUpLevelUp(myCharInstance.level, prosperity);
+          if (catchUpEligible && catchUpOpen) {
+            return (
+              <LevelUpPanel
+                character={myCharInstance!}
+                characterClass={myClass!}
+                optional
+                onCancel={() => setCatchUpOpen(false)}
+                onConfirm={(cardId, perkIndex) =>
+                  sock.send({ type: 'player_level_up', cardId, perkIndex })
+                }
+              />
+            );
+          }
+          const catchUpBanner = catchUpEligible ? (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                margin: '4px 0 12px',
+                padding: '10px 14px',
+                background: theme.panel,
+                border: `1px solid ${theme.accent}`,
+                borderRadius: 6,
+              }}
+            >
+              <span style={{ flex: 1, fontSize: 13, color: theme.text, lineHeight: 1.4 }}>
+                Gloomhaven's prosperity lets {myCharInstance!.name} level up to{' '}
+                {Math.min(catchUpLevelCap(prosperity), 9)} for free.
+              </span>
+              <button
+                onClick={() => setCatchUpOpen(true)}
+                style={{
+                  fontSize: 13,
+                  padding: '8px 14px',
+                  background: 'transparent',
+                  color: theme.accent,
+                  border: `1px solid ${theme.accent}`,
+                  borderRadius: 3,
+                  fontFamily: theme.headingFont,
+                  letterSpacing: 1,
+                  textTransform: 'uppercase',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                Level up
+              </button>
+            </div>
+          ) : null;
           const hasLoadout = myCharInstance?.loadout != null;
           const ready = myCharInstance?.shoppingDone === true;
           const editBtnStyle: React.CSSProperties = hasLoadout
@@ -586,6 +671,7 @@ export function PlayerScreen() {
           // Still setting up: pick a hand, then shop, then ready up.
           return (
             <div>
+              {catchUpBanner}
               {!hasLoadout && (
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button
@@ -616,7 +702,11 @@ export function PlayerScreen() {
               {hasLoadout && myCharInstance && gameState && (
                 <>
                   <div style={{ paddingBottom: 80 }}>
-                    <Shop character={myCharInstance} shop={gameState.shop} />
+                    <Shop
+                      character={myCharInstance}
+                      shop={gameState.shop}
+                      sheet={gameState.sheet ?? null}
+                    />
                   </div>
                   <div
                     style={{
