@@ -56,19 +56,22 @@ The "fewest movement points to maximize attacks" rule decomposes into a
 lexicographic preference over candidate destination hexes reachable within
 budget:
 
-1. **Maximize total attacks landed this turn** (primary focus + additional
+1. **(Inherited from focus) Minimize negative hexes crossed.** Path
+   priority from the focus rules continues to apply during the actual
+   movement step and **outranks everything below, including target
+   maximization** — never trade a clean path for a shorter one through a
+   trap (see [appendix B](appendix-b-monster-turn-guide.md), rule B and
+   the path-priority text in [monster-focus.md](monster-focus.md): "even
+   when that means not maximizing targets").
+2. **Maximize total attacks landed this turn** (primary focus + additional
    foci hit from the destination).
-2. **Minimize disadvantaged attacks.** Disadvantage on a ranged attack
+3. **Minimize disadvantaged attacks.** Disadvantage on a ranged attack
    triggers when attacking an adjacent enemy — so for ranged abilities,
    prefer destinations that are *not* adjacent to any target.
-3. **Minimize movement points spent.**
-4. **(Inherited from focus) Minimize negative hexes crossed.** Path
-   priority from the focus rules continues to apply during the actual
-   movement step — never trade a clean path for a shorter one through a
-   trap.
+4. **Minimize movement points spent.**
 
-This ordering matters: target count beats disadvantage avoidance, which
-beats movement economy.
+This ordering matters: a clean path beats everything; then target count
+beats disadvantage avoidance, which beats movement economy.
 
 ### Special cases
 

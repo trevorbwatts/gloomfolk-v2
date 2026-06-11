@@ -18,50 +18,42 @@ interface BoardView {
 }
 
 /**
- * BFS from `start`, no budget cap, returning per-hex distance + predecessor.
- * `passable(hex)` decides if a hex can be entered; `start` is always allowed.
+ * Movement predicates shared by the AI's searches. Walls and enemy figures
+ * block traversal; allies can be passed through but not stopped on (`occupied`
+ * marks illegal destinations). Difficult terrain costs 2 to enter, and live
+ * traps and hazardous terrain are "negative" hexes — the rulebook treats both
+ * the same for path priority. (Sprung traps reach the AI as plain floor.)
  */
-function bfsAll(
-  start: Hex,
-  passable: (h: Hex) => boolean,
-): { dist: Map<string, number>; prev: Map<string, string> } {
-  const dist = new Map<string, number>();
-  const prev = new Map<string, string>();
-  const startK = hexKey(start);
-  dist.set(startK, 0);
-  let frontier: Hex[] = [start];
-  while (frontier.length > 0) {
-    const next: Hex[] = [];
-    for (const h of frontier) {
-      const hk = hexKey(h);
-      const d = dist.get(hk)!;
-      for (const n of hexNeighbors(h)) {
-        const k = hexKey(n);
-        if (dist.has(k)) continue;
-        if (!passable(n)) continue;
-        dist.set(k, d + 1);
-        prev.set(k, hk);
-        next.push(n);
-      }
-    }
-    frontier = next;
+function boardCosts(
+  monster: Unit,
+  board: BoardView,
+): {
+  occupied: Set<string>;
+  passable: (h: Hex) => boolean;
+  enterCost: (h: Hex) => number;
+  isNegative: (h: Hex) => boolean;
+} {
+  const tileAt = new Map<string, Tile>();
+  for (const t of board.tiles) tileAt.set(hexKey({ q: t.q, r: t.r }), t);
+  const occupied = new Set<string>();
+  const enemyOccupied = new Set<string>();
+  for (const u of board.units) {
+    if (u.id === monster.id) continue;
+    occupied.add(hexKey(u.hex));
+    if (u.kind !== monster.kind) enemyOccupied.add(hexKey(u.hex));
   }
-  return { dist, prev };
-}
-
-function reconstructPath(target: Hex, prev: Map<string, string>): Hex[] {
-  const path: Hex[] = [];
-  let cur: string | undefined = hexKey(target);
-  path.unshift(target);
-  while (cur) {
-    const p = prev.get(cur);
-    if (!p) break;
-    const [qs, rs] = p.split(',');
-    const h = { q: Number(qs), r: Number(rs) };
-    path.unshift(h);
-    cur = p;
-  }
-  return path;
+  const passable = (h: Hex) => {
+    const tile = tileAt.get(hexKey(h));
+    if (!tile) return false;
+    if (tile.kind === 'wall') return false;
+    return !enemyOccupied.has(hexKey(h));
+  };
+  const enterCost = (h: Hex) => (tileAt.get(hexKey(h))?.kind === 'difficult' ? 2 : 1);
+  const isNegative = (h: Hex) => {
+    const kind = tileAt.get(hexKey(h))?.kind;
+    return kind === 'hazard' || kind === 'trap';
+  };
+  return { occupied, passable, enterCost, isNegative };
 }
 
 interface AttackInfo {
@@ -108,12 +100,21 @@ interface FocusResult {
   path: Hex[]; // includes start hex; ends at chosen attack hex (which may be start hex)
   attackHex: Hex;
   pathCost: number;
+  /** Negative (trap/hazard) hexes the chosen path enters. */
+  pathNegatives: number;
 }
 
 /**
  * Determine focus for `monster` given its attack range and the current board.
- * `enemyInitiative` maps unit id → tiebreak initiative (lower acts first).
- * Returns null if no enemy is reachable.
+ * Candidates are compared by the rulebook's priority list (appendix B):
+ *   1. a movement path that triggers fewer negative (trap/hazard) hexes,
+ *   2. a movement path that needs fewer movement points (difficult terrain
+ *      costs 2 to enter),
+ *   3. the enemy closer by range (hex distance, ignoring terrain),
+ *   4. the enemy earlier in initiative (`enemyInitiative` maps unit id →
+ *      tiebreak value; lower acts first).
+ * Paths assume infinite movement — the budget only matters later, in
+ * determineMovement. Returns null if no enemy is reachable.
  */
 export function determineFocus(
   monster: Unit,
@@ -121,24 +122,8 @@ export function determineFocus(
   board: BoardView,
   enemyInitiative: Map<string, number>,
 ): FocusResult | null {
-  // A monster can move through its allies (same kind) but not its enemies, and
-  // can't stop on any occupied hex.
-  const occupied = new Set<string>();
-  const enemyOccupied = new Set<string>();
-  for (const u of board.units) {
-    if (u.id === monster.id) continue;
-    occupied.add(hexKey(u.hex));
-    if (u.kind !== monster.kind) enemyOccupied.add(hexKey(u.hex));
-  }
-  const passable = (h: Hex) => {
-    // Walls block; enemy figures block; allies can be passed through.
-    const tile = board.tiles.find((t) => t.q === h.q && t.r === h.r);
-    if (!tile) return false;
-    if (tile.kind === 'wall') return false;
-    return !enemyOccupied.has(hexKey(h));
-  };
-
-  const { dist, prev } = bfsAll(monster.hex, passable);
+  const { occupied, passable, enterCost, isNegative } = boardCosts(monster, board);
+  const search = terrainSearch(monster.hex, passable, enterCost, isNegative);
   // The monster's own hex is "reachable" at cost 0 for ranged attacks.
   // For melee it doesn't help (must be adjacent to focus).
 
@@ -147,42 +132,59 @@ export function determineFocus(
 
   let best: FocusResult | null = null;
   for (const e of enemies) {
-    // Candidate attack hexes for this enemy.
-    let bestForE: { hex: Hex; cost: number } | null = null;
+    // Best attack hex for this enemy: fewest negative hexes, then cheapest.
+    let bestForE: { hex: Hex; cost: number; neg: number } | null = null;
     if (attackRange <= 1) {
       // Melee — adjacent hexes to the enemy. Skip hexes occupied by another
       // figure (passable to move through, but not to stand on).
       for (const adj of hexNeighbors(e.hex)) {
         const k = hexKey(adj);
         if (occupied.has(k)) continue;
-        const d = dist.get(k);
-        if (d === undefined) continue;
-        if (!bestForE || d < bestForE.cost) bestForE = { hex: adj, cost: d };
+        const v = search.get(k);
+        if (!v) continue;
+        if (
+          !bestForE ||
+          v.neg < bestForE.neg ||
+          (v.neg === bestForE.neg && v.cost < bestForE.cost)
+        ) {
+          bestForE = { hex: adj, cost: v.cost, neg: v.neg };
+        }
       }
     } else {
       // Ranged — any reachable, unoccupied hex within range of enemy (no LOS).
-      for (const [k, d] of dist) {
+      for (const [k, v] of search) {
         if (occupied.has(k)) continue;
         const [qs, rs] = k.split(',');
         const h = { q: Number(qs), r: Number(rs) };
         if (hexDistance(h, e.hex) > attackRange) continue;
-        if (!bestForE || d < bestForE.cost) bestForE = { hex: h, cost: d };
+        if (
+          !bestForE ||
+          v.neg < bestForE.neg ||
+          (v.neg === bestForE.neg && v.cost < bestForE.cost)
+        ) {
+          bestForE = { hex: h, cost: v.cost, neg: v.neg };
+        }
       }
     }
     if (!bestForE) continue;
     const cur: FocusResult = {
       enemy: e,
-      path: reconstructPath(bestForE.hex, prev),
+      path: reconstructTerrainPath(bestForE.hex, search),
       attackHex: bestForE.hex,
       pathCost: bestForE.cost,
+      pathNegatives: bestForE.neg,
     };
     if (!best) {
       best = cur;
       continue;
     }
-    // Tiebreaks: lowest pathCost, then closest by hex-distance to monster, then earliest initiative.
-    if (cur.pathCost < best.pathCost) best = cur;
-    else if (cur.pathCost === best.pathCost) {
+    // Priority: fewest negative hexes, then fewest movement points, then
+    // closest by hex-distance to monster, then earliest initiative.
+    if (cur.pathNegatives !== best.pathNegatives) {
+      if (cur.pathNegatives < best.pathNegatives) best = cur;
+    } else if (cur.pathCost !== best.pathCost) {
+      if (cur.pathCost < best.pathCost) best = cur;
+    } else {
       const curRange = hexDistance(monster.hex, cur.enemy.hex);
       const bestRange = hexDistance(monster.hex, best.enemy.hex);
       if (curRange < bestRange) best = cur;
@@ -241,9 +243,11 @@ export interface DestinationEval {
 
 /**
  * Terrain-aware shortest-path search from `start`. Difficult terrain costs 2
- * movement to enter; hazard ("negative") hexes are counted so paths that cross
- * fewer of them can be preferred. Returns, per reachable hex, the best
- * (cost, then negative-hex count) and its predecessor for reconstruction.
+ * movement to enter; negative (trap/hazard) hexes are counted and outrank
+ * cost — a safer path always beats a cheaper one (the rulebook's path
+ * priority: a monster walks 10 clean hexes rather than 2 through a trap).
+ * Returns, per reachable hex, the best (negative-hex count, then cost) and
+ * its predecessor for reconstruction.
  */
 function terrainSearch(
   start: Hex,
@@ -255,12 +259,12 @@ function terrainSearch(
   const visited = new Set<string>();
   best.set(hexKey(start), { cost: 0, neg: 0, prev: null });
   for (;;) {
-    // Extract the unvisited node with the lexicographically smallest (cost, neg).
+    // Extract the unvisited node with the lexicographically smallest (neg, cost).
     let curK: string | null = null;
     let curV: { cost: number; neg: number } | null = null;
     for (const [k, v] of best) {
       if (visited.has(k)) continue;
-      if (!curV || v.cost < curV.cost || (v.cost === curV.cost && v.neg < curV.neg)) {
+      if (!curV || v.neg < curV.neg || (v.neg === curV.neg && v.cost < curV.cost)) {
         curV = v;
         curK = k;
       }
@@ -277,7 +281,7 @@ function terrainSearch(
       const cost = here.cost + enterCost(n);
       const neg = here.neg + (isNegative(n) ? 1 : 0);
       const ex = best.get(nk);
-      if (!ex || cost < ex.cost || (cost === ex.cost && neg < ex.neg)) {
+      if (!ex || neg < ex.neg || (neg === ex.neg && cost < ex.cost)) {
         best.set(nk, { cost, neg, prev: curK });
       }
     }
@@ -287,18 +291,21 @@ function terrainSearch(
 
 /**
  * Decide where a monster moves before attacking, scoring every hex reachable
- * within `budget` against a lexicographic preference (monster-movement.md):
- *   1. maximize total attacks landed (focus + additional targets),
- *   2. minimize disadvantaged attacks (ranged attack on an adjacent target),
- *   3. spend the fewest movement points,
- *   4. cross the fewest negative (hazard) hexes.
+ * within `budget` against a lexicographic preference (appendix B, rules B–E):
+ *   1. cross the fewest negative (trap/hazard) hexes — path priority outranks
+ *      everything, including target maximization,
+ *   2. maximize total attacks landed (focus + additional targets),
+ *   3. minimize disadvantaged attacks (ranged attack on an adjacent target),
+ *   4. spend the fewest movement points.
  *
  * `evaluateFrom(hex)` reports what an attack achieves from `hex` (target count
  * and disadvantage — owned by the caller so this stays board-agnostic). When
  * no reachable hex can attack the focus, it falls back to approaching the focus
- * along the shortest path (the shorten-the-path rule).
+ * along the shortest path (the shorten-the-path rule) — but never enters a
+ * negative hex just to get closer (appendix B caption B: the Hound stays put
+ * rather than spring a trap).
  *
- * Difficult terrain costs 2 to enter; hazard hexes are tracked for the tiebreak.
+ * Difficult terrain costs 2 to enter.
  */
 export function determineMovement(
   monster: Unit,
@@ -308,26 +315,10 @@ export function determineMovement(
   board: BoardView,
   evaluateFrom: (from: Hex) => DestinationEval,
 ): MovementPlan {
-  const tileAt = new Map<string, Tile>();
-  for (const t of board.tiles) tileAt.set(hexKey({ q: t.q, r: t.r }), t);
   // A figure can move *through* its allies (same kind) but not its enemies, and
   // can't *stop* on any occupied hex. `passable` governs traversal; `occupied`
   // marks hexes that are illegal destinations.
-  const occupied = new Set<string>();
-  const enemyOccupied = new Set<string>();
-  for (const u of board.units) {
-    if (u.id === monster.id) continue;
-    occupied.add(hexKey(u.hex));
-    if (u.kind !== monster.kind) enemyOccupied.add(hexKey(u.hex));
-  }
-  const passable = (h: Hex) => {
-    const tile = tileAt.get(hexKey(h));
-    if (!tile) return false;
-    if (tile.kind === 'wall') return false;
-    return !enemyOccupied.has(hexKey(h));
-  };
-  const enterCost = (h: Hex) => (tileAt.get(hexKey(h))?.kind === 'difficult' ? 2 : 1);
-  const isNegative = (h: Hex) => tileAt.get(hexKey(h))?.kind === 'hazard';
+  const { occupied, passable, enterCost, isNegative } = boardCosts(monster, board);
 
   const search = terrainSearch(monster.hex, passable, enterCost, isNegative);
 
@@ -347,10 +338,10 @@ export function determineMovement(
   if (attackers.length > 0) {
     attackers.sort(
       (a, b) =>
-        b.attacks - a.attacks || // maximize attacks landed
+        a.neg - b.neg || // fewest negative hexes — outranks target maximization
+        b.attacks - a.attacks || // then maximize attacks landed
         a.disadv - b.disadv || // then avoid disadvantage
         a.cost - b.cost || // then spend the fewest movement points
-        a.neg - b.neg || // then cross the fewest hazard hexes
         hexDistance(a.hex, focus.enemy.hex) - hexDistance(b.hex, focus.enemy.hex),
     );
     const best = attackers[0]!;
@@ -361,9 +352,10 @@ export function determineMovement(
     };
   }
 
-  // No reachable hex can attack — approach the focus (terrain-aware): among
-  // reachable hexes, get as close as possible to the focus, breaking ties by
-  // fewest movement points then fewest hazard hexes crossed.
+  // No reachable hex can attack — approach the focus (terrain-aware): cross
+  // the fewest negative hexes (staying put, at zero, beats any path through a
+  // trap — caption B), then get as close as possible to the focus, then spend
+  // the fewest movement points.
   void attackRange;
   let best = { hex: monster.hex, cost: 0, neg: 0, d: hexDistance(monster.hex, focus.enemy.hex) };
   for (const [k, v] of search) {
@@ -373,8 +365,9 @@ export function determineMovement(
     const hex = { q: Number(qs), r: Number(rs) };
     const d = hexDistance(hex, focus.enemy.hex);
     if (
-      d < best.d ||
-      (d === best.d && (v.cost < best.cost || (v.cost === best.cost && v.neg < best.neg)))
+      v.neg < best.neg ||
+      (v.neg === best.neg &&
+        (d < best.d || (d === best.d && v.cost < best.cost)))
     ) {
       best = { hex, cost: v.cost, neg: v.neg, d };
     }

@@ -83,7 +83,9 @@ import {
   canLevelUp,
   characterIgnoresItemMinusOnes,
   clampReputation,
+  createEventDeck,
   createModifierDeckFrom,
+  eventDeckNeedsSeed,
   GREAT_OAK_BOXES_PER_PROSPERITY,
   GREAT_OAK_DONATION_GOLD,
   MAX_PROSPERITY_BOXES,
@@ -91,6 +93,8 @@ import {
   prosperityBoxesFloor,
   prosperityLevel,
   scenarioCompletionInspiration,
+  STARTING_CITY_EVENT_IDS,
+  STARTING_ROAD_EVENT_IDS,
   createMonsterModifierDeck,
   createStartingModifierDeck,
   dealBattleGoalIds,
@@ -1021,6 +1025,15 @@ export class Room {
     }
     // Backfill the campaign sheet on legacy saves (and partial ones).
     campaign.sheet = normalizeCampaignSheet(campaign.sheet);
+    // Assemble + shuffle the event decks at campaign start. Also reseeds
+    // decks that were created while the event-card lists were still empty,
+    // so existing campaigns pick up the cards when they enter the system.
+    if (eventDeckNeedsSeed(campaign.roadEvents, STARTING_ROAD_EVENT_IDS)) {
+      campaign.roadEvents = createEventDeck(STARTING_ROAD_EVENT_IDS);
+    }
+    if (eventDeckNeedsSeed(campaign.cityEvents, STARTING_CITY_EVENT_IDS)) {
+      campaign.cityEvents = createEventDeck(STARTING_CITY_EVENT_IDS);
+    }
     // Backfill item fields on legacy character instances.
     for (const ch of campaign.characters) {
       if (!Array.isArray(ch.ownedItemIds)) ch.ownedItemIds = [];
@@ -4495,8 +4508,9 @@ export class Room {
         // What an attack achieves from a candidate hex: how many targets it
         // lands (focus + nearest others within range/LOS, capped at the card's
         // Target count) and how many of those are ranged-on-adjacent
-        // (Disadvantage). determineMovement uses this to pick a hex that
-        // maximizes attacks while minimizing disadvantage.
+        // (Disadvantage). determineMovement uses this to pick a hex reached by
+        // the fewest trap/hazard hexes first, then maximizing attacks while
+        // minimizing disadvantage.
         const evaluateFrom = (from: Hex): DestinationEval => {
           const set = this.selectAttackTargets(from, focus.enemy.id, range, maxTargets);
           const disadvantaged =

@@ -40,6 +40,13 @@ are present on the campaign sheet (see p. 50).
 - If the requirement is not met, instead read the outcome labeled
   **"otherwise"**.
 
+## Starting deck size
+
+Per the official Gloomhaven 2E FAQ (not in the rulebook pages transcribed
+above): the initial road and city event decks are each formed by shuffling
+**events 1–20**. Higher-numbered events enter the decks later via campaign
+instructions.
+
 ## Reference numbers
 
 Each event has a reference number. Throughout the campaign, you will be
@@ -50,35 +57,21 @@ afterward**.
 
 ## Implications for the schema (notes for later)
 
-Defer until campaign/scenario flow is built. Rough shape when we get there:
+> **Mostly built:** the deck mechanics live in
+> `packages/shared/src/campaign/events.ts` — ordered deck persisted on the
+> campaign save, shuffled at campaign start, draw-from-top,
+> return-icon-to-bottom, shuffle-on-add/remove. Card *content* lives in
+> `packages/shared/src/campaign/road-event-cards.ts` (types + transcribed
+> cards); `STARTING_ROAD_EVENT_IDS` is derived from that list, so a card
+> joins the starting deck as soon as it's transcribed. The effect/
+> requirement types there only cover mechanics seen on transcribed cards so
+> far and grow card by card. The in-game resolution flow (presenting the
+> card, checking requirements, applying effects) is still deferred.
 
-```ts
-type RoadEventRequirement =
-  | { kind: 'trait'; trait: string; scope: 'any' | 'collective' }
-  | { kind: 'gold'; min: number; scope: 'any' | 'collective' }
-  | { kind: 'achievement'; id: string }
-  | { kind: 'campaign-stat'; ... };
-
-interface RoadEventOption {
-  id: 'A' | 'B' | ...;
-  promptText: string;
-  requirement?: RoadEventRequirement;
-  outcome: RoadEventOutcome;
-  otherwise?: RoadEventOutcome;   // used when requirement fails
-}
-
-interface RoadEventOutcome {
-  text: string;
-  effects: EventEffect[];   // gold, items, prosperity, deck add/remove, etc.
-  returnToDeck?: boolean;   // the return icon
-}
-
-interface RoadEvent {
-  id: number;               // reference number
-  frontText: string;
-  options: RoadEventOption[];
-}
-```
+Rules detail confirmed during transcription: a multi-trait requirement like
+"ARCANE AND INTIMIDATING" is satisfied **across the party** — each listed
+trait must be on at least one participating character, but they can be
+different characters.
 
 Engine concerns:
 - Trigger road event at scenario start unless one of the listed exceptions

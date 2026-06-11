@@ -4,6 +4,7 @@ import type {
   CampaignSheet,
   CharacterInstance,
   CampaignSummary,
+  EventDeckState,
   PlacedTileArt,
   Scenario,
   ShopEntry,
@@ -39,6 +40,12 @@ export interface CampaignSave {
   /** The campaign sheet. Undefined on legacy saves; normalized to a default
    *  sheet on load. */
   sheet?: CampaignSheet;
+  /** Road / city event decks: order is persistent campaign state, shuffled
+   *  only at campaign start and on add/remove instructions (see
+   *  docs/rules/road-events.md). Seeded (shuffled) on load when missing or
+   *  pre-dating the event cards. */
+  roadEvents?: EventDeckState;
+  cityEvents?: EventDeckState;
 }
 
 async function ensureDir(): Promise<void> {
