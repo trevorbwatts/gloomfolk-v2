@@ -98,13 +98,17 @@ test('event card data: unique ids, starting decks derived from cards', () => {
       ids.filter((id) => Number(id.split('-')[1]) <= 20),
     );
   }
-  // Every card resolves somehow: options to choose, or a modifier-draw
-  // game. A card with a flip-card effect must have a back to flip to.
+  // Every card resolves somehow: options to choose, a modifier-draw
+  // game, or a choice-free resolution. A card with a flip-card effect
+  // must have a back to flip to.
   for (const card of allCards) {
     assert.ok(
-      card.options.length > 0 || card.game,
-      `${card.id} has no options and no game`,
+      card.options.length > 0 || card.game || card.resolution,
+      `${card.id} has no options, no game, and no resolution`,
     );
+    if (card.resolution?.effects.some((e) => e.kind === 'flip-card')) {
+      assert.ok(card.flipped, `${card.id} flips but has no back`);
+    }
     if (card.game) {
       const bands = card.game.results.map((r) => r.draw);
       assert.equal(

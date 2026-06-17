@@ -99,6 +99,15 @@ export function createMonsterModifierDeck(): ModifierCardInstance[] {
 }
 
 
+/** Shuffle a single card into an existing deck (leaving the discard pile
+ *  untouched). Used by Bless/Curse, which slide a card into the live deck. */
+export function shuffleCardIntoDeck(
+  deck: ModifierCardInstance[],
+  card: ModifierCardInstance,
+): ModifierCardInstance[] {
+  return shuffleInPlace([...deck, card]);
+}
+
 /** Combine deck + discard, shuffle, return as the new deck. */
 export function reshuffleModifierDeck(
   deck: ModifierCardInstance[],
@@ -121,15 +130,25 @@ export function applyModifierToAttack(
   if (card.kind === 'flat') return Math.max(0, base + card.amount);
   if (card.kind === 'null') return 0;
   if (card.kind === 'crit') return base * 2;
+  // Bless acts as a ×2, Curse as a Null (conditions.md).
+  if (card.kind === 'bless') return base * 2;
+  if (card.kind === 'curse') return 0;
   return base;
 }
 
-/** Whether a drawn card forces an end-of-turn reshuffle (Null or ×2). */
+/** Whether a drawn card forces an end-of-turn reshuffle (Null or ×2). Bless and
+ *  Curse carry no reshuffle icon — they return to the supply instead. */
 export function triggersReshuffle(card: ModifierCard): boolean {
   return card.kind === 'null' || card.kind === 'crit';
 }
 
-/** Short label for UI ("+1", "−2", "Null", "×2"). */
+/** A drawn Bless/Curse card is returned to the shared supply once resolved,
+ *  rather than going to the discard pile. */
+export function returnsToSupply(card: ModifierCard): boolean {
+  return card.kind === 'bless' || card.kind === 'curse';
+}
+
+/** Short label for UI ("+1", "−2", "Null", "×2", "Bless", "Curse"). */
 export function modifierLabel(card: ModifierCard): string {
   if (card.kind === 'flat') {
     if (card.amount === 0) return '+0';
@@ -138,5 +157,7 @@ export function modifierLabel(card: ModifierCard): string {
   }
   if (card.kind === 'null') return 'Null';
   if (card.kind === 'crit') return '×2';
+  if (card.kind === 'bless') return 'Bless';
+  if (card.kind === 'curse') return 'Curse';
   return '?';
 }

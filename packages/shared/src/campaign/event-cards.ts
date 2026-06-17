@@ -15,13 +15,30 @@ import type { FactionId } from './sheet.js';
 export type CharacterTrait =
   | 'arcane'
   | 'armored'
+  | 'chaotic'
   | 'educated'
+  | 'hero'
+  | 'indebted'
   | 'intimidating'
   | 'nimble'
   | 'outcast'
   | 'persuasive'
   | 'resourceful'
   | 'strong';
+
+/** Character ancestries referenced by event requirements ("SELECTED
+ *  CHARACTER IS QUATRYL, VERMLING, AESTHER, OR HARROWER"). Grows as cards
+ *  referencing new ancestries are entered. */
+export type CharacterAncestry =
+  | 'aesther'
+  | 'harrower'
+  | 'human'
+  | 'inox'
+  | 'orchid'
+  | 'quatryl'
+  | 'savvas'
+  | 'valrath'
+  | 'vermling';
 
 /** Conditions handed out by event outcomes (docs/rules/conditions.md). */
 export type EventCondition =
@@ -41,7 +58,10 @@ export type EventRequirement =
   | {
       kind: 'traits';
       /** A trait counts as present when at least one participating character
-       *  has it — different characters may cover different traits. */
+       *  has it — different characters may cover different traits. In
+       *  single-character contexts (e.g. a storybook check on the selected
+       *  character, "SELECTED CHARACTER IS CHAOTIC"), only that character's
+       *  traits count. */
       traits: readonly CharacterTrait[];
       /** 'all': every listed trait must be present ("ARCANE AND INTIMIDATING").
        *  'any': one listed trait suffices ("ARMORED, NIMBLE, or STRONG"). */
@@ -79,6 +99,37 @@ export type EventRequirement =
       /** A participating character has the named Personal Quest. */
       kind: 'personal-quest';
       name: string;
+    }
+  | {
+      /** A participating character owns the item ("If a character owns
+       *  'Steel Ring' †102..."). */
+      kind: 'owns-item';
+      printedNumber: number;
+      itemId?: string;
+      name?: string;
+    }
+  | {
+      /** A character's ancestry is one of those listed. Like trait
+       *  checks, met when any participating character qualifies
+       *  ("ORCHID: ..."); in single-character contexts ("SELECTED
+       *  CHARACTER IS QUATRYL, VERMLING, AESTHER, OR HARROWER") only the
+       *  character the resolution is about counts. */
+      kind: 'ancestry';
+      ancestries: readonly CharacterAncestry[];
+    }
+  | {
+      /** A summed check over the characters at a task (75.4's fire):
+       *  one point per listed trait/ancestry instance they have, minus
+       *  one per `subtract` instance ("Add up the PERSUASIVE,
+       *  INTIMIDATING, AND RESOURCEFUL you have. Subtract one for each
+       *  CHAOTIC you have."). Met when the sum exceeds the party's
+       *  character count minus one ("SUM > C-1"). NPC helpers' printed
+       *  traits count too. */
+      kind: 'trait-sum';
+      /** Task heading as printed ("Herding the crowd"). */
+      task?: string;
+      add: readonly (CharacterTrait | CharacterAncestry)[];
+      subtract?: readonly (CharacterTrait | CharacterAncestry)[];
     };
 
 export type EventEffect =
@@ -163,9 +214,11 @@ export type EventEffect =
       number: number;
     }
   | {
-      /** The single character gains gold (in a modifier-draw game, the
-       *  character who drew the card) — unlike 'collective-gold', which
-       *  goes to the party pool. */
+      /** Gold gained per character rather than into the party pool
+       *  ('collective-gold'): each affected character gains this much —
+       *  the one character in single-character contexts (a modifier-draw
+       *  game, an owns-item bonus), every participant for "Each character
+       *  gains 10 gold". */
       kind: 'character-gold';
       amount: number;
     }
@@ -211,13 +264,21 @@ export type EventEffect =
   | {
       /** Extra effects that apply only when the requirement is met, on
        *  top of the outcome's other effects ("PERSUASIVE: Gain 10
-       *  additional collective gold"). No otherwise-branch — unmet just
-       *  means no bonus. */
+       *  additional collective gold"). */
       kind: 'bonus';
       requirement: EventRequirement;
       /** Thematic line read when the bonus applies. */
       text?: string;
       effects: readonly EventEffect[];
+      /** Branch applied instead when the requirement is NOT met — only
+       *  when the card prints an OTHERWISE line for the bonus ("If a
+       *  character owns 'Steel Ring', they gain 15 gold. OTHERWISE: Gain
+       *  'Steel Ring'."). Absent = unmet means no bonus. */
+      otherwise?: {
+        /** Thematic line read when the requirement is not met. */
+        text?: string;
+        effects: readonly EventEffect[];
+      };
     }
   | {
       /** The wrapped effects apply only to participating characters who
@@ -237,22 +298,84 @@ export type EventEffect =
       eventId: string;
     }
   | {
-      /** Each participating character permanently gains the trait,
-       *  marked on their character sheet ("Each character gains
-       *  EDUCATED"). */
+      /** Each affected character permanently gains the trait, marked on
+       *  their character sheet ("Each character gains EDUCATED"; the one
+       *  character inside 'for-selected-character'). */
       kind: 'gain-trait';
       trait: CharacterTrait;
     }
   | {
-      /** Gain one random item design (unlocks a random item for purchase). */
+      /** Gain one random item design (unlocks a random item for
+       *  purchase). */
       kind: 'random-item-design';
+      /** Designs drawn to pick ONE from, the rest returning to their
+       *  deck ("Draw 3 random item designs and choose 1, returning the
+       *  other 2 to their deck" = 3). Default 1 — no choice. */
+      draw?: number;
+      /** Also immediately gain one copy of the item ("Gain 1 random
+       *  item design and immediately gain that item"). */
+      gainItem?: boolean;
     }
   | {
       /** Gain (positive amount) or lose (negative) reputation with the
-       *  faction, clamped to the campaign sheet's track. */
+       *  faction, clamped to the campaign sheet's track. 'choice' = the
+       *  party picks the faction(s) ("Gain 1 reputation with any one
+       *  faction of your choice"). */
       kind: 'faction-reputation-change';
-      faction: FactionId;
+      faction: FactionId | 'choice';
+      /** How many DISTINCT factions to pick when faction is 'choice',
+       *  each changed by `amount` ("Lose 1 reputation with any two
+       *  factions of your choice" = 2). Default 1. */
+      chooseCount?: number;
+      /** Factions the 'choice' is limited to ("Lose 1 [merchants] or
+       *  [military] reputation"). Absent = any faction. */
+      choiceOf?: readonly FactionId[];
       amount: number;
+    }
+  | {
+      /** "Read 63.2.": the outcome is resolved entirely by a storybook
+       *  section — read it and apply its rewards. */
+      kind: 'read-section';
+      section: string;
+    }
+  | {
+      /** "Select one character to ...": the party picks one character and
+       *  the wrapped effects apply to them alone. */
+      kind: 'for-selected-character';
+      effects: readonly EventEffect[];
+    }
+  | {
+      /** The character's maximum hit point value permanently changes by
+       *  this much (negative = decrease), noted on their character
+       *  sheet. */
+      kind: 'max-hp-change';
+      amount: number;
+    }
+  | {
+      /** "Collectively gain any one item from †001 - †014": the party
+       *  picks any ONE item in the printed-number range. */
+      kind: 'gain-item-from-range';
+      fromPrintedNumber: number;
+      toPrintedNumber: number;
+    }
+  | {
+      /** Adjusts later trait-sum checks in the same resolution ("Add
+       *  one to the other two checks", "Subtract one from the following
+       *  rescue check"). */
+      kind: 'adjust-checks';
+      amount: number;
+      /** 'remaining': every later check; 'next': only the next one. */
+      target: 'remaining' | 'next';
+    }
+  | {
+      /** "Read the section below corresponding to the ancestry of the
+       *  selected character": a lookup table from ancestry to storybook
+       *  section, with an 'other' row as the fallback. */
+      kind: 'ancestry-section';
+      sections: readonly {
+        ancestry: CharacterAncestry | 'other';
+        readSection: string;
+      }[];
     };
 
 /** A resolution procedure driven by attack modifier draws instead of an
@@ -311,10 +434,15 @@ export interface EventCard {
   id: string;
   /** Thematic text on the front of the card. */
   front: string;
-  /** Empty for cards resolved by a `game` instead of an A/B choice. */
+  /** Empty for cards resolved by a `game` or a `resolution` instead of
+   *  an A/B choice. */
   options: readonly EventCardOption[];
   /** Modifier-draw procedure replacing the usual options (e.g. R-07). */
   game?: ModifierDrawGame;
+  /** Choice-free resolution replacing the usual options — instructions
+   *  followed immediately ("Select a character to step up to the
+   *  challenger, then flip this card."). */
+  resolution?: EventOutcome;
   /** The card's back, for cards whose back is reached via a 'flip-card'
    *  effect rather than holding per-option outcomes. */
   flipped?: EventOutcome;

@@ -94,32 +94,54 @@ describe('Shop undo (same-session purchase)', () => {
     const fx = makeFixture();
     fx.character.gold = 100;
 
-    const buy = fx.room.buyItem(fx.player.playerId, 'leather-boots');
+    const buy = fx.room.buyItem(fx.player.playerId, 'weathered-boots');
     assert.equal(buy.ok, true);
     assert.equal(fx.character.gold, 85, 'gold debited by item cost (15)');
-    assert.ok(fx.character.ownedItemIds.includes('leather-boots'));
-    assert.ok(fx.character.sessionPurchasedItemIds.includes('leather-boots'));
-    const stockAfterBuy = (fx.room.campaign.shop ?? []).find((s) => s.itemId === 'leather-boots');
+    assert.ok(fx.character.ownedItemIds.includes('weathered-boots'));
+    assert.ok(fx.character.sessionPurchasedItemIds.includes('weathered-boots'));
+    const stockAfterBuy = (fx.room.campaign.shop ?? []).find((s) => s.itemId === 'weathered-boots');
     const remainingAfterBuy = stockAfterBuy?.remaining ?? 0;
 
-    const undo = fx.room.undoBuyItem(fx.player.playerId, 'leather-boots');
+    const undo = fx.room.undoBuyItem(fx.player.playerId, 'weathered-boots');
     assert.equal(undo.ok, true);
     assert.equal(fx.character.gold, 100, 'gold fully refunded');
-    assert.ok(!fx.character.ownedItemIds.includes('leather-boots'));
-    assert.ok(!fx.character.broughtItemIds.includes('leather-boots'));
-    assert.ok(!fx.character.sessionPurchasedItemIds.includes('leather-boots'));
-    const stockAfterUndo = (fx.room.campaign.shop ?? []).find((s) => s.itemId === 'leather-boots');
+    assert.ok(!fx.character.ownedItemIds.includes('weathered-boots'));
+    assert.ok(!fx.character.broughtItemIds.includes('weathered-boots'));
+    assert.ok(!fx.character.sessionPurchasedItemIds.includes('weathered-boots'));
+    const stockAfterUndo = (fx.room.campaign.shop ?? []).find((s) => s.itemId === 'weathered-boots');
     assert.equal((stockAfterUndo?.remaining ?? 0), remainingAfterBuy + 1, 'item returned to stock');
   });
 
   it('refuses to undo an item not bought this session', () => {
     const fx = makeFixture();
     // Owned from a previous trip (not in sessionPurchasedItemIds).
-    fx.character.ownedItemIds.push('leather-boots');
+    fx.character.ownedItemIds.push('weathered-boots');
 
-    const undo = fx.room.undoBuyItem(fx.player.playerId, 'leather-boots');
+    const undo = fx.room.undoBuyItem(fx.player.playerId, 'weathered-boots');
     assert.equal(undo.ok, false);
     assert.equal((undo as { reason: string }).reason, 'not_bought_this_session');
-    assert.ok(fx.character.ownedItemIds.includes('leather-boots'), 'still owned');
+    assert.ok(fx.character.ownedItemIds.includes('weathered-boots'), 'still owned');
+  });
+});
+
+describe('Shop reputation gate', () => {
+  it('blocks a gated item below the faction threshold and allows it at/above', () => {
+    const fx = makeFixture();
+    fx.character.gold = 100;
+    // Studded Leather (†014) requires Military reputation ≥ 3 and isn't in
+    // the starting stock — stock it for the test.
+    fx.room.campaign.shop = [
+      ...(fx.room.campaign.shop ?? []),
+      { itemId: 'studded-leather', remaining: 2 },
+    ];
+
+    const blocked = fx.room.buyItem(fx.player.playerId, 'studded-leather');
+    assert.equal(blocked.ok, false);
+    assert.equal((blocked as { reason: string }).reason, 'reputation_too_low');
+
+    fx.room.campaign.sheet!.reputation.military = 3;
+    const bought = fx.room.buyItem(fx.player.playerId, 'studded-leather');
+    assert.equal(bought.ok, true);
+    assert.ok(fx.character.ownedItemIds.includes('studded-leather'));
   });
 });

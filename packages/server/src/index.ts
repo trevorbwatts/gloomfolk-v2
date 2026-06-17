@@ -327,6 +327,8 @@ async function handle(
         msg.actionId,
         msg.targetUnitId,
         msg.targetCardId,
+        msg.targetHex,
+        msg.springOnUnitId,
       );
       if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
@@ -430,6 +432,19 @@ async function handle(
     case 'player_short_rest_accept': {
       if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
       rooms.get(conn.campaignId)?.shortRestAccept(conn.playerId);
+      return;
+    }
+
+    case 'player_short_rest_refresh': {
+      if (conn.role !== 'player' || !conn.campaignId || !conn.playerId) return;
+      const r = rooms.get(conn.campaignId);
+      if (!r) return;
+      const result = r.shortRestRefreshItems(
+        conn.playerId,
+        msg.itemId,
+        msg.refreshItemIds,
+      );
+      if (!result.ok) send(ws, { type: 'error', message: result.reason });
       return;
     }
 

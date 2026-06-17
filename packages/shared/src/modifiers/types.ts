@@ -78,6 +78,18 @@ export interface CritModifier {
   readonly kind: 'crit';
 }
 
+/** A Bless card shuffled in by the Bless condition. Resolves as a ×2 and is
+ *  returned to the shared supply (not discarded) once drawn. */
+export interface BlessModifier {
+  readonly kind: 'bless';
+}
+
+/** A Curse card shuffled in by the Curse condition. Resolves as a Null (×0)
+ *  and is returned to the shared supply (not discarded) once drawn. */
+export interface CurseModifier {
+  readonly kind: 'curse';
+}
+
 /**
  * Rolling modifier. When drawn, its bonus and effects are added to the
  * attack and another modifier card is drawn. Rolling cards do not end the
@@ -94,4 +106,6 @@ export type ModifierCard =
   | FlatModifier
   | NullModifier
   | CritModifier
+  | BlessModifier
+  | CurseModifier
   | RollingModifier;

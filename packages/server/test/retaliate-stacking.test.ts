@@ -42,6 +42,19 @@ describe('retaliate stacking', () => {
     assert.equal(m.hp, 2, 'monster takes the combined retaliate (3)');
   });
 
+  it('ignores the attacker monster\'s Shield (retaliate is not an attack)', () => {
+    const { room, player, unit } = makeFixture();
+    grantRetaliate(player, 3, 1);
+
+    // Shield 2 would soak an attack, but retaliate is not an attack — per
+    // shield-retaliate-summon.md, Shield does not reduce it.
+    const m = addMonster(room, { id: 'm1', hex: { q: 1, r: 0 }, hp: 5, shield: 2 });
+    resolveMonsterAttack(room, m, unit, 1);
+
+    // 5 hp - full 3 retaliate (Shield ignored) = 2.
+    assert.equal(m.hp, 2, 'Shield does not reduce retaliate damage');
+  });
+
   it('excludes out-of-range effects from the sum', () => {
     const { room, player, unit } = makeFixture();
     grantRetaliate(player, 1, 1); // reaches an adjacent attacker

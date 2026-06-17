@@ -60,6 +60,19 @@ export interface Unit {
    *  (mirrors negative-condition ticking via `invisibleAppliedThisTurn`). */
   invisible?: boolean;
   invisibleAppliedThisTurn?: boolean;
+  /** Strengthen (positive condition). When true, the figure gains Advantage on
+   *  all of its attacks. Cleared at the end of this figure's NEXT turn
+   *  (mirrors invisible ticking via `strengthenAppliedThisTurn`). */
+  strengthen?: boolean;
+  strengthenAppliedThisTurn?: boolean;
+  /** Ward (positive condition). The next time the figure suffers damage from
+   *  any source, it is halved (rounded down) and ward is then removed. Not a
+   *  turn-timed condition — it persists until that one damage instance. */
+  ward?: boolean;
+  /** Safeguard (positive condition). The next time the figure would gain one
+   *  or more negative conditions, one of them is prevented and safeguard is
+   *  removed. Persists until consumed. */
+  safeguard?: boolean;
   /** For monsters: the standee number (1..type's standeeCount), drawn at random
    *  on placement and unique per type this scenario. Identifies the figure and
    *  breaks acting-order ties within a rank. Undefined for players and when a
@@ -793,6 +806,10 @@ export interface CurrentTurn {
   /** True when a used item (e.g. Winged Shoes) has granted Jump to all of
    *  this turn's move abilities. Applied to move actions as they are built. */
   jumpAllMoves: boolean;
+  /** Extra Range added to every ranged attack (printed Range 2+) this turn
+   *  by a used item (e.g. Telescopic Lens). Baked into attack actions' range
+   *  as they are built; 0 when none is active. */
+  rangedRangeBonus: number;
   /** Armed when a used item (e.g. Scouting Lens) grants Pierce to the next
    *  attack you perform this turn. Rides along with whatever target that
    *  attack hits; cleared once it's applied to a resolving attack. */
@@ -803,6 +820,13 @@ export interface CurrentTurn {
   /** Armed when a used item (e.g. Simple Bow) grants Advantage to the next
    *  ranged attack you perform this turn. Cleared once that attack resolves. */
   advantageCharge: boolean;
+  /** Armed when a used item (e.g. Eagle-Eye Goggles) grants Advantage to
+   *  every attack of ONE attack ability ("during your attack ability, gain
+   *  advantage on all attacks"). `boundActionId` is null while armed but not
+   *  yet riding an ability; it latches onto the first attack ability that
+   *  resolves an attack, applies to all of that ability's attacks/targets,
+   *  and clears when that ability finishes (or is skipped). */
+  advantageAbilityCharge: { boundActionId: string | null } | null;
   /** True once this turn the actor has performed an action from a card half
    *  with the Lost disposition. Gates items like Focusing Rod. */
   performedLostAction: boolean;
@@ -920,6 +944,12 @@ export type ClientToServer =
       /** Target card to designate for items that act on a card (e.g. Stamina
        *  Potion retrieving a discarded card). */
       targetCardId?: string;
+      /** Target hex to designate for items that act on a board location (e.g.
+       *  Curious Gear destroying/springing a trap). */
+      targetHex?: Hex;
+      /** When springing a trap (Curious Gear), the adjacent enemy to apply the
+       *  trap's effects to. Omitted to simply destroy the trap. */
+      springOnUnitId?: string;
     }
   /** Answer an outstanding pendingReactiveItem prompt during a monster attack. */
   | { type: 'player_respond_reactive_item'; spend: boolean }
@@ -959,6 +989,13 @@ export type ClientToServer =
   | { type: 'player_short_rest' }
   | { type: 'player_short_rest_reroll' }
   | { type: 'player_short_rest_accept' }
+  /** Spend a refresh-spent-items item (Moon Earring) while a short rest is
+   *  pending: the chosen spent items become usable again. */
+  | {
+      type: 'player_short_rest_refresh';
+      itemId: string;
+      refreshItemIds: string[];
+    }
   | { type: 'player_unsubmit' }
   | { type: 'end_turn' }
   | { type: 'player_open_door'; doorId: string }

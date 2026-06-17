@@ -237,6 +237,21 @@ function UnitStatusStrip({ unit }: { unit: Unit }) {
           <GameIcon kind="invisible" size={14} />
         </StatusChip>
       )}
+      {unit.strengthen && (
+        <StatusChip>
+          <GameIcon kind="strengthen" size={14} />
+        </StatusChip>
+      )}
+      {unit.ward && (
+        <StatusChip>
+          <GameIcon kind="ward" size={14} />
+        </StatusChip>
+      )}
+      {unit.safeguard && (
+        <StatusChip>
+          <GameIcon kind="safeguard" size={14} />
+        </StatusChip>
+      )}
       {[...conditionCounts.entries()].map(([kind, count]) => (
         <StatusChip key={kind}>
           <GameIcon kind={kind} size={14} />
@@ -952,9 +967,9 @@ function ModifierCardFace({
   card: ModifierCard;
   muted: boolean;
 }) {
-  const isCrit = card.kind === 'crit';
-  const isNull = card.kind === 'null';
-  const accent = isCrit ? theme.accent : isNull ? theme.bad : theme.border;
+  const isGood = card.kind === 'crit' || card.kind === 'bless';
+  const isBad = card.kind === 'null' || card.kind === 'curse';
+  const accent = isGood ? theme.accent : isBad ? theme.bad : theme.border;
   return (
     <div
       style={{
@@ -969,7 +984,7 @@ function ModifierCardFace({
         fontWeight: 700,
         fontFamily: theme.headingFont,
         fontSize: label.length > 2 ? 16 : 24,
-        color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+        color: isGood ? theme.accent : isBad ? theme.bad : theme.text,
         opacity: muted ? 0.55 : 1,
       }}
     >

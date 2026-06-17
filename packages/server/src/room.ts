@@ -44,6 +44,7 @@ import type {
   MonsterTurnAnim,
   MoveAnimation,
   NegativeCondition,
+  PositiveCondition,
   PendingAction,
   PendingElementChoice,
   PendingTrapChoice,
@@ -116,6 +117,8 @@ import {
   modifierLabel,
   MONEY_TOKEN_CAP,
   reshuffleModifierDeck,
+  returnsToSupply,
+  shuffleCardIntoDeck,
   rotateHexN,
   rotatePattern,
   scoutDeck,
@@ -229,7 +232,13 @@ function unlockedSlot(): HalfSlot {
  */
 function applyDamage(target: Unit, attackAmount: number, pierce: number): number {
   const effShield = Math.max(0, target.shield - pierce);
-  const dmg = Math.max(0, attackAmount - effShield);
+  let dmg = Math.max(0, attackAmount - effShield);
+  // Ward halves the next damage the figure suffers (rounded down, after Shield),
+  // then is removed (conditions.md). Applies to any non-zero damage instance.
+  if (dmg > 0 && target.ward) {
+    dmg = Math.floor(dmg / 2);
+    target.ward = false;
+  }
   target.hp -= dmg;
   return dmg;
 }
@@ -247,8 +256,13 @@ function drawModifier(p: PlayerEntry): ModifierCardInstance {
     p.modifierNeedsReshuffle = false;
   }
   const drawn = p.modifierDeck.shift()!;
-  p.modifierDiscard.push(drawn);
-  if (triggersReshuffle(drawn.card)) p.modifierNeedsReshuffle = true;
+  // Bless/Curse return to the shared supply once resolved — they leave the
+  // deck entirely rather than going to the discard pile (so they're never
+  // reshuffled back in). Neither carries a reshuffle icon.
+  if (!returnsToSupply(drawn.card)) {
+    p.modifierDiscard.push(drawn);
+    if (triggersReshuffle(drawn.card)) p.modifierNeedsReshuffle = true;
+  }
   return drawn;
 }
 
@@ -392,13 +406,21 @@ function retaliateAgainst(p: PlayerEntry, dist: number): { amount: number } | nu
  * true if the unit is currently taking its own turn (so the condition survives
  * the upcoming end-of-turn tick and is cleaned at the end of the next turn).
  */
-function applyConditionToUnit(unit: Unit, kind: NegativeCondition, isOwnTurn: boolean): void {
+function applyConditionToUnit(unit: Unit, kind: NegativeCondition, isOwnTurn: boolean): boolean {
+  // Safeguard prevents the next negative condition the figure would gain, then
+  // is removed (conditions.md). When several would land at once the rules let
+  // the player pick which to block; here we auto-block the first one applied.
+  if (unit.safeguard) {
+    unit.safeguard = false;
+    return false;
+  }
   const existing = unit.conditions.find((c) => c.kind === kind);
   if (existing) {
     existing.appliedThisTurn = isOwnTurn;
   } else {
     unit.conditions.push({ kind, appliedThisTurn: isOwnTurn });
   }
+  return true;
 }
 
 /**
@@ -424,6 +446,14 @@ function tickConditionsEndOfTurn(unit: Unit): NegativeCondition[] {
       unit.invisibleAppliedThisTurn = false;
     } else {
       unit.invisible = false;
+    }
+  }
+  // Strengthen (positive condition) ticks identically to Invisible.
+  if (unit.strengthen) {
+    if (unit.strengthenAppliedThisTurn) {
+      unit.strengthenAppliedThisTurn = false;
+    } else {
+      unit.strengthen = false;
     }
   }
   return removed;
@@ -925,6 +955,8 @@ export class Room {
   monsterModifierDeck: ModifierCardInstance[] = [];
   monsterModifierDiscard: ModifierCardInstance[] = [];
   monsterModifierNeedsReshuffle = false;
+  /** Monotonic counter for stable ids on Bless/Curse cards slid into decks. */
+  private blessCurseSeq = 0;
   /** Step-by-step animation state for the active monster group turn. The
    *  generator advances one yield per ~MONSTER_ANIM_STEP_MS; clients see one
    *  spotlight + arrow + modifier flip per step. Null when no monster group
@@ -1876,21 +1908,28 @@ export class Room {
   }
 
   /**
-   * Apply non-attack damage to a unit (traps, hazards). Mirrors the tail of the
-   * monster-attack flow without the modifier-draw/attack-only bits: existing
-   * shield reduces it, the `damage-suffered` tracked trigger may negate it, the
-   * battle-goal signals fire (`fromAttack: false`), and a unit reduced to 0 HP
-   * is exhausted/killed. Returns the damage actually dealt.
+   * Apply non-attack damage to a unit (traps, hazards, "suffer X" effects).
+   * Mirrors the tail of the monster-attack flow without the modifier-draw and
+   * attack-only bits. Per shield-retaliate-summon.md, **Shield does not apply to
+   * sources of damage that are not attacks**, so no shield reduction happens
+   * here. The `damage-suffered` tracked trigger may still negate it, Ward halves
+   * it, the battle-goal signals fire (`fromAttack: false`), and a unit reduced to
+   * 0 HP is exhausted/killed. Returns the damage actually dealt.
    */
   private sufferDamage(unit: Unit, amount: number, source: string): number {
     if (amount <= 0) return 0;
     const playerEntry = unit.ownerPlayerId ? this.players.get(unit.ownerPlayerId) : null;
-    let effShield = Math.max(0, unit.shield);
-    if (playerEntry) effShield += this.consumeActiveItemShield(playerEntry);
-    let dmg = Math.max(0, amount - effShield);
+    let dmg = amount;
     if (dmg > 0 && playerEntry) {
       const result = this.fireTrackedTrigger(playerEntry, 'damage-suffered');
       if (result.damageNegated || this.consumeNegateNextDamage(playerEntry)) dmg = 0;
+    }
+    // Ward halves the next damage suffered from any source (rounded down).
+    if (dmg > 0 && unit.ward) {
+      const before = dmg;
+      dmg = Math.floor(dmg / 2);
+      unit.ward = false;
+      this.pushEvent(`${unit.name}'s Ward halves ${source} damage (${before} → ${dmg}).`);
     }
     unit.hp -= dmg;
     const cid = this.charIdForUnit(unit);
@@ -2047,8 +2086,9 @@ export class Room {
     return recovered;
   }
 
-  /** Id of an unspent, brought `disadvantage-when-attacked` item the player
-   *  could spend in reaction to an incoming attack, or null if none. */
+  /** Id of an unspent, brought `disadvantage-when-attacked` (or
+   *  `disadvantage-and-shield-when-attacked`, e.g. Studded Leather) item the
+   *  player could spend in reaction to an incoming attack, or null if none. */
   private findReactiveDisadvantageItem(p: PlayerEntry): string | null {
     const instance = this.campaign.characters.find(
       (c) => c.id === p.activeCharacterId,
@@ -2056,23 +2096,44 @@ export class Room {
     if (!instance) return null;
     for (const id of instance.broughtItemIds) {
       if (instance.spentItemIds.includes(id)) continue;
-      if (getItem(id)?.effect.kind === 'disadvantage-when-attacked') return id;
+      const kind = getItem(id)?.effect.kind;
+      if (
+        kind === 'disadvantage-when-attacked' ||
+        kind === 'disadvantage-and-shield-when-attacked'
+      ) {
+        return id;
+      }
     }
     return null;
   }
 
-  /** Id of an unspent, brought `shield-when-attacked` item the player could
-   *  spend in reaction to an incoming attack, or null if none. */
-  private findReactiveShieldItem(p: PlayerEntry): string | null {
+  /** Id of an unspent, brought `counter-attack` item (e.g. Heavy Mace) the
+   *  player could spend after being attacked by an adjacent enemy, or null. */
+  private findReactiveCounterAttackItem(p: PlayerEntry): string | null {
     const instance = this.campaign.characters.find(
       (c) => c.id === p.activeCharacterId,
     );
     if (!instance) return null;
     for (const id of instance.broughtItemIds) {
       if (instance.spentItemIds.includes(id)) continue;
-      if (getItem(id)?.effect.kind === 'shield-when-attacked') return id;
+      if (getItem(id)?.effect.kind === 'counter-attack') return id;
     }
     return null;
+  }
+
+  /** Ids of all unspent, brought `shield-when-attacked` items the player
+   *  could spend in reaction to an incoming attack. Multiple may be spent on
+   *  the same attack — shield bonuses stack (shield-retaliate-summon.md). */
+  private findReactiveShieldItems(p: PlayerEntry): string[] {
+    const instance = this.campaign.characters.find(
+      (c) => c.id === p.activeCharacterId,
+    );
+    if (!instance) return [];
+    return instance.broughtItemIds.filter(
+      (id) =>
+        !instance.spentItemIds.includes(id) &&
+        getItem(id)?.effect.kind === 'shield-when-attacked',
+    );
   }
 
   private fireTrackedTrigger(
@@ -2286,6 +2347,55 @@ export class Room {
     return { ok: true };
   }
 
+  /** Spend a refresh-spent-items item (Moon Earring) during a short rest:
+   *  the chosen spent items become usable again, and the earring itself is
+   *  spent. Only while the short rest is still pending — the item's window
+   *  is "when you short rest". */
+  shortRestRefreshItems(
+    playerId: string,
+    itemId: string,
+    refreshItemIds: readonly string[],
+  ): { ok: true } | { ok: false; reason: string } {
+    if (this.phase !== 'card_select') return { ok: false, reason: 'wrong_phase' };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, reason: 'no_player' };
+    if (!p.shortRestPending) return { ok: false, reason: 'no_pending_short_rest' };
+    const instance = this.campaign.characters.find(
+      (c) => c.id === p.activeCharacterId,
+    );
+    if (!instance) return { ok: false, reason: 'no_character' };
+    if (!instance.broughtItemIds.includes(itemId)) {
+      return { ok: false, reason: 'item_not_brought' };
+    }
+    if (instance.spentItemIds.includes(itemId)) {
+      return { ok: false, reason: 'item_already_spent' };
+    }
+    const item = getItem(itemId);
+    if (!item || item.effect.kind !== 'refresh-spent-items') {
+      return { ok: false, reason: 'wrong_item' };
+    }
+    const chosen = [...new Set(refreshItemIds)].filter((id) => id !== itemId);
+    if (chosen.length === 0 || chosen.length > item.effect.count) {
+      return { ok: false, reason: 'bad_refresh_selection' };
+    }
+    if (!chosen.every((id) => instance.spentItemIds.includes(id))) {
+      return { ok: false, reason: 'item_not_spent' };
+    }
+    instance.spentItemIds = instance.spentItemIds.filter(
+      (id) => !chosen.includes(id),
+    );
+    instance.spentItemIds.push(itemId);
+    const names = chosen
+      .map((id) => getItem(id)?.name ?? id)
+      .join(', ');
+    this.pushEvent(
+      `${this.playerDisplayName(p)} uses ${item.name}: refreshes ${names}.`,
+    );
+    void this.persist();
+    this.broadcastState();
+    return { ok: true };
+  }
+
   unsubmit(playerId: string): void {
     if (this.phase !== 'card_select') return;
     const p = this.players.get(playerId);
@@ -2417,6 +2527,13 @@ export class Room {
     // it to moves in this freshly-built queue too.
     if (ct.jumpAllMoves) {
       for (const a of actions) if (a.type === 'move') a.jump = true;
+    }
+    // Telescopic Lens granted +Range to every ranged attack this turn — apply
+    // it to ranged attacks (printed Range 2+) in this freshly-built queue too.
+    if (ct.rangedRangeBonus > 0) {
+      for (const a of actions) {
+        if (a.type === 'attack' && a.range > 1) a.range += ct.rangedRangeBonus;
+      }
     }
 
     target.status = 'engaged';
@@ -2936,7 +3053,17 @@ export class Room {
         // target (distance 1) auto-gains Disadvantage (RAW, target-adjacent).
         // Simple Bow rides along with the next ranged attack you perform.
         const chargeAdvantage = ct.advantageCharge && attackKind === 'ranged';
-        const hasAdvantage = chargeAdvantage || cardCond.advantage;
+        // Eagle-Eye Goggles: advantage on every attack of one attack ability.
+        // Latch the charge onto this ability on its first attack; it then
+        // applies to all of this ability's targets and clears when done.
+        const goggles = ct.advantageAbilityCharge;
+        const gogglesApplies =
+          !!goggles &&
+          (goggles.boundActionId === null || goggles.boundActionId === action.id);
+        if (goggles && gogglesApplies) goggles.boundActionId = action.id;
+        // Strengthen on the attacker grants Advantage on all its attacks.
+        const hasAdvantage =
+          chargeAdvantage || gogglesApplies || cardCond.advantage || !!unit.strengthen;
         const autoDisadvantage = action.range > 1 && dist === 1;
         const drawMode = resolveAdvantage(hasAdvantage, autoDisadvantage);
         // The Simple Bow charge is consumed on this attack even if it cancelled
@@ -3016,8 +3143,11 @@ export class Room {
               targetPriorNegativeConditions: tgt.conditions.map((c) => c.kind),
             });
           }
-          applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
-          this.pushEvent(`${tgt.name} is Poisoned.`);
+          if (applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false)) {
+            this.pushEvent(`${tgt.name} is Poisoned.`);
+          } else {
+            this.pushEvent(`${tgt.name}'s Safeguard prevents Poison.`);
+          }
         }
         if (poisonRides) ct.poisonCharge = false;
         // Conditions printed below this attack (e.g. Shield Bash's Stun) ride on
@@ -3055,6 +3185,10 @@ export class Room {
         // isolated target). Granted once per matching target hit.
         if (cardCond.exp > 0) this.grantXp(guard.p, cardCond.exp, 'conditional bonus');
         if (action.targetsRemaining <= 0) action.done = true;
+        // The goggles charge clears once the ability it bound to is done.
+        if (action.done && ct.advantageAbilityCharge?.boundActionId === action.id) {
+          ct.advantageAbilityCharge = null;
+        }
         break;
       }
       case 'attack-aoe': {
@@ -3092,6 +3226,15 @@ export class Room {
         if (!action.consumesLocked) {
           this.lockConsumeOffers(action, guard.p);
         }
+        // Eagle-Eye Goggles: an AOE is one attack ability; latch the charge
+        // onto it so every target draws with Advantage, then clear below.
+        const gogglesAoe = ct.advantageAbilityCharge;
+        const gogglesAoeApplies =
+          !!gogglesAoe &&
+          (gogglesAoe.boundActionId === null || gogglesAoe.boundActionId === action.id);
+        // Strengthen on the attacker grants Advantage on every attack of the
+        // AOE the same way the goggles charge does.
+        const aoeAdvantage = gogglesAoeApplies || !!unit.strengthen;
         let hitCount = 0;
         for (const hex of aoeHexes) {
           const tgt = this.units.find((u) => u.kind === 'monster' && hexEqual(u.hex, hex));
@@ -3120,8 +3263,20 @@ export class Room {
           // Per-target conditional triggers (isolated/shielded/invisible).
           // AOE attacks are treated as melee for the shielded check.
           this.fireAttackConditionalTriggers(guard.p, unit, tgt, 'melee');
-          const drawn = drawModifier(guard.p);
-          const finalAmount = applyModifierToAttack(baseAmount, drawn.card);
+          let drawn = drawModifier(guard.p);
+          let finalAmount = applyModifierToAttack(baseAmount, drawn.card);
+          // Eagle-Eye Goggles: every attack of this AOE ability draws with
+          // Advantage (no other source grants AOE advantage). The whole AOE
+          // resolves in this one call, so binding/clearing happens around the
+          // loop below.
+          if (aoeAdvantage) {
+            const second = drawModifier(guard.p);
+            const secondFinal = applyModifierToAttack(baseAmount, second.card);
+            if (secondFinal > finalAmount) {
+              drawn = second;
+              finalAmount = secondFinal;
+            }
+          }
           // Scouting Lens rides along with the first enemy this AOE hits.
           let itemPierce = 0;
           if (ct.pierceCharge) {
@@ -3165,8 +3320,11 @@ export class Room {
                 targetPriorNegativeConditions: tgt.conditions.map((c) => c.kind),
               });
             }
-            applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false);
-            this.pushEvent(`${tgt.name} is Poisoned.`);
+            if (applyConditionToUnit(tgt, 'poison', /*isOwnTurn*/ false)) {
+              this.pushEvent(`${tgt.name} is Poisoned.`);
+            } else {
+              this.pushEvent(`${tgt.name}'s Safeguard prevents Poison.`);
+            }
           }
           if (poisonRides) ct.poisonCharge = false;
           // Ridered conditions apply to every enemy the AOE hits.
@@ -3201,6 +3359,8 @@ export class Room {
         if (hitCount === 0) this.pushEvent(`${unit.name}'s AOE hits no enemies.`);
         action.hitsLanded = hitCount;
         action.done = true;
+        // The goggles charge is consumed by this single AOE ability.
+        if (gogglesAoeApplies) ct.advantageAbilityCharge = null;
         break;
       }
       case 'heal': {
@@ -3263,8 +3423,11 @@ export class Room {
             });
           }
         }
-        applyConditionToUnit(tgt, action.condition, /*isOwnTurn*/ false);
-        this.pushEvent(`${tgt.name} is ${action.condition}ed.`);
+        if (applyConditionToUnit(tgt, action.condition, /*isOwnTurn*/ false)) {
+          this.pushEvent(`${tgt.name} is ${action.condition}ed.`);
+        } else {
+          this.pushEvent(`${tgt.name}'s Safeguard prevents ${action.condition}.`);
+        }
         action.done = true;
         break;
       }
@@ -3492,6 +3655,11 @@ export class Room {
     const action = slot.actions.find((a) => a.id === actionId);
     if (!action) return { ok: false, reason: 'no_action' };
     action.done = true;
+    // If the goggles charge had latched onto this attack ability, skipping
+    // the rest of it consumes the charge (don't bleed into a later ability).
+    if (ct.advantageAbilityCharge?.boundActionId === action.id) {
+      ct.advantageAbilityCharge = null;
+    }
     if (action.type === 'push' || action.type === 'pull') {
       this.pendingForcedMove = null;
     }
@@ -3760,9 +3928,69 @@ export class Room {
       this.monsterModifierNeedsReshuffle = false;
     }
     const drawn = this.monsterModifierDeck.shift()!;
-    this.monsterModifierDiscard.push(drawn);
-    if (triggersReshuffle(drawn.card)) this.monsterModifierNeedsReshuffle = true;
+    // Bless/Curse return to the shared supply once resolved (see drawModifier).
+    if (!returnsToSupply(drawn.card)) {
+      this.monsterModifierDiscard.push(drawn);
+      if (triggersReshuffle(drawn.card)) this.monsterModifierNeedsReshuffle = true;
+    }
     return drawn;
+  }
+
+  /** Grant a positive condition (or Curse) to a figure.
+   *  - strengthen / invisible: a turn-timed flag that clears at the end of the
+   *    figure's next turn (`isOwnTurn` controls the one-turn grace, exactly like
+   *    the existing invisible handling).
+   *  - ward / safeguard: a one-shot flag consumed when it triggers (no turn clock).
+   *  - bless / curse: shuffle a Bless/Curse card into the figure's attack-
+   *    modifier deck (the figure's own deck for a player, the shared deck for a
+   *    monster). The 10-card shared supply cap is not enforced — it never binds
+   *    within a single scenario.
+   *  Returns false only when the condition has no effect (e.g. a bless/curse on a
+   *  figure with no usable modifier deck). */
+  private grantConditionToUnit(
+    unit: Unit,
+    condition: PositiveCondition | 'curse',
+    isOwnTurn: boolean,
+  ): boolean {
+    switch (condition) {
+      case 'strengthen':
+        unit.strengthen = true;
+        unit.strengthenAppliedThisTurn = isOwnTurn;
+        return true;
+      case 'invisible':
+        unit.invisible = true;
+        unit.invisibleAppliedThisTurn = isOwnTurn;
+        return true;
+      case 'ward':
+        unit.ward = true;
+        return true;
+      case 'safeguard':
+        unit.safeguard = true;
+        return true;
+      case 'bless':
+      case 'curse':
+        return this.shuffleConditionCardIntoDeck(unit, condition);
+    }
+  }
+
+  /** Shuffle a Bless/Curse card into the figure's attack-modifier deck. */
+  private shuffleConditionCardIntoDeck(unit: Unit, which: 'bless' | 'curse'): boolean {
+    const inst: ModifierCardInstance = {
+      id: `bc${(this.blessCurseSeq += 1)}`,
+      card: { kind: which },
+    };
+    if (unit.kind === 'monster') {
+      this.monsterModifierDeck = shuffleCardIntoDeck(this.monsterModifierDeck, inst);
+      return true;
+    }
+    if (unit.ownerPlayerId) {
+      const p = this.players.get(unit.ownerPlayerId);
+      if (p) {
+        p.modifierDeck = shuffleCardIntoDeck(p.modifierDeck, inst);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Reshuffle the monster modifier deck if a Null or ×2 was drawn this round. */
@@ -3925,9 +4153,11 @@ export class Room {
         pendingInfusions: [],
         consumedThisTurn: [],
         jumpAllMoves: false,
+        rangedRangeBonus: 0,
         pierceCharge: null,
         poisonCharge: false,
         advantageCharge: false,
+        advantageAbilityCharge: null,
         performedLostAction: false,
       };
       // New turn → fresh rider-source map (the previous turn's are stale).
@@ -4092,23 +4322,31 @@ export class Room {
     if (targetPlayerEntry) this.fireTrackedTrigger(targetPlayerEntry, 'attack-targets-self');
 
     // Reactive item: before drawing, offer the target a chance to spend a
-    // disadvantage-when-attacked item (e.g. Leather Armor).
+    // disadvantage-when-attacked item (e.g. Leather Armor) or a
+    // disadvantage-and-shield item (Studded Leather — its Shield rider is
+    // carried into the damage step below).
     let disadvantage = false;
+    let reactiveShieldBonus = 0;
     if (targetPlayerEntry) {
       const reactiveId = this.findReactiveDisadvantageItem(targetPlayerEntry);
       if (reactiveId) {
         const reactiveItem = getItem(reactiveId)!;
+        const comboShield =
+          reactiveItem.effect.kind === 'disadvantage-and-shield-when-attacked'
+            ? reactiveItem.effect.amount
+            : 0;
         this.pendingReactiveItem = {
           playerId: targetPlayerEntry.playerId,
           itemId: reactiveId,
           attackerName: m.name,
           targetUnitId: tgtUnit.id,
-          prompt: `${m.name} is attacking ${tgtUnit.name}. Spend ${reactiveItem.name} to give the attacker Disadvantage?`,
+          prompt: `${m.name} is attacking ${tgtUnit.name}. Spend ${reactiveItem.name} to give the attacker Disadvantage${comboShield ? ` and gain Shield ${comboShield}` : ''}?`,
         };
         const spend = yield 'await-prompt';
         this.pendingReactiveItem = null;
         if (spend) {
           disadvantage = true;
+          reactiveShieldBonus = comboShield;
           const inst = this.campaign.characters.find(
             (c) => c.id === targetPlayerEntry.activeCharacterId,
           );
@@ -4116,7 +4354,7 @@ export class Room {
             inst.spentItemIds.push(reactiveId);
           }
           this.pushEvent(
-            `${tgtUnit.name} spends ${reactiveItem.name}: ${m.name} attacks with Disadvantage.`,
+            `${tgtUnit.name} spends ${reactiveItem.name}: ${m.name} attacks with Disadvantage${comboShield ? `, Shield ${comboShield}` : ''}.`,
           );
         }
       }
@@ -4130,23 +4368,29 @@ export class Room {
     }
     disadvantage = disadvantage || rangedOnAdjacent;
 
-    // Roll the shared monster attack-modifier deck. Disadvantage draws two
-    // cards and uses the worse (lower-damage) result.
+    // Strengthen on the attacking monster grants Advantage; it cancels against
+    // any Disadvantage (they don't stack — RAW, see resolveAdvantage).
+    if (m.strengthen) this.pushEvent(`${m.name} attacks with Strengthen (Advantage).`);
+    const drawMode = resolveAdvantage(!!m.strengthen, disadvantage);
+
+    // Roll the shared monster attack-modifier deck. Advantage/Disadvantage draw
+    // two cards and use the better/worse (by damage) result.
     const firstDraw = this.drawMonsterModifier();
     let drawn = firstDraw;
     const baseAmount = attack.damage + poisonBonus(tgtUnit);
     let finalAmount = applyModifierToAttack(baseAmount, firstDraw.card);
     let advantageDraw: AdvantageDraw | undefined;
-    if (disadvantage) {
+    if (drawMode) {
       const second = this.drawMonsterModifier();
       const secondFinal = applyModifierToAttack(baseAmount, second.card);
-      const useSecond = secondFinal < finalAmount;
+      const useSecond =
+        drawMode === 'advantage' ? secondFinal > finalAmount : secondFinal < finalAmount;
       if (useSecond) {
         drawn = second;
         finalAmount = secondFinal;
       }
       advantageDraw = {
-        mode: 'disadvantage',
+        mode: drawMode,
         cards: [firstDraw.card, second.card],
         usedIndex: useSecond ? 1 : 0,
       };
@@ -4173,15 +4417,18 @@ export class Room {
 
     // Compute damage (shield/pierce) without applying hp yet, so a
     // damage-suffered trigger (Juggernaut → negate-damage) can interpose.
-    let effShield = Math.max(0, tgtUnit.shield);
+    // Studded Leather's Shield rider (spent at the pre-draw prompt) lands here.
+    let effShield = Math.max(0, tgtUnit.shield) + reactiveShieldBonus;
     if (finalAmount > 0 && targetPlayerEntry) {
       effShield += this.consumeActiveItemShield(targetPlayerEntry);
     }
-    // Reactive item: Heater Shield. Offer only if damage would still get
-    // through existing shields.
-    if (finalAmount - effShield > 0 && targetPlayerEntry) {
-      const shieldId = this.findReactiveShieldItem(targetPlayerEntry);
-      if (shieldId) {
+    // Reactive items: Heater Shield, Steel Ring, etc. Shield bonuses stack
+    // (shield-retaliate-summon.md), so offer EACH unspent reactive-shield
+    // item in turn — the player may spend any subset. Stop offering once
+    // damage is fully blocked, to avoid prompting for a wasted spend.
+    if (targetPlayerEntry) {
+      for (const shieldId of this.findReactiveShieldItems(targetPlayerEntry)) {
+        if (finalAmount - effShield <= 0) break;
         const shieldItem = getItem(shieldId)!;
         const amt =
           shieldItem.effect.kind === 'shield-when-attacked' ? shieldItem.effect.amount : 0;
@@ -4223,6 +4470,13 @@ export class Room {
     if (dmg > 0 && targetPlayerEntry) {
       const result = this.fireTrackedTrigger(targetPlayerEntry, 'damage-suffered');
       if (result.damageNegated || this.consumeNegateNextDamage(targetPlayerEntry)) dmg = 0;
+    }
+    // Ward halves the next damage suffered (rounded down), then clears.
+    if (dmg > 0 && tgtUnit.ward) {
+      const before = dmg;
+      dmg = Math.floor(dmg / 2);
+      tgtUnit.ward = false;
+      this.pushEvent(`${tgtUnit.name}'s Ward halves the damage (${before} → ${dmg}).`);
     }
     tgtUnit.hp -= dmg;
     // Battle goals: the character actually suffered attack damage.
@@ -4283,10 +4537,25 @@ export class Room {
       if (drawn.card.kind !== 'null') {
         for (const eff of attack.effects) {
           if (eff.kind !== 'apply-condition') continue;
+          if (eff.condition === 'curse') {
+            // Curse shuffles a Curse card into the figure's deck. Safeguard or
+            // curse-immunity prevents the card being added (conditions.md).
+            if (unitImmuneTo(tgtUnit, 'curse')) continue;
+            if (tgtUnit.safeguard) {
+              tgtUnit.safeguard = false;
+              this.pushEvent(`${tgtUnit.name}'s Safeguard prevents Curse.`);
+            } else if (this.grantConditionToUnit(tgtUnit, 'curse', /*isOwnTurn*/ false)) {
+              this.pushEvent(`${tgtUnit.name} is Cursed.`);
+            }
+            continue;
+          }
           if (!SUPPORTED_CONDITIONS.has(eff.condition)) continue;
           if (unitImmuneTo(tgtUnit, eff.condition)) continue;
-          applyConditionToUnit(tgtUnit, eff.condition, /*isOwnTurn*/ false);
-          this.pushEvent(`${tgtUnit.name} is ${eff.condition}ed.`);
+          if (applyConditionToUnit(tgtUnit, eff.condition, /*isOwnTurn*/ false)) {
+            this.pushEvent(`${tgtUnit.name} is ${eff.condition}ed.`);
+          } else {
+            this.pushEvent(`${tgtUnit.name}'s Safeguard prevents ${eff.condition}.`);
+          }
         }
       }
       // Retaliate: if the player target has retaliate active and the monster
@@ -4295,7 +4564,16 @@ export class Room {
       if (targetPlayer) {
         const ret = retaliateAgainst(targetPlayer, hexDistance(m.hex, tgtUnit.hex));
         if (ret) {
-          const back = applyDamage(m, ret.amount, 0);
+          // Retaliate is not an attack, so Shield does NOT reduce it
+          // (shield-retaliate-summon.md). Ward still halves it (any source).
+          let back = ret.amount;
+          if (back > 0 && m.ward) {
+            const before = back;
+            back = Math.floor(back / 2);
+            m.ward = false;
+            this.pushEvent(`${m.name}'s Ward halves the retaliate (${before} → ${back}).`);
+          }
+          m.hp -= back;
           this.pushEvent(`${tgtUnit.name} retaliates ${m.name} for ${back}.`);
           // Deferred `on-next-retaliate-this-round` XP riders fire now, then
           // the queue is cleared (a single retaliate consumes all pending).
@@ -4314,6 +4592,62 @@ export class Room {
             });
             this.units = this.units.filter((u) => u.id !== m.id);
             this.pushEvent(`${m.name} is exhausted!`);
+          }
+        }
+      }
+      // Reactive item: Heavy Mace. After being attacked (hit or miss) by an
+      // ADJACENT enemy, the target may spend the item to attack back. The
+      // counter is unaffected by Retaliate (monsters never retaliate against
+      // players in this engine, so there's nothing to skip).
+      if (
+        targetPlayer &&
+        m.hp > 0 &&
+        this.units.some((u) => u.id === m.id) &&
+        hexDistance(m.hex, tgtUnit.hex) === 1
+      ) {
+        const counterId = this.findReactiveCounterAttackItem(targetPlayer);
+        if (counterId) {
+          const counterItem = getItem(counterId)!;
+          const counterAmt =
+            counterItem.effect.kind === 'counter-attack'
+              ? counterItem.effect.amount
+              : 0;
+          this.pendingReactiveItem = {
+            playerId: targetPlayer.playerId,
+            itemId: counterId,
+            attackerName: m.name,
+            targetUnitId: tgtUnit.id,
+            prompt: `${m.name} attacked ${tgtUnit.name} from an adjacent hex. Spend ${counterItem.name} to perform Attack ${counterAmt} back?`,
+          };
+          const spend = yield 'await-prompt';
+          this.pendingReactiveItem = null;
+          if (spend) {
+            const inst = this.campaign.characters.find(
+              (c) => c.id === targetPlayer.activeCharacterId,
+            );
+            if (inst && !inst.spentItemIds.includes(counterId)) {
+              inst.spentItemIds.push(counterId);
+            }
+            // A real attack: draw from the counter-attacker's own modifier
+            // deck; the monster's shield applies as usual.
+            const counterDraw = drawModifier(targetPlayer);
+            const counterFinal = applyModifierToAttack(counterAmt, counterDraw.card);
+            const counterDealt = applyDamage(m, counterFinal, 0);
+            this.pushEvent(
+              `${tgtUnit.name} spends ${counterItem.name}: counter-attacks ${m.name} ${counterAmt} ${modifierLabel(counterDraw.card)} → ${counterFinal} (dealt ${counterDealt}).`,
+            );
+            if (m.hp <= 0) {
+              this.recordEnemyKilled(m, {
+                killerCharacterId: this.charIdForUnit(tgtUnit),
+                byAttack: true,
+                killerHex: tgtUnit.hex,
+              });
+              this.units = this.units.filter((u) => u.id !== m.id);
+              this.pushEvent(`${m.name} is exhausted!`);
+            }
+            // Visible beat so clients see the counter-attack land before the
+            // monster turn moves on.
+            yield;
           }
         }
       }
@@ -4578,6 +4912,16 @@ export class Room {
         } else {
           this.pushEvent(`${m.name} cannot reach ${focusUnit.name}.`);
         }
+      }
+
+      // Self-targeted grant-condition abilities (e.g. Psych Up's Strengthen)
+      // resolve at the end of the monster's action. Applied "on its own turn"
+      // so a turn-timed condition lasts through its next turn (and thus the
+      // next time it attacks).
+      for (const step of card.abilities) {
+        if (step.kind !== 'grant-condition') continue;
+        this.grantConditionToUnit(m, step.condition, /*isOwnTurn*/ true);
+        this.pushEvent(`${m.name} gains ${step.condition}.`);
       }
 
       // End of monster's individual turn — tick its conditions.
@@ -5230,6 +5574,16 @@ export class Room {
     }
     const item = getItem(itemId);
     if (!item) return { ok: false, reason: 'unknown_item' };
+    // Reputation-gated items (the shield badge on the card): purchasable
+    // only while the named faction's reputation is at least the printed
+    // amount. Already-owned copies stay usable regardless (items.md).
+    if (
+      item.reputationRequirement &&
+      this.sheet.reputation[item.reputationRequirement.faction] <
+        item.reputationRequirement.amount
+    ) {
+      return { ok: false, reason: 'reputation_too_low' };
+    }
     if (instance.ownedItemIds.includes(itemId)) {
       return { ok: false, reason: 'already_owned' };
     }
@@ -5336,8 +5690,19 @@ export class Room {
     actionId: string | undefined,
     targetUnitId?: string,
     targetCardId?: string,
+    targetHex?: Hex,
+    springOnUnitId?: string,
   ): { ok: true } | { ok: false; reason: string } {
-    const result = this.useItemInner(playerId, itemId, slot, actionId, targetUnitId, targetCardId);
+    const result = this.useItemInner(
+      playerId,
+      itemId,
+      slot,
+      actionId,
+      targetUnitId,
+      targetCardId,
+      targetHex,
+      springOnUnitId,
+    );
     // Battle goals (Prohibitionist): a successful use of any item — covering
     // every effect branch and the activation path — emits one item_used event.
     if (result.ok) {
@@ -5362,6 +5727,8 @@ export class Room {
     actionId: string | undefined,
     targetUnitId?: string,
     targetCardId?: string,
+    targetHex?: Hex,
+    springOnUnitId?: string,
   ): { ok: true } | { ok: false; reason: string } {
     const entry = this.players.get(playerId);
     if (!entry) return { ok: false, reason: 'no_player' };
@@ -5384,6 +5751,12 @@ export class Room {
       return { ok: false, reason: 'not_your_turn' };
     }
 
+    // Obstacle-adjacency gate (Aesther Spyglass). Obstacles aren't distinct
+    // from walls at runtime, so adjacency to a wall tile is the proxy.
+    if (item.requiresAdjacentObstacle && !this.isAdjacentToWallObstacleOrObjective(unit.hex)) {
+      return { ok: false, reason: 'not_adjacent_to_obstacle' };
+    }
+
     if (item.effect.kind === 'move-bonus') {
       if (slot === undefined || actionId === undefined) {
         return { ok: false, reason: 'item_needs_action_context' };
@@ -5401,6 +5774,16 @@ export class Room {
       ct.jumpAllMoves = true;
       for (const halfSlot of [ct.topSlot, ct.bottomSlot]) {
         for (const a of halfSlot.actions) if (a.type === 'move') a.jump = true;
+      }
+    } else if (item.effect.kind === 'ranged-range-bonus') {
+      // Telescopic Lens. Turn-scoped: every ranged attack (printed Range 2+)
+      // this turn gains +Range. Flag future attack queues (applied in
+      // engageHalf) and patch any ranged attacks already queued.
+      ct.rangedRangeBonus += item.effect.amount;
+      for (const halfSlot of [ct.topSlot, ct.bottomSlot]) {
+        for (const a of halfSlot.actions) {
+          if (a.type === 'attack' && a.range > 1) a.range += item.effect.amount;
+        }
       }
     } else if (item.effect.kind === 'shield-on-attack') {
       // Activate into the active area. Uses are consumed automatically by
@@ -5470,6 +5853,99 @@ export class Room {
       }
       ct.advantageCharge = true;
       this.pushEvent(`${instance.name} uses ${item.name}: Advantage on the next ranged attack.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'advantage-all-attacks') {
+      // Eagle-Eye Goggles: every attack of ONE attack ability draws with
+      // Advantage. Latches onto the next attack ability that resolves an
+      // attack and clears when that ability finishes (see the attack paths).
+      const hasAttack = [ct.topSlot, ct.bottomSlot].some((hs) =>
+        hs.actions.some(
+          (a) => !a.done && (a.type === 'attack' || a.type === 'attack-aoe'),
+        ),
+      );
+      if (!hasAttack) return { ok: false, reason: 'item_only_usable_during_attack' };
+      ct.advantageAbilityCharge = { boundActionId: null };
+      this.pushEvent(`${instance.name} uses ${item.name}: Advantage on all attacks of one ability.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'strengthen-allies') {
+      // Lucky Eye: grant Strengthen to yourself and every ally within range.
+      // Self is "applied on your own turn" (survives through your next turn);
+      // allies are off-turn recipients (clears at the end of their next turn).
+      const range = item.effect.range;
+      const recipients = this.units.filter(
+        (u) =>
+          u.kind === 'player' &&
+          (u.id === unit.id || hexDistance(unit.hex, u.hex) <= range),
+      );
+      for (const r of recipients) {
+        r.strengthen = true;
+        r.strengthenAppliedThisTurn = r.id === unit.id;
+      }
+      const names = recipients.map((r) => r.name).join(', ');
+      this.pushEvent(`${instance.name} uses ${item.name}: Strengthen to ${names}.`);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'destroy-or-spring-trap') {
+      // Curious Gear: destroy a trap within range, or spring it on an adjacent
+      // enemy (applying its damage to that enemy) instead.
+      if (!targetHex) return { ok: false, reason: 'item_needs_target' };
+      if (!this.isTrapHex(targetHex)) return { ok: false, reason: 'no_eligible_trap' };
+      if (hexDistance(unit.hex, targetHex) > item.effect.range) {
+        return { ok: false, reason: 'target_out_of_range' };
+      }
+      if (springOnUnitId !== undefined) {
+        const enemy = this.units.find((u) => u.id === springOnUnitId);
+        if (!enemy || enemy.kind !== 'monster' || enemy.hp <= 0) {
+          return { ok: false, reason: 'invalid_target' };
+        }
+        if (hexDistance(enemy.hex, targetHex) !== 1) {
+          return { ok: false, reason: 'enemy_not_adjacent_to_trap' };
+        }
+        this.removeTrapAt(targetHex);
+        this.pushEvent(`${instance.name} uses ${item.name}: springs the trap on ${enemy.name}.`);
+        this.sufferDamage(enemy, trapDamageFor(this.scenarioLevel), 'the sprung trap');
+      } else {
+        this.removeTrapAt(targetHex);
+        this.pushEvent(`${instance.name} uses ${item.name}: destroys a trap.`);
+      }
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'pay-to-damage-enemy') {
+      // Resonant Crystal: pay the cost (suffer self-damage), then one enemy
+      // within range suffers damage. The card's alternative cost — destroy an
+      // adjacent obstacle — is not offered: obstacles aren't modelled as
+      // destructible at runtime (they compile to indestructible walls).
+      if (targetUnitId === undefined) return { ok: false, reason: 'item_needs_target' };
+      const enemy = this.units.find((u) => u.id === targetUnitId);
+      if (!enemy || enemy.kind !== 'monster' || enemy.hp <= 0) {
+        return { ok: false, reason: 'invalid_target' };
+      }
+      if (hexDistance(unit.hex, enemy.hex) > item.effect.range) {
+        return { ok: false, reason: 'target_out_of_range' };
+      }
+      this.pushEvent(`${instance.name} uses ${item.name} on ${enemy.name}.`);
+      // The cost (self-damage) and the effect (enemy damage) each log their own
+      // line via sufferDamage, which also handles Ward and exhaustion.
+      this.sufferDamage(unit, item.effect.selfDamage, item.name);
+      this.sufferDamage(enemy, item.effect.damage, item.name);
+      instance.spentItemIds.push(itemId);
+      this.broadcastState();
+      return { ok: true };
+    } else if (item.effect.kind === 'grant-self-conditions') {
+      // Amberhollow: grant the listed positive conditions to yourself, applied
+      // "on your own turn" (turn-timed conditions persist through your next turn).
+      for (const condition of item.effect.conditions) {
+        this.grantConditionToUnit(unit, condition, /*isOwnTurn*/ true);
+      }
+      this.pushEvent(
+        `${instance.name} uses ${item.name}: gains ${item.effect.conditions.join(', ')}.`,
+      );
       instance.spentItemIds.push(itemId);
       this.broadcastState();
       return { ok: true };
@@ -6141,8 +6617,11 @@ export class Room {
           targetPriorNegativeConditions: target.conditions.map((c) => c.kind),
         });
       }
-      applyConditionToUnit(target, condition, /*isOwnTurn*/ false);
-      this.pushEvent(`${target.name} is ${condition}ed.`);
+      if (applyConditionToUnit(target, condition, /*isOwnTurn*/ false)) {
+        this.pushEvent(`${target.name} is ${condition}ed.`);
+      } else {
+        this.pushEvent(`${target.name}'s Safeguard prevents ${condition}.`);
+      }
     }
   }
 

@@ -1,11 +1,23 @@
 import { useEffect, useState } from 'react';
-import type { Card, CardSelection, PrivatePlayerState } from '@gloomfolk/shared';
+import type {
+  Card,
+  CardSelection,
+  CharacterInstance,
+  PrivatePlayerState,
+} from '@gloomfolk/shared';
+import { ALL_ITEMS } from '@gloomfolk/shared';
 import { useSocket } from '../net/useSocket.js';
 import { btn, theme } from '../theme.js';
 import { CardView } from './CardView.js';
 import { BOTTOM_BAR_HEIGHT } from './BottomBar.js';
 
-export function Hand({ you }: { you: PrivatePlayerState }) {
+export function Hand({
+  you,
+  character = null,
+}: {
+  you: PrivatePlayerState;
+  character?: CharacterInstance | null;
+}) {
   const sock = useSocket();
   const { hand, selection, discard, lost, active, shortRestPending } = you;
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -88,7 +100,7 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
       </div>
 
       {shortRestPending && pendingLost && (
-        <ShortRestModal card={pendingLost} canReroll={canReroll} />
+        <ShortRestModal card={pendingLost} canReroll={canReroll} character={character} />
       )}
 
       <p style={{ fontSize: 13, color: theme.muted, marginTop: 0 }}>
@@ -206,9 +218,35 @@ export function Hand({ you }: { you: PrivatePlayerState }) {
 
 /** Short rest resolution shown as a centered modal over a dimming overlay.
  *  The lost card is server-chosen, so the player only confirms or pays 1
- *  damage to reroll — there's nothing to dismiss, hence no backdrop close. */
-function ShortRestModal({ card, canReroll }: { card: Card; canReroll: boolean }) {
+ *  damage to reroll — there's nothing to dismiss, hence no backdrop close.
+ *  If the character brought an unspent refresh-spent-items item (Moon
+ *  Earring) and has spent items, the modal also offers to spend it now —
+ *  its printed window is "when you short rest". */
+function ShortRestModal({
+  card,
+  canReroll,
+  character,
+}: {
+  card: Card;
+  canReroll: boolean;
+  character: CharacterInstance | null;
+}) {
   const sock = useSocket();
+  const [refreshIds, setRefreshIds] = useState<string[]>([]);
+  // An unspent, brought refresh-spent-items item, if any.
+  const refresher = character?.broughtItemIds
+    .map((id) => ALL_ITEMS[id])
+    .find(
+      (item) =>
+        item &&
+        item.effect.kind === 'refresh-spent-items' &&
+        !character.spentItemIds.includes(item.id),
+    );
+  const refreshLimit =
+    refresher?.effect.kind === 'refresh-spent-items' ? refresher.effect.count : 0;
+  const spentChoices = refresher
+    ? (character?.spentItemIds ?? []).filter((id) => ALL_ITEMS[id])
+    : [];
   return (
     <div
       role="dialog"
@@ -248,6 +286,69 @@ function ShortRestModal({ card, canReroll }: { card: Card; canReroll: boolean })
         <div style={{ margin: '8px 0 14px' }}>
           <CardView card={card} />
         </div>
+        {refresher && spentChoices.length > 0 && (
+          <div
+            style={{
+              border: `1px solid ${theme.border}`,
+              borderRadius: 6,
+              padding: 10,
+              marginBottom: 14,
+            }}
+          >
+            <div style={{ fontSize: 12, marginBottom: 6 }}>
+              <strong>{refresher.name}</strong>
+              <span style={{ color: theme.muted }}>
+                {' '}
+                — refresh up to {refreshLimit} spent item{refreshLimit === 1 ? '' : 's'}:
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {spentChoices.map((id) => {
+                const picked = refreshIds.includes(id);
+                return (
+                  <button
+                    key={id}
+                    onClick={() =>
+                      setRefreshIds((cur) =>
+                        picked
+                          ? cur.filter((x) => x !== id)
+                          : cur.length < refreshLimit
+                            ? [...cur, id]
+                            : cur,
+                      )
+                    }
+                    style={{
+                      fontSize: 11,
+                      padding: '4px 8px',
+                      background: picked ? theme.accent : 'transparent',
+                      color: picked ? '#0e1612' : theme.text,
+                      border: `1px solid ${picked ? theme.accent : theme.border}`,
+                      borderRadius: 3,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {ALL_ITEMS[id]?.name ?? id}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              disabled={refreshIds.length === 0}
+              style={{ ...btn.outline(), marginTop: 8, opacity: refreshIds.length === 0 ? 0.5 : 1 }}
+              onClick={() => {
+                if (refreshIds.length === 0) return;
+                sock.send({
+                  type: 'player_short_rest_refresh',
+                  itemId: refresher.id,
+                  refreshItemIds: refreshIds,
+                });
+                setRefreshIds([]);
+              }}
+            >
+              Use {refresher.name}
+            </button>
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             style={btn.outline()}

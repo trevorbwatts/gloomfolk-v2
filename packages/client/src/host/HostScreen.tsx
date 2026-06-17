@@ -895,9 +895,9 @@ function BigModCard({
     return () => clearTimeout(t);
   }, []);
   const label = modifierLabel(card);
-  const isCrit = card.kind === 'crit';
-  const isNull = card.kind === 'null';
-  const accent = chosen ? theme.good : isCrit ? theme.accent : isNull ? theme.bad : theme.border;
+  const isGood = card.kind === 'crit' || card.kind === 'bless';
+  const isBad = card.kind === 'null' || card.kind === 'curse';
+  const accent = chosen ? theme.good : isGood ? theme.accent : isBad ? theme.bad : theme.border;
   const width = 150;
   const height = 200;
   return (
@@ -959,7 +959,7 @@ function BigModCard({
             fontWeight: 700,
             fontSize: label.length > 2 ? 44 : 64,
             fontFamily: theme.headingFont,
-            color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+            color: isGood ? theme.accent : isBad ? theme.bad : theme.text,
             filter: faded ? 'grayscale(1)' : 'none',
           }}
         >

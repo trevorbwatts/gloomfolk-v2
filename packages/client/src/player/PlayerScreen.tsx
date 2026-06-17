@@ -751,7 +751,7 @@ export function PlayerScreen() {
         {onPlayTab && me?.characterId && phase === 'card_select' && you &&
           (you.battleGoal?.chosenGoalId != null ||
             !you.battleGoal?.dealtGoalIds?.length) && (
-            <Hand you={you} />
+            <Hand you={you} character={myCharInstance ?? null} />
           )}
         {onPlayTab && me?.characterId && phase === 'placement' && gameState && playerId &&
           (you?.battleGoal?.chosenGoalId != null ||

@@ -1119,11 +1119,23 @@ export const ROAD_EVENT_CARDS: readonly EventCard[] = [
         requirement: {
           kind: 'pay-item',
           items: [
-            { printedNumber: 5 },
-            { printedNumber: 9 },
-            { printedNumber: 26 },
-            { printedNumber: 59 },
-            { printedNumber: 149 },
+            { printedNumber: 5, itemId: 'scouting-lens', name: 'Scouting Lens' },
+            { printedNumber: 9, itemId: 'focusing-rod', name: 'Focusing Rod' },
+            {
+              printedNumber: 26,
+              itemId: 'eagle-eye-goggles',
+              name: 'Eagle-Eye Goggles',
+            },
+            {
+              printedNumber: 59,
+              itemId: 'telescopic-lens',
+              name: 'Telescopic Lens',
+            },
+            {
+              printedNumber: 149,
+              itemId: 'aesther-spyglass',
+              name: 'Aesther Spyglass',
+            },
           ],
         },
         outcome: {

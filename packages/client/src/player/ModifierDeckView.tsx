@@ -95,9 +95,10 @@ function RevealCard({ draw }: { draw: ModifierDrawResult }) {
   }, []);
 
   const label = modifierLabel(draw.card);
-  const isCrit = draw.card.kind === 'crit';
-  const isNull = draw.card.kind === 'null';
-  const accent = isCrit ? theme.accent : isNull ? theme.bad : theme.border;
+  // Bless reads like a Crit (good, ×2), Curse like a Null (bad, ×0).
+  const isGood = draw.card.kind === 'crit' || draw.card.kind === 'bless';
+  const isBad = draw.card.kind === 'null' || draw.card.kind === 'curse';
+  const accent = isGood ? theme.accent : isBad ? theme.bad : theme.border;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -145,7 +146,7 @@ function RevealCard({ draw }: { draw: ModifierDrawResult }) {
               fontWeight: 700,
               fontSize: label.length > 2 ? 13 : 18,
               fontFamily: theme.headingFont,
-              color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+              color: isGood ? theme.accent : isBad ? theme.bad : theme.text,
             }}
           >
             {label}

@@ -1014,9 +1014,9 @@ function ModCardFace({
     return () => clearTimeout(t);
   }, [delay]);
   const label = modifierLabel(card);
-  const isCrit = card.kind === 'crit';
-  const isNull = card.kind === 'null';
-  const accent = chosen ? theme.good : isCrit ? theme.accent : isNull ? theme.bad : theme.border;
+  const isGood = card.kind === 'crit' || card.kind === 'bless';
+  const isBad = card.kind === 'null' || card.kind === 'curse';
+  const accent = chosen ? theme.good : isGood ? theme.accent : isBad ? theme.bad : theme.border;
   return (
     <div style={{ position: 'relative', width, height, perspective: 800, opacity: faded ? 0.4 : 1 }}>
       {chosen && (
@@ -1076,7 +1076,7 @@ function ModCardFace({
             fontWeight: 700,
             fontSize: label.length > 2 ? 20 : 32,
             fontFamily: theme.headingFont,
-            color: isCrit ? theme.accent : isNull ? theme.bad : theme.text,
+            color: isGood ? theme.accent : isBad ? theme.bad : theme.text,
             filter: faded ? 'grayscale(1)' : 'none',
           }}
         >

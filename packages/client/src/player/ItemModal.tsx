@@ -34,6 +34,8 @@ export function itemRelevantToAction(item: Item, action: PendingAction): boolean
       return action.type === 'attack-aoe' || (action.type === 'attack' && action.range <= 1);
     case 'advantage-one-attack':
       return action.type === 'attack' && action.range > 1;
+    case 'advantage-all-attacks':
+      return action.type === 'attack' || action.type === 'attack-aoe';
     default:
       return false;
   }
@@ -57,6 +59,10 @@ export function attackChargeTags(ct: NonNullable<PublicGameState['currentTurn']>
   if (ct.pierceCharge) tags.push(`Pierce ${ct.pierceCharge.amount}`);
   if (ct.poisonCharge) tags.push('Poison');
   if (ct.advantageCharge) tags.push('Advantage');
+  if (ct.advantageAbilityCharge) tags.push('Advantage (ability)');
+  // Note: a ranged range bonus (Telescopic Lens) is baked into each ranged
+  // attack's printed range, so it's shown on the row directly — no tag here
+  // (which would also wrongly appear on melee/AOE rows).
   return tags;
 }
 
@@ -158,6 +164,26 @@ export function ItemModal({
         );
   const discardedAtLevel = (level: number) =>
     (you?.discard ?? []).filter((c) => cardMatchesLevel(c.level, level));
+  // Curious Gear: live traps within range of the player, and the enemies
+  // adjacent to a given trap hex (springable targets).
+  const trapsInRange = (range: number) =>
+    myUnit == null
+      ? []
+      : gameState.tiles.filter(
+          (t) => t.kind === 'trap' && hexDistance(t, myUnit.hex) <= range,
+        );
+  const monstersAdjacentTo = (hex: { q: number; r: number }) =>
+    livingMonsters.filter((m) => hexDistance(m.hex, hex) === 1);
+  // Resonant Crystal: living enemies within range of the player.
+  const enemiesInRange = (range: number) =>
+    myUnit == null
+      ? []
+      : livingMonsters.filter((m) => hexDistance(m.hex, myUnit.hex) <= range);
+  // Aesther Spyglass gate. Obstacles aren't distinct from walls at runtime, so
+  // adjacency to a wall tile is the proxy (mirrors the server).
+  const adjacentToObstacle =
+    myUnit != null &&
+    gameState.tiles.some((t) => t.kind === 'wall' && hexDistance(t, myUnit.hex) === 1);
 
   // Sort brought items so contextually-relevant ones surface at the top, while
   // still showing every item.
@@ -252,10 +278,13 @@ export function ItemModal({
               const usable =
                 isMyTurn &&
                 !spent &&
+                (!item.requiresAdjacentObstacle || adjacentToObstacle) &&
                 (item.effect.kind === 'move-bonus'
                   ? hasPendingMove
                   : item.effect.kind === 'jump-this-turn'
                     ? true
+                    : item.effect.kind === 'ranged-range-bonus'
+                      ? !ct?.rangedRangeBonus
                     : item.effect.kind === 'shield-on-attack'
                       ? !active
                       : item.effect.kind === 'pierce-one-attack'
@@ -264,6 +293,8 @@ export function ItemModal({
                           ? hasPendingMeleeAttack && (bindingMode ? !boundItemIds.includes(id) : !ct?.poisonCharge)
                           : item.effect.kind === 'advantage-one-attack'
                             ? hasPendingRangedAttack && (bindingMode ? !boundItemIds.includes(id) : !ct?.advantageCharge)
+                            : item.effect.kind === 'advantage-all-attacks'
+                              ? hasPendingAttack && !ct?.advantageAbilityCharge
                             : item.effect.kind === 'heal-self'
                               ? !atFullHp
                               : item.effect.kind === 'heal-after-lost'
@@ -272,17 +303,35 @@ export function ItemModal({
                                   ? discardedAtLevel(item.effect.cardLevel).length > 0
                                   : item.effect.kind === 'infuse-element'
                                     ? true
-                                    : false);
+                                    : item.effect.kind === 'strengthen-allies'
+                                      ? true
+                                      : item.effect.kind === 'destroy-or-spring-trap'
+                                        ? trapsInRange(item.effect.range).length > 0
+                                        : item.effect.kind === 'pay-to-damage-enemy'
+                                          ? enemiesInRange(item.effect.range).length > 0
+                                          : item.effect.kind === 'grant-self-conditions'
+                                            ? true
+                                            : false);
 
               const buttonLabel = spent
                 ? 'Spent'
                 : active
                   ? `Active · ${active.usesRemaining}`
+                  : item.requiresAdjacentObstacle && !adjacentToObstacle
+                    ? 'Need Obstacle'
                   : item.effect.kind === 'shield-on-attack'
                     ? 'Activate'
                     : item.effect.kind === 'disadvantage-when-attacked' ||
-                        item.effect.kind === 'shield-when-attacked'
+                        item.effect.kind === 'shield-when-attacked' ||
+                        item.effect.kind === 'disadvantage-and-shield-when-attacked' ||
+                        item.effect.kind === 'counter-attack'
                       ? 'Reactive'
+                      : item.effect.kind === 'refresh-spent-items'
+                        ? 'At Short Rest'
+                      : item.effect.kind === 'advantage-all-attacks'
+                        ? ct?.advantageAbilityCharge ? 'Armed' : 'Use'
+                      : item.effect.kind === 'ranged-range-bonus'
+                        ? ct?.rangedRangeBonus ? 'Active' : 'Use'
                       : item.effect.kind === 'pierce-one-attack'
                         ? bindingMode
                           ? boundItemIds.includes(id) ? 'Attached' : 'Use'
@@ -309,7 +358,15 @@ export function ItemModal({
                                     : 'Empty'
                                   : item.effect.kind === 'infuse-element'
                                     ? 'Infuse'
-                                    : 'Use';
+                                    : item.effect.kind === 'strengthen-allies'
+                                      ? 'Strengthen'
+                                      : item.effect.kind === 'destroy-or-spring-trap'
+                                        ? 'Aim'
+                                        : item.effect.kind === 'pay-to-damage-enemy'
+                                          ? 'Aim'
+                                          : item.effect.kind === 'grant-self-conditions'
+                                            ? 'Use'
+                                            : 'Use';
 
               const aiming = aimingItemId === id;
               const pickTargets =
@@ -387,7 +444,9 @@ export function ItemModal({
                           }
                         } else if (
                           item.effect.kind === 'heal-after-lost' ||
-                          item.effect.kind === 'retrieve-discarded-card'
+                          item.effect.kind === 'retrieve-discarded-card' ||
+                          item.effect.kind === 'destroy-or-spring-trap' ||
+                          item.effect.kind === 'pay-to-damage-enemy'
                         ) {
                           setAimingItemId(aiming ? null : id);
                           setSelectedCardId(null);
@@ -480,6 +539,122 @@ export function ItemModal({
                             {m.name} ({m.hp})
                           </button>
                         ))
+                      )}
+                    </div>
+                  )}
+
+                  {aiming && item.effect.kind === 'destroy-or-spring-trap' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                      {trapsInRange(item.effect.range).length === 0 ? (
+                        <span style={{ fontSize: 11, color: theme.muted }}>No traps in range.</span>
+                      ) : (
+                        trapsInRange(item.effect.range).map((t) => {
+                          const adj = monstersAdjacentTo(t);
+                          return (
+                            <div
+                              key={`${t.q},${t.r}`}
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                alignItems: 'center',
+                                gap: 6,
+                              }}
+                            >
+                              <span style={{ fontSize: 11, color: theme.muted, minWidth: 70 }}>
+                                Trap ({t.q},{t.r})
+                              </span>
+                              <button
+                                onClick={() => {
+                                  sock.send({
+                                    type: 'player_use_item',
+                                    itemId: id,
+                                    targetHex: { q: t.q, r: t.r },
+                                  });
+                                  setAimingItemId(null);
+                                  onClose();
+                                }}
+                                style={{
+                                  fontSize: 11,
+                                  padding: '4px 8px',
+                                  background: 'transparent',
+                                  color: theme.text,
+                                  border: `1px solid ${theme.border}`,
+                                  borderRadius: 3,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                Destroy
+                              </button>
+                              {adj.map((m) => (
+                                <button
+                                  key={m.id}
+                                  onClick={() => {
+                                    sock.send({
+                                      type: 'player_use_item',
+                                      itemId: id,
+                                      targetHex: { q: t.q, r: t.r },
+                                      springOnUnitId: m.id,
+                                    });
+                                    setAimingItemId(null);
+                                    onClose();
+                                  }}
+                                  style={{
+                                    fontSize: 11,
+                                    padding: '4px 8px',
+                                    background: 'transparent',
+                                    color: theme.accent,
+                                    border: `1px solid ${theme.accent}`,
+                                    borderRadius: 3,
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  Spring on {m.name}
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {aiming && item.effect.kind === 'pay-to-damage-enemy' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                      {enemiesInRange(item.effect.range).length === 0 ? (
+                        <span style={{ fontSize: 11, color: theme.muted }}>No enemies in range.</span>
+                      ) : (
+                        <>
+                          <span style={{ fontSize: 11, color: theme.muted }}>
+                            Suffer {item.effect.selfDamage} to deal {item.effect.damage} to:
+                          </span>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {enemiesInRange(item.effect.range).map((m) => (
+                              <button
+                                key={m.id}
+                                onClick={() => {
+                                  sock.send({
+                                    type: 'player_use_item',
+                                    itemId: id,
+                                    targetUnitId: m.id,
+                                  });
+                                  setAimingItemId(null);
+                                  onClose();
+                                }}
+                                style={{
+                                  fontSize: 11,
+                                  padding: '4px 8px',
+                                  background: 'transparent',
+                                  color: theme.text,
+                                  border: `1px solid ${theme.border}`,
+                                  borderRadius: 3,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {m.name} ({m.hp})
+                              </button>
+                            ))}
+                          </div>
+                        </>
                       )}
                     </div>
                   )}

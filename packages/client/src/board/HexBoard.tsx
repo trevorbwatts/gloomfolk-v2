@@ -903,10 +903,17 @@ export function HexBoard({
                   </text>
                 </>
               )}
-              {(u.conditions.length > 0 || u.invisible) && (() => {
+              {(u.conditions.length > 0 ||
+                u.invisible ||
+                u.strengthen ||
+                u.ward ||
+                u.safeguard) && (() => {
                 const items = [
                   ...u.conditions.map((c) => c.kind),
                   ...(u.invisible ? (['invisible'] as const) : []),
+                  ...(u.strengthen ? (['strengthen'] as const) : []),
+                  ...(u.ward ? (['ward'] as const) : []),
+                  ...(u.safeguard ? (['safeguard'] as const) : []),
                 ];
                 // Each condition is shown as a circular badge that echoes the
                 // standee-number motif (dark fill, white outline) so it reads
